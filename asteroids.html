@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Astervoids</title>
+    <style>
+        /* ============================================
+           STYLES - Minimal CSS for game presentation
+           ============================================ */
+        
+        /* Reset and base styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* Dark background to match classic arcade feel */
+        body {
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        /* Game container for canvas and HUD positioning */
+        #game-container {
+            position: relative;
+        }
+
+        /* Canvas with subtle border */
+        #game {
+            display: block;
+            border: 2px solid #333;
+        }
+
+        /* HUD overlay for score, lives, and wave info */
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            justify-content: space-between;
+            color: #fff;
+            font-size: 18px;
+            pointer-events: none;
+        }
+
+        /* Instructions shown at bottom */
+        #instructions {
+            position: absolute;
+            bottom: 10px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- Game Container: holds canvas and overlay elements -->
+    <div id="game-container">
+        <canvas id="game" width="800" height="600"></canvas>
+        
+        <!-- HUD: displays game stats -->
+        <div id="hud">
+            <span id="score">Score: 0</span>
+            <span id="wave">Wave: 1</span>
+            <span id="lives">Lives: 3</span>
+        </div>
+        
+        <!-- Instructions: control hints -->
+        <div id="instructions">
+            Arrow Keys or WASD to move | SPACE to shoot | ENTER to restart
+        </div>
+    </div>
+
+    <script>
+    /* ================================================================
+       ASTERVOIDS GAME
+       A single-file HTML5 Canvas implementation following best practices
+       ================================================================ */
+
+    // ============================================
+    // SECTION 1: CONFIGURATION
+    // All tunable game parameters in one place
+    // ============================================
+    const CONFIG = {
+        // Ship settings
+        SHIP_SIZE: 20,              // Ship triangle size in pixels
+        SHIP_THRUST: 0.15,          // Acceleration when thrusting
+        SHIP_FRICTION: 0.99,        // Velocity decay (1 = no friction)
+        SHIP_TURN_SPEED: 0.08,      // Rotation speed in radians per frame
+        SHIP_MAX_SPEED: 8,          // Maximum velocity magnitude
+        
+        // Bullet settings
+        BULLET_SPEED: 10,           // Bullet travel speed
+        BULLET_LIFETIME: 60,        // Frames before bullet expires
+        BULLET_RADIUS: 2,           // Bullet size for collision
+        MAX_BULLETS: 10,            // Maximum bullets on screen
+        SHOOT_COOLDOWN: 10,         // Frames between shots
+        
+        // Asteroid settings
+        ASTEROID_BASE_COUNT: 4,     // Starting astervoids in wave 1
+        ASTEROID_BASE_SPEED: 1.5,   // Base asteroid speed
+        ASTEROID_SPEED_VARIANCE: 1, // Random speed variation
+        ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
+        ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
+        MIN_ASTEROID_RADIUS: 15,    // Astervoids smaller than this won't split
+        INITIAL_ASTEROID_RADIUS: 50,// Starting asteroid size
+        
+        // Asteroid splitting
+        SPLIT_COUNT: 2,             // Always split into 2 pieces
+        MIN_SPLIT_RATIO: 0.1,       // Smallest piece is at least 10% of original
+        
+        // Scoring (points awarded based on asteroid size)
+        POINTS_LARGE: 20,           // Points for large astervoids
+        POINTS_MEDIUM: 50,          // Points for medium astervoids
+        POINTS_SMALL: 100,          // Points for small astervoids
+        
+        // Game settings
+        STARTING_LIVES: 3,          // Lives at game start
+        INVULNERABILITY_TIME: 180,  // Frames of invulnerability after respawn
+        WAVE_DELAY: 120,            // Frames to wait between waves
+        
+        // Wave progression
+        WAVE_ASTEROID_INCREMENT: 1, // Extra astervoids per wave
+        WAVE_SPEED_MULTIPLIER: 1.1, // Speed increase per wave
+        MAX_SPEED_MULTIPLIER: 2.0,  // Cap on speed scaling
+        
+        // Visual settings
+        STROKE_COLOR: '#fff',       // Primary drawing color
+        THRUST_COLOR: '#f80',       // Thrust flame color
+        INVULN_BLINK_RATE: 10       // Blink frequency when invulnerable
+    };
+
+    // ============================================
+    // SECTION 2: UTILITY FUNCTIONS
+    // Helper functions used throughout the game
+    // ============================================
+
+    /**
+     * Wraps a position to the opposite side of the canvas
+     * Creates the classic "wrap-around" effect
+     * @param {number} value - Current position
+     * @param {number} max - Canvas dimension
+     * @returns {number} Wrapped position
+     */
+    function wrapValue(value, max) {
+        if (value < 0) return max + value;
+        if (value > max) return value - max;
+        return value;
+    }
+
+    /**
+     * Calculates distance between two points
+     * @param {number} x1, y1 - First point
+     * @param {number} x2, y2 - Second point
+     * @returns {number} Distance
+     */
+    function distance(x1, y1, x2, y2) {
+        return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+    }
+
+    /**
+     * Generates a random number between min and max
+     * @param {number} min - Minimum value
+     * @param {number} max - Maximum value
+     * @returns {number} Random value in range
+     */
+    function randomRange(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    /**
+     * Point-in-polygon test using ray casting algorithm
+     * Used for collision detection with irregular asteroid shapes
+     * @param {object} point - {x, y} coordinates
+     * @param {array} vertices - Array of {x, y} polygon vertices
+     * @returns {boolean} True if point is inside polygon
+     */
+    function pointInPolygon(point, vertices) {
+        let inside = false;
+        const n = vertices.length;
+        
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = vertices[i].x, yi = vertices[i].y;
+            const xj = vertices[j].x, yj = vertices[j].y;
+            
+            // Check if ray from point crosses this edge
+            if (((yi > point.y) !== (yj > point.y)) &&
+                (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)) {
+                inside = !inside;
+            }
+        }
+        
+        return inside;
+    }
+
+    /**
+     * Circle-to-polygon collision detection
+     * Tests if a circle intersects with a polygon
+     * @param {object} circle - {x, y, radius}
+     * @param {array} vertices - Array of {x, y} polygon vertices
+     * @returns {boolean} True if collision detected
+     */
+    function circlePolygonCollision(circle, vertices) {
+        // First check if circle center is inside polygon
+        if (pointInPolygon({x: circle.x, y: circle.y}, vertices)) {
+            return true;
+        }
+        
+        // Then check if circle intersects any polygon edge
+        const n = vertices.length;
+        for (let i = 0; i < n; i++) {
+            const v1 = vertices[i];
+            const v2 = vertices[(i + 1) % n];
+            
+            // Find closest point on edge to circle center
+            const edgeX = v2.x - v1.x;
+            const edgeY = v2.y - v1.y;
+            const edgeLength = Math.sqrt(edgeX * edgeX + edgeY * edgeY);
+            
+            // Normalize edge vector
+            const edgeNormX = edgeX / edgeLength;
+            const edgeNormY = edgeY / edgeLength;
+            
+            // Vector from v1 to circle center
+            const toCircleX = circle.x - v1.x;
+            const toCircleY = circle.y - v1.y;
+            
+            // Project onto edge
+            let projection = toCircleX * edgeNormX + toCircleY * edgeNormY;
+            projection = Math.max(0, Math.min(edgeLength, projection));
+            
+            // Closest point on edge
+            const closestX = v1.x + edgeNormX * projection;
+            const closestY = v1.y + edgeNormY * projection;
+            
+            // Check distance from closest point to circle center
+            if (distance(closestX, closestY, circle.x, circle.y) <= circle.radius) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    // ============================================
+    // SECTION 3: GAME ENTITY CLASSES
+    // Ship, Asteroid, and Bullet definitions
+    // ============================================
+
+    /**
+     * Ship Class
+     * The player-controlled spacecraft
+     */
+    class Ship {
+        constructor(x, y) {
+            this.x = x;                    // X position
+            this.y = y;                    // Y position
+            this.angle = -Math.PI / 2;     // Facing up initially
+            this.velocityX = 0;            // Horizontal velocity
+            this.velocityY = 0;            // Vertical velocity
+            this.thrusting = false;        // Is thrust active?
+            this.invulnerable = 0;         // Invulnerability frames remaining
+            this.shootCooldown = 0;        // Frames until can shoot again
+        }
+
+        /**
+         * Update ship state based on physics and input
+         * @param {object} canvas - Canvas element for wrapping
+         */
+        update(canvas) {
+            // Apply friction to slow down gradually
+            this.velocityX *= CONFIG.SHIP_FRICTION;
+            this.velocityY *= CONFIG.SHIP_FRICTION;
+            
+            // Apply thrust in facing direction
+            if (this.thrusting) {
+                this.velocityX += Math.cos(this.angle) * CONFIG.SHIP_THRUST;
+                this.velocityY += Math.sin(this.angle) * CONFIG.SHIP_THRUST;
+            }
+            
+            // Limit to max speed
+            const speed = Math.sqrt(this.velocityX ** 2 + this.velocityY ** 2);
+            if (speed > CONFIG.SHIP_MAX_SPEED) {
+                this.velocityX = (this.velocityX / speed) * CONFIG.SHIP_MAX_SPEED;
+                this.velocityY = (this.velocityY / speed) * CONFIG.SHIP_MAX_SPEED;
+            }
+            
+            // Update position
+            this.x += this.velocityX;
+            this.y += this.velocityY;
+            
+            // Wrap around screen edges
+            this.x = wrapValue(this.x, canvas.width);
+            this.y = wrapValue(this.y, canvas.height);
+            
+            // Decrement timers
+            if (this.invulnerable > 0) this.invulnerable--;
+            if (this.shootCooldown > 0) this.shootCooldown--;
+        }
+
+        /**
+         * Get the ship's triangle vertices in world coordinates
+         * Used for both rendering and collision detection
+         * @returns {array} Array of {x, y} vertices
+         */
+        getVertices() {
+            const size = CONFIG.SHIP_SIZE;
+            return [
+                // Nose (front point)
+                {
+                    x: this.x + Math.cos(this.angle) * size,
+                    y: this.y + Math.sin(this.angle) * size
+                },
+                // Left wing
+                {
+                    x: this.x + Math.cos(this.angle + Math.PI * 0.8) * size * 0.7,
+                    y: this.y + Math.sin(this.angle + Math.PI * 0.8) * size * 0.7
+                },
+                // Right wing
+                {
+                    x: this.x + Math.cos(this.angle - Math.PI * 0.8) * size * 0.7,
+                    y: this.y + Math.sin(this.angle - Math.PI * 0.8) * size * 0.7
+                }
+            ];
+        }
+
+        /**
+         * Draw the ship using vector lines
+         * @param {CanvasRenderingContext2D} ctx - Canvas context
+         */
+        draw(ctx) {
+            // Skip drawing if blinking during invulnerability
+            if (this.invulnerable > 0 && 
+                Math.floor(this.invulnerable / CONFIG.INVULN_BLINK_RATE) % 2 === 0) {
+                return;
+            }
+            
+            const vertices = this.getVertices();
+            
+            // Draw ship triangle
+            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(vertices[0].x, vertices[0].y);
+            ctx.lineTo(vertices[1].x, vertices[1].y);
+            ctx.lineTo(vertices[2].x, vertices[2].y);
+            ctx.closePath();
+            ctx.stroke();
+            
+            // Draw thrust flame when accelerating
+            if (this.thrusting) {
+                ctx.strokeStyle = CONFIG.THRUST_COLOR;
+                ctx.beginPath();
+                
+                // Flame base points (between wings)
+                const flameBase1 = {
+                    x: this.x + Math.cos(this.angle + Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4,
+                    y: this.y + Math.sin(this.angle + Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4
+                };
+                const flameBase2 = {
+                    x: this.x + Math.cos(this.angle - Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4,
+                    y: this.y + Math.sin(this.angle - Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4
+                };
+                
+                // Flame tip (flickers randomly)
+                const flameLength = CONFIG.SHIP_SIZE * (0.8 + Math.random() * 0.4);
+                const flameTip = {
+                    x: this.x + Math.cos(this.angle + Math.PI) * flameLength,
+                    y: this.y + Math.sin(this.angle + Math.PI) * flameLength
+                };
+                
+                ctx.moveTo(flameBase1.x, flameBase1.y);
+                ctx.lineTo(flameTip.x, flameTip.y);
+                ctx.lineTo(flameBase2.x, flameBase2.y);
+                ctx.stroke();
+            }
+        }
+
+        /**
+         * Fire a bullet from the ship's nose
+         * @returns {Bullet|null} New bullet or null if on cooldown
+         */
+        shoot() {
+            if (this.shootCooldown > 0) return null;
+            
+            this.shootCooldown = CONFIG.SHOOT_COOLDOWN;
+            
+            // Spawn bullet at ship's nose
+            const nose = this.getVertices()[0];
+            return new Bullet(
+                nose.x,
+                nose.y,
+                Math.cos(this.angle) * CONFIG.BULLET_SPEED,
+                Math.sin(this.angle) * CONFIG.BULLET_SPEED
+            );
+        }
+
+        /**
+         * Reset ship to center of screen
+         * @param {object} canvas - Canvas element
+         */
+        reset(canvas) {
+            this.x = canvas.width / 2;
+            this.y = canvas.height / 2;
+            this.angle = -Math.PI / 2;
+            this.velocityX = 0;
+            this.velocityY = 0;
+            this.invulnerable = CONFIG.INVULNERABILITY_TIME;
+        }
+    }
+
+    /**
+     * Asteroid Class
+     * Space rocks that the player must destroy
+     */
+    class Asteroid {
+        constructor(x, y, radius, velocityX, velocityY) {
+            this.x = x;                    // X position
+            this.y = y;                    // Y position
+            this.radius = radius;          // Size (collision radius)
+            this.velocityX = velocityX;    // Horizontal velocity
+            this.velocityY = velocityY;    // Vertical velocity
+            this.angle = Math.random() * Math.PI * 2;  // Random rotation
+            this.rotationSpeed = randomRange(-0.02, 0.02);  // Spin rate
+            this.vertices = this.generateShape();  // Irregular polygon
+        }
+
+        /**
+         * Generate an irregular polygon shape
+         * Creates the classic jagged asteroid look
+         * @returns {array} Array of {x, y} vertices (relative to center)
+         */
+        generateShape() {
+            const vertices = [];
+            const vertexCount = CONFIG.ASTEROID_VERTICES;
+            
+            for (let i = 0; i < vertexCount; i++) {
+                const angle = (i / vertexCount) * Math.PI * 2;
+                // Vary radius for jagged appearance
+                const variance = 1 - CONFIG.ASTEROID_JAGGEDNESS + 
+                                 Math.random() * CONFIG.ASTEROID_JAGGEDNESS * 2;
+                vertices.push({
+                    angle: angle,
+                    distance: this.radius * variance
+                });
+            }
+            
+            return vertices;
+        }
+
+        /**
+         * Get vertices in world coordinates (accounting for position and rotation)
+         * @returns {array} Array of {x, y} world-space vertices
+         */
+        getWorldVertices() {
+            return this.vertices.map(v => ({
+                x: this.x + Math.cos(v.angle + this.angle) * v.distance,
+                y: this.y + Math.sin(v.angle + this.angle) * v.distance
+            }));
+        }
+
+        /**
+         * Update asteroid position and rotation
+         * @param {object} canvas - Canvas element for wrapping
+         */
+        update(canvas) {
+            // Move asteroid
+            this.x += this.velocityX;
+            this.y += this.velocityY;
+            
+            // Rotate
+            this.angle += this.rotationSpeed;
+            
+            // Wrap around screen edges
+            this.x = wrapValue(this.x, canvas.width);
+            this.y = wrapValue(this.y, canvas.height);
+        }
+
+        /**
+         * Draw asteroid as a vector polygon
+         * @param {CanvasRenderingContext2D} ctx - Canvas context
+         */
+        draw(ctx) {
+            const worldVerts = this.getWorldVertices();
+            
+            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(worldVerts[0].x, worldVerts[0].y);
+            
+            for (let i = 1; i < worldVerts.length; i++) {
+                ctx.lineTo(worldVerts[i].x, worldVerts[i].y);
+            }
+            
+            ctx.closePath();
+            ctx.stroke();
+        }
+
+        /**
+         * Get points awarded for destroying this asteroid
+         * Smaller astervoids = more points
+         * @returns {number} Point value
+         */
+        getPoints() {
+            if (this.radius >= 40) return CONFIG.POINTS_LARGE;
+            if (this.radius >= 25) return CONFIG.POINTS_MEDIUM;
+            return CONFIG.POINTS_SMALL;
+        }
+    }
+
+    /**
+     * Bullet Class
+     * Projectiles fired by the ship
+     */
+    class Bullet {
+        constructor(x, y, velocityX, velocityY) {
+            this.x = x;                    // X position
+            this.y = y;                    // Y position
+            this.velocityX = velocityX;    // Horizontal velocity
+            this.velocityY = velocityY;    // Vertical velocity
+            this.lifetime = CONFIG.BULLET_LIFETIME;  // Frames until expiry
+        }
+
+        /**
+         * Update bullet position and lifetime
+         * @param {object} canvas - Canvas element for wrapping
+         */
+        update(canvas) {
+            this.x += this.velocityX;
+            this.y += this.velocityY;
+            
+            // Wrap around screen edges
+            this.x = wrapValue(this.x, canvas.width);
+            this.y = wrapValue(this.y, canvas.height);
+            
+            // Decrement lifetime
+            this.lifetime--;
+        }
+
+        /**
+         * Draw bullet as a small circle
+         * @param {CanvasRenderingContext2D} ctx - Canvas context
+         */
+        draw(ctx) {
+            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, CONFIG.BULLET_RADIUS, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        /**
+         * Check if bullet has expired
+         * @returns {boolean} True if bullet should be removed
+         */
+        isExpired() {
+            return this.lifetime <= 0;
+        }
+    }
+
+    // ============================================
+    // SECTION 4: GAME STATE
+    // Variables tracking current game status
+    // ============================================
+
+    // Canvas and context references
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // HUD element references
+    const scoreDisplay = document.getElementById('score');
+    const waveDisplay = document.getElementById('wave');
+    const livesDisplay = document.getElementById('lives');
+
+    // Game state object
+    const game = {
+        ship: null,           // Player ship instance
+        astervoids: [],        // Active astervoids
+        bullets: [],          // Active bullets
+        score: 0,             // Current score
+        lives: 0,             // Remaining lives
+        wave: 0,              // Current wave number
+        state: 'playing',     // 'playing', 'respawning', 'gameover', 'waveDelay'
+        waveDelayTimer: 0,    // Countdown for wave transition
+        speedMultiplier: 1    // Current speed scaling
+    };
+
+    // Input tracking
+    const keys = {};
+
+    // ============================================
+    // SECTION 5: GAME FUNCTIONS
+    // Core game logic and mechanics
+    // ============================================
+
+    /**
+     * Initialize or reset the game to starting state
+     */
+    function init() {
+        game.ship = new Ship(canvas.width / 2, canvas.height / 2);
+        game.astervoids = [];
+        game.bullets = [];
+        game.score = 0;
+        game.lives = CONFIG.STARTING_LIVES;
+        game.wave = 0;
+        game.state = 'playing';
+        game.speedMultiplier = 1;
+        
+        // Start first wave
+        spawnWave();
+        
+        updateHUD();
+    }
+
+    /**
+     * Spawn a new wave of astervoids
+     * Astervoids spawn away from the ship
+     */
+    function spawnWave() {
+        game.wave++;
+        
+        // Calculate number of astervoids for this wave
+        const asteroidCount = CONFIG.ASTEROID_BASE_COUNT + 
+                              (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
+        
+        // Increase speed multiplier (capped)
+        game.speedMultiplier = Math.min(
+            CONFIG.MAX_SPEED_MULTIPLIER,
+            1 + (game.wave - 1) * (CONFIG.WAVE_SPEED_MULTIPLIER - 1)
+        );
+        
+        // Spawn astervoids at random positions away from ship
+        for (let i = 0; i < asteroidCount; i++) {
+            spawnAsteroidAwayFromShip();
+        }
+        
+        updateHUD();
+    }
+
+    /**
+     * Spawn a single asteroid at a safe distance from the ship
+     */
+    function spawnAsteroidAwayFromShip() {
+        const minDistance = 150;  // Minimum spawn distance from ship
+        let x, y;
+        
+        // Keep trying until we find a safe spawn point
+        do {
+            x = Math.random() * canvas.width;
+            y = Math.random() * canvas.height;
+        } while (distance(x, y, game.ship.x, game.ship.y) < minDistance);
+        
+        // Random velocity direction
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (CONFIG.ASTEROID_BASE_SPEED + 
+                       Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE) * 
+                      game.speedMultiplier;
+        
+        game.astervoids.push(new Asteroid(
+            x, y,
+            CONFIG.INITIAL_ASTEROID_RADIUS,
+            Math.cos(angle) * speed,
+            Math.sin(angle) * speed
+        ));
+    }
+
+    /**
+     * Split an asteroid into two smaller pieces
+     * Implements volume conservation with 10% minimum size rule
+     * @param {Asteroid} asteroid - The asteroid to split
+     */
+    function splitAsteroid(asteroid) {
+        // Add points
+        game.score += asteroid.getPoints();
+        
+        // Don't split if too small
+        if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
+            return;  // Asteroid is destroyed, no children spawned
+        }
+        
+        // Calculate child sizes using volume conservation
+        // Area ∝ r², so r1² + r2² = R² for conservation
+        // We use splitRatio to determine how area is divided
+        const splitRatio = randomRange(CONFIG.MIN_SPLIT_RATIO, 1 - CONFIG.MIN_SPLIT_RATIO);
+        
+        // Calculate child radii: r = R * sqrt(ratio)
+        const radius1 = asteroid.radius * Math.sqrt(splitRatio);
+        const radius2 = asteroid.radius * Math.sqrt(1 - splitRatio);
+        
+        // Only spawn children that are above minimum size
+        const children = [];
+        
+        if (radius1 >= CONFIG.MIN_ASTEROID_RADIUS) {
+            children.push(radius1);
+        }
+        if (radius2 >= CONFIG.MIN_ASTEROID_RADIUS) {
+            children.push(radius2);
+        }
+        
+        // Spawn child astervoids
+        children.forEach((childRadius, index) => {
+            // Perpendicular direction to original velocity (spreads children apart)
+            const spreadAngle = Math.atan2(asteroid.velocityY, asteroid.velocityX) + 
+                               (index === 0 ? Math.PI / 2 : -Math.PI / 2);
+            
+            // Slightly faster than parent, with some randomness
+            const speed = Math.sqrt(asteroid.velocityX ** 2 + asteroid.velocityY ** 2) * 1.2;
+            const angle = spreadAngle + randomRange(-0.5, 0.5);
+            
+            game.astervoids.push(new Asteroid(
+                asteroid.x,
+                asteroid.y,
+                childRadius,
+                Math.cos(angle) * speed,
+                Math.sin(angle) * speed
+            ));
+        });
+        
+        updateHUD();
+    }
+
+    /**
+     * Handle player input each frame
+     */
+    function handleInput() {
+        if (game.state === 'gameover') {
+            // Check for restart
+            if (keys['Enter']) {
+                init();
+            }
+            return;
+        }
+        
+        if (game.state !== 'playing' && game.state !== 'waveDelay') return;
+        
+        // Rotation (left/right arrow or A/D)
+        if (keys['ArrowLeft'] || keys['KeyA']) {
+            game.ship.angle -= CONFIG.SHIP_TURN_SPEED;
+        }
+        if (keys['ArrowRight'] || keys['KeyD']) {
+            game.ship.angle += CONFIG.SHIP_TURN_SPEED;
+        }
+        
+        // Thrust (up arrow or W)
+        game.ship.thrusting = keys['ArrowUp'] || keys['KeyW'];
+        
+        // Shoot (space)
+        if (keys['Space'] && game.bullets.length < CONFIG.MAX_BULLETS) {
+            const bullet = game.ship.shoot();
+            if (bullet) {
+                game.bullets.push(bullet);
+            }
+        }
+    }
+
+    /**
+     * Check all collisions between game entities
+     */
+    function checkCollisions() {
+        // Bullet vs Asteroid collisions
+        for (let i = game.bullets.length - 1; i >= 0; i--) {
+            const bullet = game.bullets[i];
+            
+            for (let j = game.astervoids.length - 1; j >= 0; j--) {
+                const asteroid = game.astervoids[j];
+                
+                // Circle-to-polygon collision for bullet vs asteroid
+                const bulletCircle = {
+                    x: bullet.x,
+                    y: bullet.y,
+                    radius: CONFIG.BULLET_RADIUS
+                };
+                
+                if (circlePolygonCollision(bulletCircle, asteroid.getWorldVertices())) {
+                    // Remove bullet
+                    game.bullets.splice(i, 1);
+                    
+                    // Remove asteroid and potentially spawn children
+                    game.astervoids.splice(j, 1);
+                    splitAsteroid(asteroid);
+                    
+                    break;  // Bullet can only hit one asteroid
+                }
+            }
+        }
+        
+        // Ship vs Asteroid collisions (only if not invulnerable)
+        if (game.ship.invulnerable <= 0 && game.state === 'playing') {
+            const shipVertices = game.ship.getVertices();
+            
+            for (const asteroid of game.astervoids) {
+                const asteroidVerts = asteroid.getWorldVertices();
+                
+                // Check if any ship vertex is inside asteroid
+                for (const vertex of shipVertices) {
+                    if (pointInPolygon(vertex, asteroidVerts)) {
+                        handleShipHit();
+                        return;
+                    }
+                }
+                
+                // Check if any asteroid vertex is inside ship triangle
+                for (const vertex of asteroidVerts) {
+                    if (pointInPolygon(vertex, shipVertices)) {
+                        handleShipHit();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle ship being hit by asteroid
+     */
+    function handleShipHit() {
+        game.lives--;
+        updateHUD();
+        
+        if (game.lives <= 0) {
+            game.state = 'gameover';
+        } else {
+            // Respawn ship at center with invulnerability
+            game.ship.reset(canvas);
+        }
+    }
+
+    /**
+     * Update HUD display elements
+     */
+    function updateHUD() {
+        scoreDisplay.textContent = `Score: ${game.score}`;
+        waveDisplay.textContent = `Wave: ${game.wave}`;
+        livesDisplay.textContent = `Lives: ${game.lives}`;
+    }
+
+    /**
+     * Draw centered text message on screen
+     * @param {string} text - Message to display
+     * @param {number} y - Y position
+     * @param {number} size - Font size
+     */
+    function drawCenteredText(text, y, size = 32) {
+        ctx.fillStyle = CONFIG.STROKE_COLOR;
+        ctx.font = `${size}px 'Courier New', monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(text, canvas.width / 2, y);
+    }
+
+    // ============================================
+    // SECTION 6: GAME LOOP
+    // Main update and render cycle
+    // ============================================
+
+    /**
+     * Main game loop - called every frame
+     */
+    function gameLoop() {
+        // --- UPDATE PHASE ---
+        
+        // Handle player input
+        handleInput();
+        
+        // Update game state based on current state
+        if (game.state === 'playing' || game.state === 'waveDelay') {
+            // Update ship
+            game.ship.update(canvas);
+            
+            // Update astervoids
+            game.astervoids.forEach(asteroid => asteroid.update(canvas));
+            
+            // Update bullets and remove expired ones
+            game.bullets = game.bullets.filter(bullet => {
+                bullet.update(canvas);
+                return !bullet.isExpired();
+            });
+            
+            // Check collisions
+            checkCollisions();
+            
+            // Check for wave completion
+            if (game.astervoids.length === 0 && game.state === 'playing') {
+                game.state = 'waveDelay';
+                game.waveDelayTimer = CONFIG.WAVE_DELAY;
+            }
+            
+            // Handle wave delay countdown
+            if (game.state === 'waveDelay') {
+                game.waveDelayTimer--;
+                if (game.waveDelayTimer <= 0) {
+                    spawnWave();
+                    game.state = 'playing';
+                }
+            }
+        }
+        
+        // --- RENDER PHASE ---
+        
+        // Clear canvas
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw game entities
+        game.astervoids.forEach(asteroid => asteroid.draw(ctx));
+        game.bullets.forEach(bullet => bullet.draw(ctx));
+        game.ship.draw(ctx);
+        
+        // Draw state-specific overlays
+        if (game.state === 'waveDelay') {
+            drawCenteredText(`WAVE ${game.wave + 1}`, canvas.height / 2, 48);
+        }
+        
+        if (game.state === 'gameover') {
+            drawCenteredText('GAME OVER', canvas.height / 2 - 40, 48);
+            drawCenteredText(`Final Score: ${game.score}`, canvas.height / 2 + 10, 24);
+            drawCenteredText('Press ENTER to restart', canvas.height / 2 + 50, 20);
+        }
+        
+        // Request next frame
+        requestAnimationFrame(gameLoop);
+    }
+
+    // ============================================
+    // SECTION 7: EVENT LISTENERS & INITIALIZATION
+    // Set up input handling and start the game
+    // ============================================
+
+    // Track key presses
+    document.addEventListener('keydown', (e) => {
+        keys[e.code] = true;
+        
+        // Prevent default for game keys (stops page scrolling)
+        if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+            e.preventDefault();
+        }
+    });
+
+    document.addEventListener('keyup', (e) => {
+        keys[e.code] = false;
+    });
+
+    // Prevent focus loss from affecting input
+    window.addEventListener('blur', () => {
+        // Clear all keys when window loses focus
+        Object.keys(keys).forEach(key => keys[key] = false);
+        if (game.ship) game.ship.thrusting = false;
+    });
+
+    // Start the game when page loads
+    init();
+    gameLoop();
+
+    </script>
+</body>
+</html>
