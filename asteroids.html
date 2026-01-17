@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Asteroids</title>
     <style>
         /* ============================================
@@ -22,20 +22,30 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh; /* Dynamic viewport height for mobile */
             font-family: 'Courier New', monospace;
             overflow: hidden;
+            touch-action: none; /* Prevent browser gestures */
         }
 
         /* Game container for canvas and HUD positioning */
         #game-container {
             position: relative;
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh; /* Dynamic viewport height for mobile */
+            max-width: 100%;
+            max-height: 100%;
         }
 
-        /* Canvas with subtle border */
+        /* Canvas with subtle border - fills container */
         #game {
             display: block;
-            border: 2px solid #333;
+            width: 100%;
+            height: 100%;
+            border: none;
         }
 
         /* HUD overlay for score, lives, and wave info */
@@ -241,6 +251,10 @@
     // All tunable game parameters in one place
     // ============================================
     const CONFIG = {
+        // Base design dimensions (used for scaling)
+        BASE_WIDTH: 800,            // Reference width for scaling
+        BASE_HEIGHT: 600,           // Reference height for scaling
+        
         // Ship settings
         SHIP_SIZE: 20,              // Ship triangle size in pixels
         SHIP_THRUST: 0.15,          // Acceleration when thrusting
@@ -293,6 +307,62 @@
     // SECTION 2: UTILITY FUNCTIONS
     // Helper functions used throughout the game
     // ============================================
+
+    /**
+     * Resize the canvas to fill the window while maintaining game state
+     * Scales all game entity positions proportionally
+     */
+    function resizeCanvas() {
+        const container = document.getElementById('game-container');
+        const newWidth = container.clientWidth;
+        const newHeight = container.clientHeight;
+        
+        // Store old dimensions for scaling
+        const oldWidth = canvas.width || CONFIG.BASE_WIDTH;
+        const oldHeight = canvas.height || CONFIG.BASE_HEIGHT;
+        
+        // Only resize if dimensions actually changed
+        if (newWidth === oldWidth && newHeight === oldHeight) return;
+        
+        // Calculate scale factors
+        const scaleX = newWidth / oldWidth;
+        const scaleY = newHeight / oldHeight;
+        
+        // Update canvas dimensions
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+        
+        // Scale all game entity positions if game is initialized
+        if (game.ship) {
+            game.ship.x *= scaleX;
+            game.ship.y *= scaleY;
+        }
+        
+        if (game.asteroids) {
+            game.asteroids.forEach(asteroid => {
+                asteroid.x *= scaleX;
+                asteroid.y *= scaleY;
+            });
+        }
+        
+        if (game.bullets) {
+            game.bullets.forEach(bullet => {
+                bullet.x *= scaleX;
+                bullet.y *= scaleY;
+            });
+        }
+    }
+
+    /**
+     * Get the scale factor relative to base design dimensions
+     * Used for scaling visual elements like ship size
+     * @returns {number} Scale factor
+     */
+    function getScaleFactor() {
+        const scaleX = canvas.width / CONFIG.BASE_WIDTH;
+        const scaleY = canvas.height / CONFIG.BASE_HEIGHT;
+        return Math.min(scaleX, scaleY);
+    }
 
     /**
      * Wraps a position to the opposite side of the canvas
@@ -1270,6 +1340,34 @@
     document.getElementById('game-container').addEventListener('touchmove', (e) => {
         e.preventDefault();
     }, { passive: false });
+
+    // ============================================
+    // SECTION 9: WINDOW RESIZE HANDLING
+    // Dynamic canvas sizing for responsive gameplay
+    // ============================================
+
+    // Handle window resize events
+    window.addEventListener('resize', () => {
+        resizeCanvas();
+    });
+
+    // Handle orientation change on mobile devices
+    window.addEventListener('orientationchange', () => {
+        // Small delay to let the browser finish orientation change
+        setTimeout(() => {
+            resizeCanvas();
+        }, 100);
+    });
+
+    // Handle screen resize via visualViewport API (better for mobile keyboards, etc.)
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', () => {
+            resizeCanvas();
+        });
+    }
+
+    // Initial canvas sizing before game starts
+    resizeCanvas();
 
     // Start the game when page loads
     init();
