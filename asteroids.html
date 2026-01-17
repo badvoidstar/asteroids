@@ -62,6 +62,41 @@
             font-size: 12px;
             pointer-events: none;
         }
+
+        /* Pause menu overlay */
+        #pause-menu {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #fff;
+        }
+
+        #pause-menu.visible {
+            display: flex;
+        }
+
+        #pause-menu h1 {
+            font-size: 48px;
+            margin-bottom: 30px;
+            letter-spacing: 4px;
+        }
+
+        #pause-menu .menu-item {
+            font-size: 20px;
+            margin: 10px 0;
+            color: #888;
+        }
+
+        #pause-menu .menu-item span {
+            color: #fff;
+        }
     </style>
 </head>
 <body>
@@ -78,7 +113,16 @@
         
         <!-- Instructions: control hints -->
         <div id="instructions">
-            Arrow Keys or WASD to move | SPACE to shoot | ENTER to restart
+            Arrow Keys or WASD to move | SPACE to shoot | ESC to pause
+        </div>
+
+        <!-- Pause menu overlay -->
+        <div id="pause-menu">
+            <h1>PAUSED</h1>
+            <div class="menu-item"><span>ESC</span> or <span>P</span> - Resume</div>
+            <div class="menu-item"><span>ENTER</span> - Restart Game</div>
+            <div class="menu-item"><span>Arrow Keys</span> / <span>WASD</span> - Move</div>
+            <div class="menu-item"><span>SPACE</span> - Shoot</div>
         </div>
     </div>
 
@@ -591,10 +635,14 @@
         score: 0,             // Current score
         lives: 0,             // Remaining lives
         wave: 0,              // Current wave number
-        state: 'playing',     // 'playing', 'respawning', 'gameover', 'waveDelay'
+        state: 'playing',     // 'playing', 'respawning', 'gameover', 'waveDelay', 'paused'
         waveDelayTimer: 0,    // Countdown for wave transition
-        speedMultiplier: 1    // Current speed scaling
+        speedMultiplier: 1,   // Current speed scaling
+        previousState: null   // State before pausing (to resume correctly)
     };
+
+    // Pause menu element reference
+    const pauseMenu = document.getElementById('pause-menu');
 
     // Input tracking
     const keys = {};
@@ -745,12 +793,40 @@
     }
 
     /**
+     * Toggle pause state
+     */
+    function togglePause() {
+        if (game.state === 'paused') {
+            // Resume game
+            game.state = game.previousState || 'playing';
+            game.previousState = null;
+            pauseMenu.classList.remove('visible');
+        } else if (game.state === 'playing' || game.state === 'waveDelay') {
+            // Pause game
+            game.previousState = game.state;
+            game.state = 'paused';
+            pauseMenu.classList.add('visible');
+            // Stop ship thrust visual/sound when pausing
+            if (game.ship) game.ship.thrusting = false;
+        }
+    }
+
+    /**
      * Handle player input each frame
      */
     function handleInput() {
         if (game.state === 'gameover') {
             // Check for restart
             if (keys['Enter']) {
+                init();
+            }
+            return;
+        }
+
+        if (game.state === 'paused') {
+            // Allow restart from pause menu
+            if (keys['Enter']) {
+                pauseMenu.classList.remove('visible');
                 init();
             }
             return;
@@ -886,8 +962,8 @@
         // Handle player input
         handleInput();
         
-        // Update game state based on current state
-        if (game.state === 'playing' || game.state === 'waveDelay') {
+        // Update game state based on current state (skip when paused)
+        if ((game.state === 'playing' || game.state === 'waveDelay') && game.state !== 'paused') {
             // Update ship
             game.ship.update(canvas);
             
@@ -958,17 +1034,28 @@
         if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
             e.preventDefault();
         }
+
+        // Toggle pause with Escape or P (only handle once per press)
+        if ((e.code === 'Escape' || e.code === 'KeyP') && game.state !== 'gameover') {
+            togglePause();
+            e.preventDefault();
+        }
     });
 
     document.addEventListener('keyup', (e) => {
         keys[e.code] = false;
     });
 
-    // Prevent focus loss from affecting input
+    // Prevent focus loss from affecting input - auto pause
     window.addEventListener('blur', () => {
         // Clear all keys when window loses focus
         Object.keys(keys).forEach(key => keys[key] = false);
         if (game.ship) game.ship.thrusting = false;
+        
+        // Auto-pause when window loses focus
+        if (game.state === 'playing' || game.state === 'waveDelay') {
+            togglePause();
+        }
     });
 
     // Start the game when page loads
