@@ -97,6 +97,100 @@
         #pause-menu .menu-item span {
             color: #fff;
         }
+
+        /* Mobile touch controls */
+        #mobile-controls {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }
+
+        .touch-enabled #mobile-controls {
+            display: block;
+        }
+
+        .touch-enabled #instructions {
+            display: none;
+        }
+
+        .touch-btn {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.15);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 24px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            pointer-events: auto;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+
+        .touch-btn:active, .touch-btn.active {
+            background: rgba(255, 255, 255, 0.35);
+            border-color: rgba(255, 255, 255, 0.8);
+        }
+
+        /* Left side - movement controls */
+        #touch-left {
+            width: 70px;
+            height: 70px;
+            bottom: 100px;
+            left: 20px;
+        }
+
+        #touch-right {
+            width: 70px;
+            height: 70px;
+            bottom: 100px;
+            left: 110px;
+        }
+
+        #touch-thrust {
+            width: 80px;
+            height: 80px;
+            bottom: 20px;
+            left: 60px;
+        }
+
+        /* Right side - action controls */
+        #touch-fire {
+            width: 90px;
+            height: 90px;
+            bottom: 40px;
+            right: 30px;
+        }
+
+        #touch-pause {
+            width: 50px;
+            height: 50px;
+            top: 50px;
+            right: 10px;
+            font-size: 18px;
+        }
+
+        /* Restart button for game over on mobile */
+        #touch-restart {
+            width: 120px;
+            height: 50px;
+            border-radius: 25px;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 16px;
+            display: none;
+        }
+
+        .touch-enabled #touch-restart.visible {
+            display: flex;
+        }
     </style>
 </head>
 <body>
@@ -123,6 +217,16 @@
             <div class="menu-item"><span>ENTER</span> - Restart Game</div>
             <div class="menu-item"><span>Arrow Keys</span> / <span>WASD</span> - Move</div>
             <div class="menu-item"><span>SPACE</span> - Shoot</div>
+        </div>
+
+        <!-- Mobile touch controls -->
+        <div id="mobile-controls">
+            <div id="touch-left" class="touch-btn">◀</div>
+            <div id="touch-right" class="touch-btn">▶</div>
+            <div id="touch-thrust" class="touch-btn">▲</div>
+            <div id="touch-fire" class="touch-btn">FIRE</div>
+            <div id="touch-pause" class="touch-btn">❚❚</div>
+            <div id="touch-restart" class="touch-btn">RESTART</div>
         </div>
     </div>
 
@@ -646,6 +750,14 @@
 
     // Input tracking
     const keys = {};
+    
+    // Touch input tracking (mirrors keys for mobile)
+    const touch = {
+        left: false,
+        right: false,
+        thrust: false,
+        fire: false
+    };
 
     // ============================================
     // SECTION 5: GAME FUNCTIONS
@@ -834,19 +946,19 @@
         
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
         
-        // Rotation (left/right arrow or A/D)
-        if (keys['ArrowLeft'] || keys['KeyA']) {
+        // Rotation (left/right arrow or A/D or touch)
+        if (keys['ArrowLeft'] || keys['KeyA'] || touch.left) {
             game.ship.angle -= CONFIG.SHIP_TURN_SPEED;
         }
-        if (keys['ArrowRight'] || keys['KeyD']) {
+        if (keys['ArrowRight'] || keys['KeyD'] || touch.right) {
             game.ship.angle += CONFIG.SHIP_TURN_SPEED;
         }
         
-        // Thrust (up arrow or W)
-        game.ship.thrusting = keys['ArrowUp'] || keys['KeyW'];
+        // Thrust (up arrow or W or touch)
+        game.ship.thrusting = keys['ArrowUp'] || keys['KeyW'] || touch.thrust;
         
-        // Shoot (space)
-        if (keys['Space'] && game.bullets.length < CONFIG.MAX_BULLETS) {
+        // Shoot (space or touch)
+        if ((keys['Space'] || touch.fire) && game.bullets.length < CONFIG.MAX_BULLETS) {
             const bullet = game.ship.shoot();
             if (bullet) {
                 game.bullets.push(bullet);
@@ -1052,14 +1164,124 @@
         Object.keys(keys).forEach(key => keys[key] = false);
         if (game.ship) game.ship.thrusting = false;
         
-        // Auto-pause when window loses focus
-        if (game.state === 'playing' || game.state === 'waveDelay') {
+        // Auto-pause when window loses focus (only on desktop)
+        if (!isTouchDevice && (game.state === 'playing' || game.state === 'waveDelay')) {
             togglePause();
         }
     });
 
+    // ============================================
+    // SECTION 8: MOBILE TOUCH CONTROLS
+    // Touch input handling for mobile devices
+    // ============================================
+
+    // Detect touch device
+    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    
+    if (isTouchDevice) {
+        document.getElementById('game-container').classList.add('touch-enabled');
+    }
+
+    // Touch control elements
+    const touchButtons = {
+        left: document.getElementById('touch-left'),
+        right: document.getElementById('touch-right'),
+        thrust: document.getElementById('touch-thrust'),
+        fire: document.getElementById('touch-fire'),
+        pause: document.getElementById('touch-pause'),
+        restart: document.getElementById('touch-restart')
+    };
+
+    // Helper to set touch state
+    function setTouchState(control, active) {
+        touch[control] = active;
+        if (touchButtons[control]) {
+            touchButtons[control].classList.toggle('active', active);
+        }
+    }
+
+    // Setup touch button handlers
+    function setupTouchButton(element, control) {
+        if (!element) return;
+
+        element.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            setTouchState(control, true);
+        }, { passive: false });
+
+        element.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            setTouchState(control, false);
+        }, { passive: false });
+
+        element.addEventListener('touchcancel', (e) => {
+            setTouchState(control, false);
+        });
+    }
+
+    // Initialize touch controls
+    setupTouchButton(touchButtons.left, 'left');
+    setupTouchButton(touchButtons.right, 'right');
+    setupTouchButton(touchButtons.thrust, 'thrust');
+    setupTouchButton(touchButtons.fire, 'fire');
+
+    // Pause button handler
+    if (touchButtons.pause) {
+        touchButtons.pause.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (game.state !== 'gameover') {
+                togglePause();
+            }
+        }, { passive: false });
+    }
+
+    // Restart button handler
+    if (touchButtons.restart) {
+        touchButtons.restart.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (game.state === 'gameover' || game.state === 'paused') {
+                pauseMenu.classList.remove('visible');
+                touchButtons.restart.classList.remove('visible');
+                init();
+            }
+        }, { passive: false });
+    }
+
+    // Show/hide restart button based on game state
+    const originalGameLoop = gameLoop;
+    function gameLoopWithMobileUI() {
+        // Update restart button visibility
+        if (touchButtons.restart) {
+            if (game.state === 'gameover') {
+                touchButtons.restart.classList.add('visible');
+            } else {
+                touchButtons.restart.classList.remove('visible');
+            }
+        }
+        originalGameLoop();
+    }
+
+    // Prevent default touch behaviors on game container (no zooming/scrolling)
+    document.getElementById('game-container').addEventListener('touchstart', (e) => {
+        if (e.target.classList.contains('touch-btn')) return;
+        e.preventDefault();
+    }, { passive: false });
+
+    document.getElementById('game-container').addEventListener('touchmove', (e) => {
+        e.preventDefault();
+    }, { passive: false });
+
     // Start the game when page loads
     init();
+    if (isTouchDevice) {
+        // Use wrapper that updates mobile UI
+        requestAnimationFrame(function mobileLoop() {
+            if (touchButtons.restart) {
+                touchButtons.restart.classList.toggle('visible', game.state === 'gameover');
+            }
+            requestAnimationFrame(mobileLoop);
+        });
+    }
     gameLoop();
 
     </script>
