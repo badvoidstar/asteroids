@@ -1,9 +1,12 @@
-# Asteroids Game Implementation Plan (Snapshot: January 16, 2026)
+# Asteroids Game Implementation Plan (Snapshot: January 18, 2026)
 
 ## Recent Changes
 - **Wave Progression**: Game now starts with 1 asteroid, adding 1 more per wave
 - **Energy Conservation**: Asteroid splits preserve kinetic energy - smaller pieces move faster, larger pieces slower
-- **Pause Menu**: Press ESC or P to pause; auto-pauses when window loses focus
+- **Pause Menu**: Press ESC or P to pause; auto-pauses when window loses focus (desktop only)
+- **Mobile Touch Controls**: Virtual buttons for rotation, thrust, fire, and pause on touch devices
+- **Dynamic Window Sizing**: Canvas fills viewport and scales on resize/rotation
+- **Delta-Time Movement**: Consistent game speed across all display refresh rates (60Hz, 90Hz, 120Hz, etc.)
 
 ## High-Level Structure
 
@@ -14,73 +17,81 @@
 │  <!DOCTYPE html>                                                │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ <head>                                                    │  │
-│  │   <style> Canvas centering, background, HUD styling,      │  │
-│  │           pause menu overlay                              │  │
+│  │   <meta viewport> (mobile-optimized, no zoom)             │  │
+│  │   <style> Full-viewport canvas, HUD styling,              │  │
+│  │           pause menu overlay, mobile touch buttons        │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ <body>                                                    │  │
-│  │   <canvas id="game">                                      │  │
+│  │   <canvas id="game"> (fills viewport)                     │  │
 │  │   <div id="pause-menu"> (overlay with controls help)      │  │
+│  │   <div id="mobile-controls"> (touch buttons)              │  │
 │  │   <script>                                                │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
 │  │   │ ① CONFIG (constants object)                         │ │  │
+│  │   │   • BASE_WIDTH/HEIGHT: 800x600 (reference dims)     │ │  │
+│  │   │   • TARGET_FPS: 60 (for delta-time normalization)   │ │  │
 │  │   │   • SHIP_SIZE, TURN_SPEED, THRUST                   │ │  │
 │  │   │   • BULLET_SPEED, BULLET_LIFETIME                   │ │  │
 │  │   │   • ASTEROID_BASE_COUNT: 1 (starts with 1 asteroid) │ │  │
-│  │   │   • ASTEROID_SIZES, ASTEROID_SPEED                  │ │  │
-│  │   │   • STARTING_LIVES, POINTS_PER_SIZE                 │ │  │
 │  │   │   • WAVE_ASTEROID_INCREMENT: 1, MAX_SPEED_MULTIPLIER│ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
-│  │   │ ② CLASSES                                           │ │  │
+│  │   │ ② UTILITY FUNCTIONS                                 │ │  │
+│  │   │   • resizeCanvas() — scale canvas & entity positions│ │  │
+│  │   │   • getScaleFactor() — visual scaling relative to   │ │  │
+│  │   │     base dimensions                                 │ │  │
+│  │   │   • wrapValue(), distance(), randomRange()          │ │  │
+│  │   │   • pointInPolygon(), circlePolygonCollision()      │ │  │
+│  │   └─────────────────────────────────────────────────────┘ │  │
+│  │   ┌─────────────────────────────────────────────────────┐ │  │
+│  │   │ ③ CLASSES                                           │ │  │
 │  │   │                                                     │ │  │
 │  │   │   Ship ─────────────────────────────────────────┐   │ │  │
-│  │   │   │ • x, y, angle, velocity                     │   │ │  │
-│  │   │   │ • vertices[], invulnerable, thrust          │   │ │  │
-│  │   │   │ • update(), draw(), getVertices(), shoot()  │   │ │  │
+│  │   │   │ • x, y, angle, velocityX/Y                  │   │ │  │
+│  │   │   │ • invulnerable, shootCooldown, thrusting    │   │ │  │
+│  │   │   │ • update(canvas, dt), draw(), shoot()       │   │ │  │
 │  │   │   └─────────────────────────────────────────────┘   │ │  │
 │  │   │                                                     │ │  │
 │  │   │   Asteroid ─────────────────────────────────────┐   │ │  │
-│  │   │   │ • x, y, velocity, size, vertices[]          │   │ │  │
-│  │   │   │ • update(), draw(), generateShape()         │   │ │  │
+│  │   │   │ • x, y, velocityX/Y, radius, vertices[]     │   │ │  │
+│  │   │   │ • update(canvas, dt), draw(), getPoints()   │   │ │  │
 │  │   │   └─────────────────────────────────────────────┘   │ │  │
 │  │   │                                                     │ │  │
 │  │   │   Bullet ───────────────────────────────────────┐   │ │  │
-│  │   │   │ • x, y, velocity, lifetime                  │   │ │  │
-│  │   │   │ • update(), draw(), isExpired()             │   │ │  │
+│  │   │   │ • x, y, velocityX/Y, lifetime               │   │ │  │
+│  │   │   │ • update(canvas, dt), draw(), isExpired()   │   │ │  │
 │  │   │   └─────────────────────────────────────────────┘   │ │  │
-│  │   └─────────────────────────────────────────────────────┘ │  │
-│  │   ┌─────────────────────────────────────────────────────┐ │  │
-│  │   │ ③ HELPER FUNCTIONS                                  │ │  │
-│  │   │   • pointInPolygon(point, vertices)                 │ │  │
-│  │   │   • circlePolygonCollision(circle, polygon)         │ │  │
-│  │   │   • wrapPosition(entity, canvas)                    │ │  │
-│  │   │   • spawnAsteroidAwayFromShip(ship)                 │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
 │  │   │ ④ GAME STATE                                        │ │  │
 │  │   │   • ship, asteroids[], bullets[]                    │ │  │
-│  │   │   • score, lives, wave                              │ │  │
+│  │   │   • score, lives, wave, speedMultiplier             │ │  │
 │  │   │   • state: 'playing'|'waveDelay'|'gameover'|'paused'│ │  │
 │  │   │   • previousState (for resuming from pause)         │ │  │
-│  │   │   • keys{} (input tracking)                         │ │  │
+│  │   │   • lastFrameTime (for delta-time calculation)      │ │  │
+│  │   │   • keys{} (keyboard), touch{} (mobile input)       │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
 │  │   │ ⑤ GAME FUNCTIONS                                    │ │  │
 │  │   │   • init() — reset state, spawn wave                │ │  │
-│  │   │   • spawnWave(waveNumber) — create asteroids        │ │  │
-│  │   │   • togglePause() — pause/resume game               │ │  │
-│  │   │   • handleInput() — read keys{}, apply to ship      │ │  │
+│  │   │   • spawnWave() — create asteroids for wave         │ │  │
+│  │   │   • togglePause() — pause/resume, reset lastFrame   │ │  │
+│  │   │   • handleInput() — read keys{}/touch{}, apply      │ │  │
 │  │   │   • checkCollisions() — bullets↔asteroids, ship↔ast │ │  │
-│  │   │   • splitAsteroid(asteroid) — spawn smaller pieces  │ │  │
-│  │   │     with ENERGY CONSERVATION (v = √(E/m))           │ │  │
-│  │   │   • respawnShip() — invulnerability timer           │ │  │
-│  │   │   • drawHUD() — score, lives, wave, messages        │ │  │
+│  │   │   • splitAsteroid() — energy-conserving split       │ │  │
+│  │   │   • loseLife() — respawn or game over               │ │  │
+│  │   │   • updateHUD(), drawCenteredText()                 │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
-│  │   │ ⑥ GAME LOOP                                         │ │  │
+│  │   │ ⑥ GAME LOOP (delta-time based)                      │ │  │
 │  │   │                                                     │ │  │
 │  │   │   gameLoop(timestamp) {                             │ │  │
+│  │   │       ┌──────────────────────────┐                  │ │  │
+│  │   │       │ Calculate dt (delta time)│                  │ │  │
+│  │   │       │ dt = elapsed / (1000/60) │ normalized to 60fps│ │ │
+│  │   │       └──────────┬───────────────┘                  │ │  │
+│  │   │                  ▼                                  │ │  │
 │  │   │       ┌──────────────┐                              │ │  │
 │  │   │       │ handleInput()│                              │ │  │
 │  │   │       └──────┬───────┘                              │ │  │
@@ -89,41 +100,42 @@
 │  │   │       │ if (paused)  │──▶ skip updates              │ │  │
 │  │   │       └──────┬───────┘                              │ │  │
 │  │   │              ▼                                      │ │  │
-│  │   │       ┌──────────────┐                              │ │  │
-│  │   │       │ UPDATE PHASE │                              │ │  │
-│  │   │       │ ship.update()│                              │ │  │
-│  │   │       │ asteroids[]  │                              │ │  │
-│  │   │       │ bullets[]    │                              │ │  │
-│  │   │       └──────┬───────┘                              │ │  │
+│  │   │       ┌──────────────────────┐                      │ │  │
+│  │   │       │ UPDATE PHASE         │                      │ │  │
+│  │   │       │ ship.update(dt)      │ ◀── all movement    │ │  │
+│  │   │       │ asteroids[].update(dt)│     scaled by dt   │ │  │
+│  │   │       │ bullets[].update(dt) │                      │ │  │
+│  │   │       └──────┬───────────────┘                      │ │  │
 │  │   │              ▼                                      │ │  │
 │  │   │       ┌──────────────────┐                          │ │  │
 │  │   │       │ checkCollisions()│                          │ │  │
 │  │   │       └──────┬───────────┘                          │ │  │
 │  │   │              ▼                                      │ │  │
-│  │   │       ┌──────────────────┐                          │ │  │
-│  │   │       │ checkWaveComplete│ → spawnWave() if empty   │ │  │
-│  │   │       └──────┬───────────┘                          │ │  │
-│  │   │              ▼                                      │ │  │
 │  │   │       ┌──────────────┐                              │ │  │
 │  │   │       │ RENDER PHASE │                              │ │  │
-│  │   │       │ clearCanvas()│                              │ │  │
-│  │   │       │ ship.draw()  │                              │ │  │
-│  │   │       │ asteroids[]  │                              │ │  │
-│  │   │       │ bullets[]    │                              │ │  │
-│  │   │       │ drawHUD()    │                              │ │  │
 │  │   │       └──────┬───────┘                              │ │  │
 │  │   │              ▼                                      │ │  │
 │  │   │       requestAnimationFrame(gameLoop)               │ │  │
 │  │   │   }                                                 │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
-│  │   │ ⑦ EVENT LISTENERS & INIT                            │ │  │
-│  │   │   • keydown → keys[e.code] = true                   │ │  │
-│  │   │   • keydown → ESC/P toggles pause                   │ │  │
-│  │   │   • keyup   → keys[e.code] = false                  │ │  │
-│  │   │   • blur    → auto-pause when window loses focus    │ │  │
-│  │   │   • init() called on load                           │ │  │
-│  │   │   • requestAnimationFrame(gameLoop) to start        │ │  │
+│  │   │ ⑦ EVENT LISTENERS                                   │ │  │
+│  │   │   • keydown/keyup → keys{} tracking                 │ │  │
+│  │   │   • ESC/P → togglePause()                           │ │  │
+│  │   │   • blur → auto-pause (desktop only)                │ │  │
+│  │   └─────────────────────────────────────────────────────┘ │  │
+│  │   ┌─────────────────────────────────────────────────────┐ │  │
+│  │   │ ⑧ MOBILE TOUCH CONTROLS                             │ │  │
+│  │   │   • isTouchDevice detection                         │ │  │
+│  │   │   • Touch button handlers → touch{} state           │ │  │
+│  │   │   • Prevents default touch gestures                 │ │  │
+│  │   └─────────────────────────────────────────────────────┘ │  │
+│  │   ┌─────────────────────────────────────────────────────┐ │  │
+│  │   │ ⑨ WINDOW RESIZE HANDLING                            │ │  │
+│  │   │   • resize event → resizeCanvas()                   │ │  │
+│  │   │   • orientationchange → resizeCanvas()              │ │  │
+│  │   │   • visualViewport resize → resizeCanvas()          │ │  │
+│  │   │   • Initial resizeCanvas() before init()            │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   </script>                                               │  │
 │  └───────────────────────────────────────────────────────────┘  │
@@ -138,6 +150,10 @@
  │ Keyboard │─────────────▶│   keys{}    │              │  Canvas  │
  │ Events   │              └──────┬──────┘              │ Rendering│
  └──────────┘                     │                     └────▲─────┘
+ ┌──────────┐              ┌──────┴──────┐                   │
+ │  Touch   │─────────────▶│  touch{}    │                   │
+ │ Events   │              └──────┬──────┘                   │
+ └──────────┘                     │                          │
                                   ▼                          │
                          ┌────────────────┐                  │
                          │  handleInput() │                  │
@@ -145,26 +161,45 @@
                                  │                           │
                     ESC/P ───────┼───────▶ togglePause()     │
                                  ▼                           │
- ┌─────────┐    update    ┌─────────────┐     draw     ┌─────┴─────┐
+ ┌─────────┐  update(dt)  ┌─────────────┐     draw     ┌─────┴─────┐
  │  Ship   │◀────────────▶│             │─────────────▶│  Vector   │
  ├─────────┤              │  Game Loop  │              │  Lines    │
- │Asteroids│◀────────────▶│ (skip if    │─────────────▶│  (stroke) │
- ├─────────┤              │  paused)    │              └───────────┘
+ │Asteroids│◀────────────▶│ (delta-time │─────────────▶│  (stroke) │
+ ├─────────┤              │  based)     │              └───────────┘
  │ Bullets │◀────────────▶│             │                    │
  └─────────┘              └──────┬──────┘                    ▼
        ▲                         │                     ┌───────────┐
        │         ┌───────────────┘                     │    HUD    │
        │         ▼                                     │Score/Lives│
        │  ┌─────────────────┐                          │ /Wave/    │
-       └──│checkCollisions()│                          │PauseMenu  │
-          └────────┬────────┘                          └───────────┘
-                   │ on hit
+       └──│checkCollisions()│                          │PauseMenu/ │
+          └────────┬────────┘                          │TouchBtns  │
+                   │ on hit                            └───────────┘
                    ▼
           ┌─────────────────┐
           │ splitAsteroid() │──▶ points += SIZE_SCORE
           │ (energy conserv)│──▶ smaller = faster, larger = slower
           │ or loseLife()   │──▶ lives -= 1
           └─────────────────┘
+
+ ┌──────────────────────────────────────────────────────────────────┐
+ │ RESIZE HANDLING                                                  │
+ │                                                                  │
+ │  window.resize ──┐                                               │
+ │  orientationchange─┼──▶ resizeCanvas() ──▶ scale entity positions│
+ │  visualViewport ──┘                                              │
+ └──────────────────────────────────────────────────────────────────┘
+```
+
+## Delta-Time Movement
+
+All movement is normalized to 60fps for consistent speed across devices:
+```
+dt = elapsed_ms / (1000 / TARGET_FPS)
+
+At 60Hz:  dt ≈ 1.0  →  position += velocity × 1.0
+At 120Hz: dt ≈ 0.5  →  position += velocity × 0.5  (half movement, twice the frames)
+At 90Hz:  dt ≈ 0.67 →  position += velocity × 0.67
 ```
 
 ## Energy Conservation on Asteroid Split
@@ -176,10 +211,22 @@ When an asteroid splits, kinetic energy is conserved:
 - Result: smaller fragments move faster, larger fragments move slower
 
 ## Controls
+
+### Desktop
 - **Arrow Keys / WASD** — Move ship
 - **SPACE** — Shoot
 - **ESC / P** — Pause/Resume
 - **ENTER** — Restart (from game over or pause menu)
+
+### Mobile (auto-detected)
+- **◀ / ▶** — Rotate left/right
+- **▲** — Thrust
+- **FIRE** — Shoot
+- **❚❚** — Pause
+- **RESTART** — Appears on game over
+
+## Live URL
+**https://badvoidstar.github.io/asteroids/asteroids.html**
 
 ---
 
