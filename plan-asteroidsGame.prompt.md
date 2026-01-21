@@ -252,6 +252,123 @@ More asteroids → slower beat (1000ms)
 Fewer asteroids → faster beat (150ms)
 ```
 
+## CONFIG Reference
+
+All tunable game parameters are centralized in a CONFIG object:
+
+| Category | Parameter | Value | Description |
+|----------|-----------|-------|-------------|
+| **Display** | BASE_WIDTH | 800 | Reference canvas width (pixels) |
+| | BASE_HEIGHT | 600 | Reference canvas height (pixels) |
+| | TARGET_FPS | 60 | Frame rate for delta-time normalization |
+| **Ship** | SHIP_SIZE | 15 | Ship radius (pixels) |
+| | SHIP_THRUST | 0.15 | Acceleration per frame |
+| | SHIP_FRICTION | 0.99 | Velocity damping per frame |
+| | SHIP_TURN_SPEED | 0.08 | Rotation speed (radians/frame) |
+| | SHIP_MAX_SPEED | 8 | Maximum velocity magnitude |
+| | STARTING_LIVES | 3 | Initial lives |
+| | INVULNERABILITY_TIME | 180 | Respawn protection (frames) |
+| | INVULN_BLINK_RATE | 10 | Frames per blink during invuln |
+| **Bullets** | BULLET_SPEED | 10 | Bullet velocity |
+| | BULLET_LIFETIME | 60 | Frames until despawn |
+| | BULLET_RADIUS | 2 | Collision radius |
+| | MAX_BULLETS | 10 | Maximum active bullets |
+| | SHOOT_COOLDOWN | 10 | Frames between shots |
+| **Asteroids** | ASTEROID_BASE_COUNT | 1 | Starting asteroids (wave 1) |
+| | ASTEROID_BASE_SPEED | 1.5 | Initial asteroid speed |
+| | ASTEROID_SPEED_VARIANCE | 1 | Random speed variation ± |
+| | ASTEROID_VERTICES | 10 | Points per asteroid shape |
+| | ASTEROID_JAGGEDNESS | 0.4 | Shape irregularity (0-1) |
+| | INITIAL_ASTEROID_RADIUS | 50 | Large asteroid size |
+| | MIN_ASTEROID_RADIUS | 15 | Smallest fragment size |
+| | MIN_SPLIT_RATIO | 0.1 | Minimum child size as ratio |
+| **Waves** | WAVE_DELAY | 120 | Frames between waves |
+| | WAVE_ASTEROID_INCREMENT | 1 | Additional asteroids per wave |
+| | WAVE_SPEED_MULTIPLIER | 1.1 | Speed increase per wave |
+| | MAX_SPEED_MULTIPLIER | 2.0 | Speed cap multiplier |
+| **Scoring** | POINTS_LARGE | 20 | Large asteroid points |
+| | POINTS_MEDIUM | 50 | Medium asteroid points |
+| | POINTS_SMALL | 100 | Small asteroid points |
+
+## Algorithm Details
+
+### Ship Geometry
+The ship is drawn as a triangle with two wing tips:
+```javascript
+// Nose (front)
+nose = (x + cos(angle) × size, y + sin(angle) × size)
+
+// Wings (rear corners at ±144° from nose direction)
+wingAngle = angle + Math.PI × 0.8  // ~144 degrees
+leftWing  = (x + cos(wingAngle) × size, y + sin(wingAngle) × size)
+rightWing = (x + cos(-wingAngle) × size, y - sin(wingAngle) × size)
+```
+
+### Asteroid Shape Generation
+Each asteroid has randomized vertices for irregular appearance:
+```javascript
+for (i = 0; i < ASTEROID_VERTICES; i++) {
+    angle = (i / ASTEROID_VERTICES) × 2π
+    variance = 1 + (random() - 0.5) × ASTEROID_JAGGEDNESS
+    vertex = { angle, distance: radius × variance }
+}
+```
+
+### Collision Detection: Point-in-Polygon (Ray Casting)
+Used for checking if ship nose or bullet center is inside asteroid:
+```javascript
+pointInPolygon(x, y, polygon):
+    inside = false
+    for each edge (v1 → v2):
+        if ray from (x,y) going right crosses edge:
+            inside = !inside
+    return inside
+```
+
+### Collision Detection: Circle-to-Polygon
+Used for ship body collision (ship as circle against asteroid polygon):
+```javascript
+circlePolygonCollision(circle, polygon):
+    // First check if circle center is inside polygon
+    if pointInPolygon(circle.x, circle.y, polygon):
+        return true
+    
+    // Then check if any polygon edge intersects circle
+    for each edge (v1 → v2):
+        // Find closest point on edge to circle center
+        edgeVector = v2 - v1
+        projection = clamp(dot(circleCenter - v1, edgeVector), 0, edgeLength)
+        closestPoint = v1 + normalize(edgeVector) × projection
+        
+        if distance(closestPoint, circleCenter) ≤ circle.radius:
+            return true
+    
+    return false
+```
+
+### Safe Spawn Distance
+New asteroids spawn at safe distance from ship:
+```javascript
+minDistance = 150  // pixels from ship center
+do {
+    x = random(0, canvas.width)
+    y = random(0, canvas.height)
+} while (distance(x, y, ship.x, ship.y) < minDistance)
+```
+
+### Audio Frequencies Reference
+
+| Sound | Frequencies / Parameters |
+|-------|-------------------------|
+| Thrust | Noise → Lowpass filter at 150Hz, gain 0.25 |
+| Fire | Square wave 880Hz→110Hz exponential sweep, gain 0.075 |
+| Explosion | Noise + Sine (60/90/120Hz based on size), gain 0.3 |
+| Ship Death | 3× Sawtooth (300/200/100Hz) descending + noise, gain 0.3 |
+| Beat High | Triangle wave at 55Hz, gain 0.3 |
+| Beat Low | Triangle wave at 50Hz, gain 0.3 |
+| Beat Tempo | Range: 150ms (fast) to 1000ms (slow) |
+| New Wave | Sine 200Hz→600Hz exponential sweep, gain 0.2 |
+
 ## Controls
 
 ### Desktop
