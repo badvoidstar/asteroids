@@ -343,7 +343,7 @@
             osc.frequency.setValueAtTime(880, now);
             osc.frequency.exponentialRampToValueAtTime(110, now + 0.1);
             
-            const gain = this.createGain(0.15);
+            const gain = this.createGain(0.05);
             gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
             
             osc.connect(gain);
