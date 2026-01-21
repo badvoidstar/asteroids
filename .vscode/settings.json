@@ -1,0 +1,17 @@
+{
+    "cSpell.words": [
+        "COOLDOWN",
+        "gameover",
+        "INVULN",
+        "respawn",
+        "respawning",
+        "Verts",
+        "WASD"
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "/^start c:\\\\Users\\\\sguest\\\\agentic\\\\asteroids\\.html$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

@@ -247,6 +247,363 @@
        ================================================================ */
 
     // ============================================
+    // SECTION 0: AUDIO SYSTEM
+    // Web Audio API sound generation for classic arcade sounds
+    // ============================================
+    
+    const AudioSystem = {
+        ctx: null,
+        enabled: true,
+        masterVolume: 0.3,
+        
+        // Initialize the audio context (must be called after user interaction)
+        init() {
+            if (this.ctx) return;
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        },
+        
+        // Resume audio context if suspended (browser autoplay policy)
+        resume() {
+            if (this.ctx && this.ctx.state === 'suspended') {
+                this.ctx.resume();
+            }
+        },
+        
+        // Create a gain node with specified volume
+        createGain(volume = 1) {
+            const gain = this.ctx.createGain();
+            gain.gain.value = volume * this.masterVolume;
+            gain.connect(this.ctx.destination);
+            return gain;
+        },
+        
+        // Ship thrust sound - continuous low rumble
+        thrustSound: {
+            oscillator: null,
+            noiseNode: null,
+            gainNode: null,
+            
+            start() {
+                if (!AudioSystem.ctx || !AudioSystem.enabled) return;
+                if (this.oscillator) return; // Already playing
+                
+                const ctx = AudioSystem.ctx;
+                
+                // Create noise buffer for thrust
+                const bufferSize = ctx.sampleRate * 0.5;
+                const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+                const output = noiseBuffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) {
+                    output[i] = Math.random() * 2 - 1;
+                }
+                
+                // Noise source
+                this.noiseNode = ctx.createBufferSource();
+                this.noiseNode.buffer = noiseBuffer;
+                this.noiseNode.loop = true;
+                
+                // Low-pass filter for rumble
+                const filter = ctx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.value = 150;
+                
+                // Gain for volume control
+                this.gainNode = ctx.createGain();
+                this.gainNode.gain.value = 0.15 * AudioSystem.masterVolume;
+                
+                // Connect nodes
+                this.noiseNode.connect(filter);
+                filter.connect(this.gainNode);
+                this.gainNode.connect(ctx.destination);
+                
+                this.noiseNode.start();
+            },
+            
+            stop() {
+                if (this.noiseNode) {
+                    try {
+                        this.noiseNode.stop();
+                    } catch (e) {}
+                    this.noiseNode = null;
+                }
+                this.gainNode = null;
+            }
+        },
+        
+        // Ship fire sound - classic pew
+        playFire() {
+            if (!this.ctx || !this.enabled) return;
+            
+            const ctx = this.ctx;
+            const now = ctx.currentTime;
+            
+            // Main tone
+            const osc = ctx.createOscillator();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(880, now);
+            osc.frequency.exponentialRampToValueAtTime(110, now + 0.1);
+            
+            const gain = this.createGain(0.15);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+            
+            osc.connect(gain);
+            osc.start(now);
+            osc.stop(now + 0.1);
+        },
+        
+        // Asteroid explosion - different pitch based on size
+        playExplosion(size = 'large') {
+            if (!this.ctx || !this.enabled) return;
+            
+            const ctx = this.ctx;
+            const now = ctx.currentTime;
+            
+            // Frequency based on asteroid size (smaller = higher pitch)
+            const baseFreq = size === 'large' ? 60 : size === 'medium' ? 90 : 120;
+            const duration = size === 'large' ? 0.4 : size === 'medium' ? 0.3 : 0.2;
+            
+            // Noise burst for explosion
+            const bufferSize = ctx.sampleRate * duration;
+            const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                output[i] = Math.random() * 2 - 1;
+            }
+            
+            const noise = ctx.createBufferSource();
+            noise.buffer = noiseBuffer;
+            
+            // Band-pass filter
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = baseFreq * 3;
+            filter.Q.value = 1;
+            
+            const gain = this.createGain(0.25);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+            
+            noise.connect(filter);
+            filter.connect(gain);
+            noise.start(now);
+            noise.stop(now + duration);
+            
+            // Add a low thump
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(baseFreq, now);
+            osc.frequency.exponentialRampToValueAtTime(20, now + duration * 0.5);
+            
+            const oscGain = this.createGain(0.3);
+            oscGain.gain.exponentialRampToValueAtTime(0.001, now + duration * 0.5);
+            
+            osc.connect(oscGain);
+            osc.start(now);
+            osc.stop(now + duration * 0.5);
+        },
+        
+        // Ship explosion - dramatic death sound
+        playShipExplosion() {
+            if (!this.ctx || !this.enabled) return;
+            
+            const ctx = this.ctx;
+            const now = ctx.currentTime;
+            
+            // Multiple descending tones
+            for (let i = 0; i < 3; i++) {
+                const osc = ctx.createOscillator();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(400 - i * 100, now + i * 0.05);
+                osc.frequency.exponentialRampToValueAtTime(30, now + 0.8);
+                
+                const gain = this.createGain(0.2);
+                gain.gain.setValueAtTime(0.2 * this.masterVolume, now + i * 0.05);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+                
+                osc.connect(gain);
+                osc.start(now + i * 0.05);
+                osc.stop(now + 0.8);
+            }
+            
+            // Noise burst
+            const bufferSize = ctx.sampleRate * 0.6;
+            const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                output[i] = Math.random() * 2 - 1;
+            }
+            
+            const noise = ctx.createBufferSource();
+            noise.buffer = noiseBuffer;
+            
+            const filter = ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(2000, now);
+            filter.frequency.exponentialRampToValueAtTime(100, now + 0.6);
+            
+            const noiseGain = this.createGain(0.3);
+            noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+            
+            noise.connect(filter);
+            filter.connect(noiseGain);
+            noise.start(now);
+            noise.stop(now + 0.6);
+        },
+        
+        // Extra life sound
+        playExtraLife() {
+            if (!this.ctx || !this.enabled) return;
+            
+            const ctx = this.ctx;
+            const now = ctx.currentTime;
+            
+            const notes = [523, 659, 784, 1047]; // C5, E5, G5, C6
+            
+            notes.forEach((freq, i) => {
+                const osc = ctx.createOscillator();
+                osc.type = 'square';
+                osc.frequency.value = freq;
+                
+                const gain = this.createGain(0.1);
+                gain.gain.setValueAtTime(0, now + i * 0.1);
+                gain.gain.linearRampToValueAtTime(0.1 * this.masterVolume, now + i * 0.1 + 0.02);
+                gain.gain.linearRampToValueAtTime(0, now + i * 0.1 + 0.15);
+                
+                osc.connect(gain);
+                osc.start(now + i * 0.1);
+                osc.stop(now + i * 0.1 + 0.15);
+            });
+        },
+        
+        // Classic Asteroids background beat - two alternating tones
+        beat: {
+            intervalId: null,
+            beatIndex: 0,
+            tempo: 1000, // ms between beats
+            minTempo: 150,
+            maxTempo: 1000,
+            
+            start() {
+                if (this.intervalId) return;
+                this.beatIndex = 0;
+                this.tempo = this.maxTempo;
+                this.scheduleBeat();
+            },
+            
+            stop() {
+                if (this.intervalId) {
+                    clearTimeout(this.intervalId);
+                    this.intervalId = null;
+                }
+            },
+            
+            scheduleBeat() {
+                this.intervalId = setTimeout(() => {
+                    this.playBeat();
+                    this.scheduleBeat();
+                }, this.tempo);
+            },
+            
+            playBeat() {
+                if (!AudioSystem.ctx || !AudioSystem.enabled) return;
+                
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+                
+                // Alternating low tones (like original Asteroids)
+                const freq = this.beatIndex % 2 === 0 ? 55 : 50; // A1 and ~G#1
+                
+                const osc = ctx.createOscillator();
+                osc.type = 'triangle';
+                osc.frequency.value = freq;
+                
+                const gain = AudioSystem.createGain(0.25);
+                gain.gain.setValueAtTime(0.25 * AudioSystem.masterVolume, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+                
+                osc.connect(gain);
+                osc.start(now);
+                osc.stop(now + 0.15);
+                
+                this.beatIndex++;
+            },
+            
+            // Adjust tempo based on number of asteroids (fewer = faster)
+            updateTempo(asteroidCount, maxAsteroids) {
+                if (maxAsteroids <= 0) maxAsteroids = 1;
+                const ratio = asteroidCount / maxAsteroids;
+                this.tempo = this.minTempo + (this.maxTempo - this.minTempo) * ratio;
+            }
+        },
+        
+        // Saucer sound (for future use)
+        saucerSound: {
+            oscillator: null,
+            gainNode: null,
+            
+            start(isSmall = false) {
+                if (!AudioSystem.ctx || !AudioSystem.enabled) return;
+                if (this.oscillator) return;
+                
+                const ctx = AudioSystem.ctx;
+                
+                this.oscillator = ctx.createOscillator();
+                this.oscillator.type = 'sawtooth';
+                this.oscillator.frequency.value = isSmall ? 1200 : 800;
+                
+                // LFO for warble effect
+                const lfo = ctx.createOscillator();
+                lfo.frequency.value = isSmall ? 8 : 5;
+                
+                const lfoGain = ctx.createGain();
+                lfoGain.gain.value = isSmall ? 100 : 60;
+                
+                lfo.connect(lfoGain);
+                lfoGain.connect(this.oscillator.frequency);
+                
+                this.gainNode = AudioSystem.createGain(0.08);
+                
+                this.oscillator.connect(this.gainNode);
+                
+                this.oscillator.start();
+                lfo.start();
+            },
+            
+            stop() {
+                if (this.oscillator) {
+                    try {
+                        this.oscillator.stop();
+                    } catch (e) {}
+                    this.oscillator = null;
+                }
+                this.gainNode = null;
+            }
+        },
+        
+        // New wave sound
+        playNewWave() {
+            if (!this.ctx || !this.enabled) return;
+            
+            const ctx = this.ctx;
+            const now = ctx.currentTime;
+            
+            // Ascending tone
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.exponentialRampToValueAtTime(600, now + 0.3);
+            
+            const gain = this.createGain(0.15);
+            gain.gain.setValueAtTime(0.15 * this.masterVolume, now);
+            gain.gain.linearRampToValueAtTime(0.15 * this.masterVolume, now + 0.2);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+            
+            osc.connect(gain);
+            osc.start(now);
+            osc.stop(now + 0.4);
+        }
+    };
+
+    // ============================================
     // SECTION 1: CONFIGURATION
     // All tunable game parameters in one place
     // ============================================
@@ -259,7 +616,7 @@
         TARGET_FPS: 60,             // Target frame rate for physics
         
         // Ship settings
-        SHIP_SIZE: 20,              // Ship triangle size in pixels
+        SHIP_SIZE: 15,              // Ship triangle size in pixels
         SHIP_THRUST: 0.15,          // Acceleration when thrusting
         SHIP_FRICTION: 0.99,        // Velocity decay (1 = no friction)
         SHIP_TURN_SPEED: 0.08,      // Rotation speed in radians per frame
@@ -619,6 +976,9 @@
             
             this.shootCooldown = CONFIG.SHOOT_COOLDOWN;
             
+            // Play fire sound
+            AudioSystem.playFire();
+            
             // Spawn bullet at ship's nose
             const nose = this.getVertices()[0];
             return new Bullet(
@@ -855,6 +1215,14 @@
         game.state = 'playing';
         game.speedMultiplier = 1;
         
+        // Initialize audio system
+        AudioSystem.init();
+        AudioSystem.resume();
+        
+        // Start background beat
+        AudioSystem.beat.stop();
+        AudioSystem.beat.start();
+        
         // Start first wave
         spawnWave();
         
@@ -921,6 +1289,10 @@
     function splitAsteroid(asteroid) {
         // Add points
         game.score += asteroid.getPoints();
+        
+        // Play explosion sound based on asteroid size
+        const size = asteroid.radius >= 40 ? 'large' : asteroid.radius >= 25 ? 'medium' : 'small';
+        AudioSystem.playExplosion(size);
         
         // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
@@ -992,6 +1364,8 @@
             game.previousState = null;
             game.lastFrameTime = 0; // Reset to prevent delta time jump
             pauseMenu.classList.remove('visible');
+            // Resume background beat
+            AudioSystem.beat.start();
         } else if (game.state === 'playing' || game.state === 'waveDelay') {
             // Pause game
             game.previousState = game.state;
@@ -999,6 +1373,9 @@
             pauseMenu.classList.add('visible');
             // Stop ship thrust visual/sound when pausing
             if (game.ship) game.ship.thrusting = false;
+            AudioSystem.thrustSound.stop();
+            // Pause background beat
+            AudioSystem.beat.stop();
         }
     }
 
@@ -1034,7 +1411,15 @@
         }
         
         // Thrust (up arrow or W or touch)
+        const wasThrusting = game.ship.thrusting;
         game.ship.thrusting = keys['ArrowUp'] || keys['KeyW'] || touch.thrust;
+        
+        // Handle thrust sound
+        if (game.ship.thrusting && !wasThrusting) {
+            AudioSystem.thrustSound.start();
+        } else if (!game.ship.thrusting && wasThrusting) {
+            AudioSystem.thrustSound.stop();
+        }
         
         // Shoot (space or touch)
         if ((keys['Space'] || touch.fire) && game.bullets.length < CONFIG.MAX_BULLETS) {
@@ -1109,8 +1494,16 @@
         game.lives--;
         updateHUD();
         
+        // Play ship explosion sound
+        AudioSystem.playShipExplosion();
+        
+        // Stop thrust sound if playing
+        AudioSystem.thrustSound.stop();
+        
         if (game.lives <= 0) {
             game.state = 'gameover';
+            // Stop background beat on game over
+            AudioSystem.beat.stop();
         } else {
             // Respawn ship at center with invulnerability
             game.ship.reset(canvas);
@@ -1192,8 +1585,15 @@
                 if (game.waveDelayTimer <= 0) {
                     spawnWave();
                     game.state = 'playing';
+                    AudioSystem.playNewWave();
                 }
             }
+            
+            // Update background beat tempo based on asteroid count
+            const maxAsteroids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
+            const totalAsteroidArea = game.asteroids.reduce((sum, a) => sum + a.radius * a.radius, 0);
+            const maxArea = maxAsteroids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
+            AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
         }
         
         // --- RENDER PHASE ---
@@ -1231,6 +1631,10 @@
     document.addEventListener('keydown', (e) => {
         keys[e.code] = true;
         
+        // Initialize and resume audio on first user interaction
+        AudioSystem.init();
+        AudioSystem.resume();
+        
         // Prevent default for game keys (stops page scrolling)
         if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
             e.preventDefault();
@@ -1252,6 +1656,7 @@
         // Clear all keys when window loses focus
         Object.keys(keys).forEach(key => keys[key] = false);
         if (game.ship) game.ship.thrusting = false;
+        AudioSystem.thrustSound.stop();
         
         // Auto-pause when window loses focus (only on desktop)
         if (!isTouchDevice && (game.state === 'playing' || game.state === 'waveDelay')) {
@@ -1295,6 +1700,9 @@
 
         element.addEventListener('touchstart', (e) => {
             e.preventDefault();
+            // Initialize and resume audio on first touch
+            AudioSystem.init();
+            AudioSystem.resume();
             setTouchState(control, true);
         }, { passive: false });
 

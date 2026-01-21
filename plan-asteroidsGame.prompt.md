@@ -1,6 +1,8 @@
-# Asteroids Game Implementation Plan (Snapshot: January 18, 2026)
+# Asteroids Game Implementation Plan (Snapshot: January 20, 2026)
 
 ## Recent Changes
+- **Classic Arcade Sounds**: Web Audio API-generated sounds including thrust rumble, fire "pew", asteroid explosions (size-based pitch), ship explosion, background heartbeat, and new wave chime
+- **Dynamic Background Beat**: Two-tone heartbeat that speeds up as asteroids are destroyed (like original arcade)
 - **Wave Progression**: Game now starts with 1 asteroid, adding 1 more per wave
 - **Energy Conservation**: Asteroid splits preserve kinetic energy - smaller pieces move faster, larger pieces slower
 - **Pause Menu**: Press ESC or P to pause; auto-pauses when window loses focus (desktop only)
@@ -27,6 +29,18 @@
 │  │   <div id="pause-menu"> (overlay with controls help)      │  │
 │  │   <div id="mobile-controls"> (touch buttons)              │  │
 │  │   <script>                                                │  │
+│  │   ┌─────────────────────────────────────────────────────┐ │  │
+│  │   │ ⓪ AUDIO SYSTEM (Web Audio API)                      │ │  │
+│  │   │   • AudioSystem object with ctx, masterVolume       │ │  │
+│  │   │   • init(), resume() for browser autoplay policy    │ │  │
+│  │   │   • thrustSound: low rumble (noise+filter)          │ │  │
+│  │   │   • playFire(): descending square wave "pew"        │ │  │
+│  │   │   • playExplosion(size): pitch varies by size       │ │  │
+│  │   │   • playShipExplosion(): dramatic multi-tone death  │ │  │
+│  │   │   • beat: alternating tones, tempo scales with      │ │  │
+│  │   │     remaining asteroid area (fewer = faster)        │ │  │
+│  │   │   • playNewWave(): ascending tone                   │ │  │
+│  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
 │  │   │ ① CONFIG (constants object)                         │ │  │
 │  │   │   • BASE_WIDTH/HEIGHT: 800x600 (reference dims)     │ │  │
@@ -74,13 +88,15 @@
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
 │  │   │ ⑤ GAME FUNCTIONS                                    │ │  │
-│  │   │   • init() — reset state, spawn wave                │ │  │
+│  │   │   • init() — reset state, spawn wave, start beat    │ │  │
 │  │   │   • spawnWave() — create asteroids for wave         │ │  │
-│  │   │   • togglePause() — pause/resume, reset lastFrame   │ │  │
+│  │   │   • togglePause() — pause/resume, stop/start sounds │ │  │
 │  │   │   • handleInput() — read keys{}/touch{}, apply      │ │  │
+│  │   │     thrust sound start/stop based on state change   │ │  │
 │  │   │   • checkCollisions() — bullets↔asteroids, ship↔ast │ │  │
-│  │   │   • splitAsteroid() — energy-conserving split       │ │  │
-│  │   │   • loseLife() — respawn or game over               │ │  │
+│  │   │   • splitAsteroid() — energy-conserving split +     │ │  │
+│  │   │     play explosion sound (size-based)               │ │  │
+│  │   │   • handleShipHit() — ship explosion sound, respawn │ │  │
 │  │   │   • updateHUD(), drawCenteredText()                 │ │  │
 │  │   └─────────────────────────────────────────────────────┘ │  │
 │  │   ┌─────────────────────────────────────────────────────┐ │  │
@@ -89,7 +105,7 @@
 │  │   │   gameLoop(timestamp) {                             │ │  │
 │  │   │       ┌──────────────────────────┐                  │ │  │
 │  │   │       │ Calculate dt (delta time)│                  │ │  │
-│  │   │       │ dt = elapsed / (1000/60) │ normalized to 60fps│ │ │
+│  │   │       │ dt = elapsed / (1000/60) │ norm. to 60fps   │ │  │
 │  │   │       └──────────┬───────────────┘                  │ │  │
 │  │   │                  ▼                                  │ │  │
 │  │   │       ┌──────────────┐                              │ │  │
@@ -97,18 +113,22 @@
 │  │   │       └──────┬───────┘                              │ │  │
 │  │   │              ▼                                      │ │  │
 │  │   │       ┌──────────────┐                              │ │  │
-│  │   │       │ if (paused)  │──▶ skip updates              │ │  │
+│  │   │       │ if (paused)  │--> skip updates              │ │  │
 │  │   │       └──────┬───────┘                              │ │  │
 │  │   │              ▼                                      │ │  │
-│  │   │       ┌──────────────────────┐                      │ │  │
-│  │   │       │ UPDATE PHASE         │                      │ │  │
-│  │   │       │ ship.update(dt)      │ ◀── all movement    │ │  │
-│  │   │       │ asteroids[].update(dt)│     scaled by dt   │ │  │
-│  │   │       │ bullets[].update(dt) │                      │ │  │
-│  │   │       └──────┬───────────────┘                      │ │  │
-│  │   │              ▼                                      │ │  │
+│  │   │       ┌───────────────────────┐                     │ │  │
+│  │   │       │ UPDATE PHASE          │                     │ │  │
+│  │   │       │ ship.update(dt)       │ <-- all movement    │ │  │
+│  │   │       │ asteroids[].update(dt)│     scaled by dt    │ │  │
+│  │   │       │ bullets[].update(dt)  │                     │ │  │
+│  │   │       └──────────┬────────────┘                     │ │  │
+│  │   │                  ▼                                  │ │  │
 │  │   │       ┌──────────────────┐                          │ │  │
 │  │   │       │ checkCollisions()│                          │ │  │
+│  │   │       └──────┬───────────┘                          │ │  │
+│  │   │              ▼                                      │ │  │
+│  │   │       ┌──────────────────┐                          │ │  │
+│  │   │       │ Update beat tempo│ (asteroid area)          │ │  │
 │  │   │       └──────┬───────────┘                          │ │  │
 │  │   │              ▼                                      │ │  │
 │  │   │       ┌──────────────┐                              │ │  │
@@ -147,46 +167,47 @@
 ```
     INPUTS                    GAME STATE                   OUTPUTS
  ┌──────────┐              ┌─────────────┐              ┌──────────┐
- │ Keyboard │─────────────▶│   keys{}    │              │  Canvas  │
+ │ Keyboard │------------->│   keys{}    │              │  Canvas  │
  │ Events   │              └──────┬──────┘              │ Rendering│
- └──────────┘                     │                     └────▲─────┘
+ └──────────┘                     │                     └────^─────┘
  ┌──────────┐              ┌──────┴──────┐                   │
- │  Touch   │─────────────▶│  touch{}    │                   │
+ │  Touch   │------------->│  touch{}    │                   │
  │ Events   │              └──────┬──────┘                   │
  └──────────┘                     │                          │
-                                  ▼                          │
+                                  v                          │
                          ┌────────────────┐                  │
                          │  handleInput() │                  │
                          └───────┬────────┘                  │
                                  │                           │
-                    ESC/P ───────┼───────▶ togglePause()     │
-                                 ▼                           │
+                    ESC/P ───────┼-------> togglePause()     │
+                                 │         (stop/start beat) │
+                                 v                           │
  ┌─────────┐  update(dt)  ┌─────────────┐     draw     ┌─────┴─────┐
- │  Ship   │◀────────────▶│             │─────────────▶│  Vector   │
+ │  Ship   │<------------>│             │------------->│  Vector   │
  ├─────────┤              │  Game Loop  │              │  Lines    │
- │Asteroids│◀────────────▶│ (delta-time │─────────────▶│  (stroke) │
+ │Asteroids│<------------>│ (delta-time │------------->│  (stroke) │
  ├─────────┤              │  based)     │              └───────────┘
- │ Bullets │◀────────────▶│             │                    │
- └─────────┘              └──────┬──────┘                    ▼
-       ▲                         │                     ┌───────────┐
-       │         ┌───────────────┘                     │    HUD    │
-       │         ▼                                     │Score/Lives│
-       │  ┌─────────────────┐                          │ /Wave/    │
-       └──│checkCollisions()│                          │PauseMenu/ │
-          └────────┬────────┘                          │TouchBtns  │
-                   │ on hit                            └───────────┘
-                   ▼
-          ┌─────────────────┐
-          │ splitAsteroid() │──▶ points += SIZE_SCORE
-          │ (energy conserv)│──▶ smaller = faster, larger = slower
-          │ or loseLife()   │──▶ lives -= 1
-          └─────────────────┘
+ │ Bullets │<------------>│             │                    │
+ └─────────┘              └──────┬──────┘                    v
+       ^                         │                     ┌───────────┐
+       │         ┌───────────────┼─────────────────┐   │    HUD    │
+       │         v               v                 │   │Score/Lives│
+       │  ┌─────────────────┐  ┌────────────────┐  │   │ /Wave/    │
+       └──┤checkCollisions()│  │ AudioSystem    │  │   │PauseMenu/ │
+          └────────┬────────┘  │ • beat.tempo <─┼──┘   │TouchBtns  │
+                   │ on hit    │ • thrustSound  │      └───────────┘
+                   v           │ • playFire()   │
+          ┌─────────────────┐  │ • playExplosion│      ┌───────────┐
+          │ splitAsteroid() │──┤   (size-based) │----->│   Audio   │
+          │ (energy conserv)│  │ • playShipExpl │      │  Output   │
+          │ or handleShipHit│  │ • playNewWave  │      └───────────┘
+          └─────────────────┘  └────────────────┘
 
  ┌──────────────────────────────────────────────────────────────────┐
  │ RESIZE HANDLING                                                  │
  │                                                                  │
- │  window.resize ──┐                                               │
- │  orientationchange─┼──▶ resizeCanvas() ──▶ scale entity positions│
+ │  window.resize ───┐                                              │
+ │  orientationchange┼--> resizeCanvas() --> scale entity positions │
  │  visualViewport ──┘                                              │
  └──────────────────────────────────────────────────────────────────┘
 ```
@@ -209,6 +230,27 @@ When an asteroid splits, kinetic energy is conserved:
 - Each child receives energy proportional to its mass
 - Speed calculated as **v = √(E / r²)**
 - Result: smaller fragments move faster, larger fragments move slower
+
+## Audio System (Web Audio API)
+
+All sounds are procedurally generated using the Web Audio API—no external audio files required.
+
+| Sound | Description | Implementation |
+|-------|-------------|----------------|
+| **Thrust** | Continuous low rumble | Looped noise buffer → lowpass filter (150Hz) |
+| **Fire** | Classic "pew" | Square wave 880Hz→110Hz exponential sweep |
+| **Explosion** | Size-based pitch | Noise burst + sine thump, freq varies by size |
+| **Ship Death** | Dramatic multi-tone | 3 descending sawtooth waves + noise burst |
+| **Background Beat** | Two-tone heartbeat | Alternating triangle waves (55Hz/50Hz) |
+| **New Wave** | Ascending chime | Sine wave 200Hz→600Hz sweep |
+
+**Dynamic Beat Tempo:**
+```
+tempo = minTempo + (maxTempo - minTempo) × (asteroidArea / maxArea)
+
+More asteroids → slower beat (1000ms)
+Fewer asteroids → faster beat (150ms)
+```
 
 ## Controls
 
