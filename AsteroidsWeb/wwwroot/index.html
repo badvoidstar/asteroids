@@ -1023,7 +1023,7 @@
          * @param {number} angle - Angle in radians
          */
         setAngle(angle) {
-            this.angle = angle;
+            this.angle = normalizeAngle(angle);
         }
 
         /**
@@ -1044,7 +1044,7 @@
             }
             
             // Rotate in shortest direction
-            this.angle += diff > 0 ? turnSpeed : -turnSpeed;
+            this.angle = normalizeAngle(this.angle + (diff > 0 ? turnSpeed : -turnSpeed));
             return false;
         }
 
