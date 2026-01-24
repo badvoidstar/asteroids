@@ -38,3 +38,6 @@ packages/
 # Windows
 Thumbs.db
 ehthumbs.db
+
+# Azure Developer CLI
+.azure/
