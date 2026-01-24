@@ -1,0 +1,14 @@
+# Azure Developer CLI (azd) configuration
+# Run 'azd up' to provision and deploy, 'azd deploy' for incremental updates
+name: asteroids
+metadata:
+  template: azd-init@1.0.0
+
+services:
+  web:
+    project: ./AsteroidsWeb
+    host: containerapp
+    language: dotnet
+    docker:
+      path: ./Dockerfile
+      context: .
