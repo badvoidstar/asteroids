@@ -758,6 +758,17 @@
     }
 
     /**
+     * Normalize angle to [-PI, PI] range
+     * @param {number} angle - Angle in radians
+     * @returns {number} Normalized angle
+     */
+    function normalizeAngle(angle) {
+        while (angle > Math.PI) angle -= 2 * Math.PI;
+        while (angle < -Math.PI) angle += 2 * Math.PI;
+        return angle;
+    }
+
+    /**
      * Point-in-polygon test using ray casting algorithm
      * Used for collision detection with irregular asteroid shapes
      * @param {object} point - {x, y} coordinates
@@ -1022,20 +1033,13 @@
          * @returns {boolean} True if target angle reached
          */
         rotateToAngle(targetAngle, turnSpeed = CONFIG.SHIP_TURN_SPEED) {
-            // Normalize angles to [-PI, PI]
-            const normalizeAngle = (a) => {
-                while (a > Math.PI) a -= 2 * Math.PI;
-                while (a < -Math.PI) a += 2 * Math.PI;
-                return a;
-            };
-            
             const currentAngle = normalizeAngle(this.angle);
             const target = normalizeAngle(targetAngle);
             let diff = normalizeAngle(target - currentAngle);
             
             // If close enough, snap to target
             if (Math.abs(diff) < turnSpeed) {
-                this.angle = targetAngle;
+                this.angle = normalizeAngle(targetAngle);
                 return true;
             }
             
