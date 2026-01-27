@@ -70,6 +70,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Authenticate azd with federated credentials
+        run: |
+          azd auth login --client-id "${{ secrets.AZURE_CLIENT_ID }}" \
+                         --federated-credential-provider github \
+                         --tenant-id "${{ secrets.AZURE_TENANT_ID }}"
+
       - name: Set up azd environment
         run: |
           # Set azd environment variables
@@ -91,7 +97,6 @@ jobs:
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_LOCATION: eastus
-          AZD_AUTH_USE_AZ_CLI_AUTH: "true"
 
       - name: Deployment Summary
         run: |
