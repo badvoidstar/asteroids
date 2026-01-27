@@ -7,11 +7,11 @@ This document explains how to configure the GitHub Actions workflow for automati
 The CI/CD pipeline automatically:
 - **Builds** the .NET application on every push and pull request
 - **Tests** the application to ensure code quality
-- **Deploys** to Azure Container Apps when code is pushed to the `main` branch
+- **Deploys** to Azure Container Apps when code is pushed to the `master` branch
 
 ## Prerequisites
 
-Before the workflow can run successfully, you need to:
+Before the workflow can run successfully, you need:
 
 1. An Azure subscription
 2. Azure CLI installed locally (for setup)
@@ -19,11 +19,7 @@ Before the workflow can run successfully, you need to:
 
 ## Setup Instructions
 
-### Option 1: Using Workload Identity Federation (OIDC) - Recommended
-
-Workload Identity Federation is the modern, more secure approach that doesn't require managing secrets.
-
-#### Step 1: Create an Azure AD App Registration
+### Step 1: Create an Azure AD App Registration
 
 ```bash
 # Login to Azure
@@ -38,14 +34,14 @@ az ad app create --display-name "GitHub-Asteroids-Deploy"
 
 Note the `appId` from the output - this is your `AZURE_CLIENT_ID`.
 
-#### Step 2: Create a Service Principal
+### Step 2: Create a Service Principal
 
 ```bash
 # Create service principal (replace <app-id> with the appId from step 1)
 az ad sp create --id <app-id>
 ```
 
-#### Step 3: Assign Contributor Role
+### Step 3: Assign Contributor Role
 
 ```bash
 # Get your subscription ID
@@ -58,35 +54,34 @@ az role assignment create \
   --scope /subscriptions/$SUBSCRIPTION_ID
 ```
 
-#### Step 4: Configure Federated Credentials
+### Step 4: Create GitHub Environment
+
+The workflow uses a GitHub environment for deployment protection and OIDC authentication.
+
+1. Go to your repository Settings → Environments
+2. Click "New environment"
+3. Name it `production`
+4. Optionally configure protection rules (e.g., required reviewers)
+
+### Step 5: Configure Federated Credentials
 
 ```bash
 # Get your GitHub repository information
 GITHUB_ORG="badvoidstar"
 GITHUB_REPO="asteroids"
 
-# Create federated credential for main branch
+# Create federated credential for the production environment
 az ad app federated-credential create \
   --id <app-id> \
   --parameters '{
-    "name": "github-main-branch",
+    "name": "github-asteroids-production",
     "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':ref:refs/heads/main",
-    "audiences": ["api://AzureADTokenExchange"]
-  }'
-
-# Optional: Create federated credential for pull requests
-az ad app federated-credential create \
-  --id <app-id> \
-  --parameters '{
-    "name": "github-pull-requests",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':pull_request",
+    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':environment:production",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 ```
 
-#### Step 5: Add GitHub Secrets
+### Step 6: Add GitHub Secrets
 
 Add the following secrets to your GitHub repository (Settings → Secrets and variables → Actions):
 
@@ -94,39 +89,13 @@ Add the following secrets to your GitHub repository (Settings → Secrets and va
 2. `AZURE_TENANT_ID` - Your Azure AD tenant ID (get it with `az account show --query tenantId -o tsv`)
 3. `AZURE_SUBSCRIPTION_ID` - Your subscription ID (get it with `az account show --query id -o tsv`)
 
-### Option 2: Using Service Principal with Secret (Legacy)
-
-If you prefer to use a client secret instead of OIDC:
-
-```bash
-# Create service principal with contributor role
-az ad sp create-for-rbac \
-  --name "GitHub-Asteroids-Deploy" \
-  --role Contributor \
-  --scopes /subscriptions/<subscription-id> \
-  --sdk-auth
-```
-
-This will output JSON. Add the following to GitHub Secrets:
-- `AZURE_CREDENTIALS` - The entire JSON output
-- `AZURE_SUBSCRIPTION_ID` - Your subscription ID
-
-Then update the workflow file to use `azure/login@v2` with the credentials parameter:
-
-```yaml
-- name: Log in to Azure
-  uses: azure/login@v2
-  with:
-    creds: ${{ secrets.AZURE_CREDENTIALS }}
-```
-
 ## Testing the Workflow
 
 ### Automatic Trigger
 
 The workflow will automatically run when:
-- Code is pushed to the `main` branch (builds, tests, and deploys)
-- A pull request is opened against `main` (builds and tests only)
+- Code is pushed to the `master` branch (builds, tests, and deploys)
+- A pull request is opened against `master` (builds and tests only)
 
 ### Manual Trigger
 
@@ -154,9 +123,10 @@ The workflow is defined in `.github/workflows/azure-deploy.yml` and includes:
 - Builds the solution
 - Runs tests
 
-### Deploy Job (main branch only)
+### Deploy Job (master branch only)
 - Installs Azure Developer CLI (azd)
-- Authenticates to Azure using OIDC
+- Authenticates to Azure using OIDC (federated credentials)
+- Authenticates azd using GitHub's federated credential provider
 - Provisions infrastructure (if needed) using Bicep templates
 - Deploys the containerized application to Azure Container Apps
 - Outputs the deployment URL
