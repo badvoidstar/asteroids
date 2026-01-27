@@ -17,6 +17,12 @@ dotnet watch run --project AsteroidsWeb/AsteroidsWeb.csproj
 docker-compose -f AsteroidsWeb/docker-compose.yml up --build
 ```
 
+## Continuous Integration/Deployment (CI/CD)
+
+This project includes a GitHub Actions workflow that automatically builds and deploys to Azure Container Apps when code is pushed to the `main` branch.
+
+**Setup Instructions:** See [CICD_SETUP.md](CICD_SETUP.md) for detailed setup instructions.
+
 ## Azure Deployment
 
 This project uses [Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/) for deployment to Azure Container Apps.
