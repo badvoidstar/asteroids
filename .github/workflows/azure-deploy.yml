@@ -91,6 +91,7 @@ jobs:
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_LOCATION: eastus
+          AZD_AUTH_USE_AZ_CLI_AUTH: "true"
 
       - name: Deployment Summary
         run: |
