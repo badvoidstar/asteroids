@@ -92,11 +92,48 @@ jobs:
           azd up --no-prompt
           
           # Get the deployment URL
-          DEPLOY_URL=$(azd env get-values | grep AZURE_CONTAINER_APPS_URL | cut -d'=' -f2 | tr -d '"')
+          DEPLOY_URL=$(azd env get-values | grep WEB_URI | cut -d'=' -f2 | tr -d '"')
           echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          
+          # Export values for custom domain step
+          echo "CONTAINER_APP_NAME=$(azd env get-values | grep CONTAINER_APP_NAME | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "CONTAINER_APPS_ENVIRONMENT=$(azd env get-values | grep CONTAINER_APPS_ENVIRONMENT | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "RESOURCE_GROUP=$(azd env get-values | grep RESOURCE_GROUP | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "CUSTOM_DOMAIN=$(azd env get-values | grep CUSTOM_DOMAIN | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_LOCATION: eastus
+
+      - name: Configure Custom Domain (if enabled)
+        if: env.CUSTOM_DOMAIN != ''
+        continue-on-error: true  # Don't fail the deployment if custom domain setup fails
+        run: |
+          echo "Configuring custom domain: $CUSTOM_DOMAIN"
+          
+          # Add custom hostname
+          az containerapp hostname add \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CONTAINER_APP_NAME" \
+            --hostname "$CUSTOM_DOMAIN" || echo "Hostname may already exist"
+          
+          # Create and bind certificate
+          CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
+          az containerapp env certificate create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CONTAINER_APPS_ENVIRONMENT" \
+            --certificate-name "$CERT_NAME" \
+            --hostname "$CUSTOM_DOMAIN" \
+            --validation-method CNAME || echo "Certificate may already exist"
+          
+          # Bind certificate to hostname
+          az containerapp hostname bind \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CONTAINER_APP_NAME" \
+            --hostname "$CUSTOM_DOMAIN" \
+            --environment "$CONTAINER_APPS_ENVIRONMENT" \
+            --validation-method CNAME || echo "Binding may already exist"
+          
+          echo "Custom domain configuration complete"
 
       - name: Deployment Summary
         run: |
