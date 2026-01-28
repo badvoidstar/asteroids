@@ -96,4 +96,7 @@ output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerApps.outputs.registry
 output AZURE_CONTAINER_REGISTRY_NAME string = containerApps.outputs.registryName
 output WEB_URI string = !empty(fullCustomDomain) ? 'https://${fullCustomDomain}' : web.outputs.uri
 output WEB_AZURE_URI string = web.outputs.uri
+#disable-next-line BCP318
 output DNS_NAME_SERVERS array = useCustomDomain ? dnsZone.outputs.nameServers : []
+output CERTIFICATE_ID string = web.outputs.certificateId
+output CONTAINER_APP_NAME string = web.outputs.name

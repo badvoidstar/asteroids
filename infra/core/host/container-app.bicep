@@ -64,11 +64,11 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         targetPort: targetPort
         transport: 'auto'
         allowInsecure: false
+        // Add custom domain without certificate first to allow DNS verification
         customDomains: !empty(customDomainName) ? [
           {
             name: customDomainName
-            bindingType: 'SniEnabled'
-            certificateId: managedCertificate.id
+            bindingType: 'Disabled'  // Start without TLS, will be enabled after cert is issued
           }
         ] : []
       }
@@ -116,7 +116,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   }
 }
 
-// Managed certificate for custom domain (only created if custom domain is specified)
+// Managed certificate for custom domain (created after hostname is added to container app)
 resource managedCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2023-05-01' = if (!empty(customDomainName)) {
   name: 'cert-${replace(customDomainName, '.', '-')}'
   parent: containerAppsEnvironment
@@ -126,6 +126,9 @@ resource managedCertificate 'Microsoft.App/managedEnvironments/managedCertificat
     subjectName: customDomainName
     domainControlValidation: 'CNAME'
   }
+  dependsOn: [
+    containerApp  // Ensure app with custom domain exists first
+  ]
 }
 
 output name string = containerApp.name
@@ -134,3 +137,4 @@ output customUri string = !empty(customDomainName) ? 'https://${customDomainName
 output id string = containerApp.id
 output fqdn string = containerApp.properties.configuration.ingress.fqdn
 output verificationId string = containerApp.properties.customDomainVerificationId
+output certificateId string = !empty(customDomainName) ? managedCertificate.id : ''
