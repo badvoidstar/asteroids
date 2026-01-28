@@ -49,7 +49,8 @@ module containerApps 'core/host/container-apps.bicep' = {
   }
 }
 
-// Astervoids Web Container App
+// Astervoids Web Container App (deployed WITHOUT custom domain initially)
+// Custom domain is added separately after DNS verification records are in place
 module web 'core/host/container-app.bicep' = {
   name: 'web'
   scope: rg
@@ -64,7 +65,7 @@ module web 'core/host/container-app.bicep' = {
     external: true
     minReplicas: 0
     maxReplicas: 3
-    customDomainName: fullCustomDomain
+    customDomainName: ''  // Don't add custom domain in initial deployment
   }
 }
 
@@ -94,9 +95,12 @@ module dnsRecords 'core/dns/dns-records.bicep' = if (useCustomDomain) {
 // Outputs for azd
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerApps.outputs.registryLoginServer
 output AZURE_CONTAINER_REGISTRY_NAME string = containerApps.outputs.registryName
-output WEB_URI string = !empty(fullCustomDomain) ? 'https://${fullCustomDomain}' : web.outputs.uri
+output WEB_URI string = web.outputs.uri
 output WEB_AZURE_URI string = web.outputs.uri
 #disable-next-line BCP318
 output DNS_NAME_SERVERS array = useCustomDomain ? dnsZone.outputs.nameServers : []
-output CERTIFICATE_ID string = web.outputs.certificateId
 output CONTAINER_APP_NAME string = web.outputs.name
+output CONTAINER_APPS_ENVIRONMENT string = containerApps.outputs.environmentName
+output RESOURCE_GROUP string = rg.name
+output CUSTOM_DOMAIN string = fullCustomDomain
+output DOMAIN_VERIFICATION_ID string = web.outputs.verificationId

@@ -116,25 +116,8 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   }
 }
 
-// Managed certificate for custom domain (created after hostname is added to container app)
-resource managedCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2023-05-01' = if (!empty(customDomainName)) {
-  name: 'cert-${replace(customDomainName, '.', '-')}'
-  parent: containerAppsEnvironment
-  location: location
-  tags: tags
-  properties: {
-    subjectName: customDomainName
-    domainControlValidation: 'CNAME'
-  }
-  dependsOn: [
-    containerApp  // Ensure app with custom domain exists first
-  ]
-}
-
 output name string = containerApp.name
 output uri string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
-output customUri string = !empty(customDomainName) ? 'https://${customDomainName}' : ''
 output id string = containerApp.id
 output fqdn string = containerApp.properties.configuration.ingress.fqdn
 output verificationId string = containerApp.properties.customDomainVerificationId
-output certificateId string = !empty(customDomainName) ? managedCertificate.id : ''

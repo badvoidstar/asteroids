@@ -1,104 +1,119 @@
 # Custom Domain HTTPS Setup
 
 ## Overview
-Due to Azure Container Apps requirements, custom domain HTTPS setup requires a two-stage deployment:
+Custom domain configuration for Azure Container Apps requires DNS verification to be in place before the domain can be added. The deployment handles this in two phases:
 
-1. **Stage 1 (Automated)**: Deploy the infrastructure with custom domain configured but without HTTPS
-   - Container App is created with custom domain in "Disabled" binding mode
-   - Managed certificate is provisioned
-   - DNS records are configured
+1. **Phase 1 (Automated)**: Deploy the app without custom domain, create DNS zone and verification records
+2. **Phase 2 (Automated with retry)**: Add custom domain and enable HTTPS after DNS propagates
 
-2. **Stage 2 (Manual)**: Enable HTTPS certificate binding after DNS propagation
-   - Run the `enable-cert-binding.ps1` script to bind the certificate
+## How It Works
 
-## Why Two Stages?
+### Initial Deployment
+When you deploy to the `production` environment, the workflow:
+1. Creates the Container App (without custom domain)
+2. Creates the Azure DNS Zone for `example.com`
+3. Creates DNS records:
+   - CNAME record: `astervoids.example.com` → Container App FQDN
+   - TXT record: `asuid.astervoids.example.com` → Domain verification ID
 
-Azure requires the custom hostname to be added to the Container App **before** a managed certificate can be created. However, the certificate must exist **before** it can be bound to the hostname with HTTPS enabled. This creates a dependency that cannot be resolved in a single deployment.
+### Custom Domain Setup
+After the base deployment, the workflow attempts to:
+1. Add the custom hostname to the Container App
+2. Create a managed SSL certificate
+3. Bind the certificate to enable HTTPS
 
-## Deployment Instructions
+**Note**: This step uses `continue-on-error: true` because DNS propagation may not be complete on the first deployment. Subsequent deployments will succeed once DNS has propagated.
 
-### Stage 1: Initial Deployment (Automated via GitHub Actions)
+## DNS Configuration
 
-The GitHub Actions workflow handles this automatically:
-```bash
-azd up --no-prompt
+### If Using Azure DNS (Recommended)
+The deployment automatically creates the DNS zone and records. You need to configure your domain registrar to use Azure's name servers:
+
+```
+ns1-XX.azure-dns.com
+ns2-XX.azure-dns.net
+ns3-XX.azure-dns.org
+ns4-XX.azure-dns.info
 ```
 
-This will:
-- Create all Azure resources
-- Add the custom domain to the Container App (HTTP only)
-- Create the managed certificate
-- Configure DNS records
+The name servers are output after deployment as `DNS_NAME_SERVERS`.
 
-### Stage 2: Enable HTTPS (Manual)
+### If Using External DNS
+If your domain is hosted elsewhere, you need to manually create:
 
-After the deployment completes and DNS has propagated (usually 5-15 minutes), enable HTTPS:
+1. **CNAME Record**:
+   - Name: `astervoids` (or your subdomain)
+   - Value: `<container-app-fqdn>` (e.g., `ca-web-production.redfield-xxxxx.eastus.azurecontainerapps.io`)
+
+2. **TXT Record** (for domain verification):
+   - Name: `asuid.astervoids` (or `asuid.<your-subdomain>`)
+   - Value: The `DOMAIN_VERIFICATION_ID` from deployment output
+
+## Manual Custom Domain Setup
+
+If the automated setup fails (e.g., DNS not propagated yet), run manually:
 
 ```powershell
-# Get the output values from the deployment
-$resourceGroup = "rg-production"
-$containerAppName = "ca-web-production"
-$customDomain = "astervoids.example.com"
-$certificateId = "/subscriptions/<sub-id>/resourceGroups/rg-production/providers/Microsoft.App/managedEnvironments/cae-production/managedCertificates/cert-astervoids-bootyblocks-com"
-
-# Run the binding script
-.\infra\enable-cert-binding.ps1 `
-    -ResourceGroup $resourceGroup `
-    -ContainerAppName $containerAppName `
-    -CustomDomain $customDomain `
-    -CertificateId $certificateId
+# From the repository root
+.\infra\enable-custom-domain.ps1 `
+    -ResourceGroup "rg-production" `
+    -ContainerAppName "ca-web-production" `
+    -EnvironmentName "cae-production" `
+    -CustomDomain "astervoids.example.com"
 ```
 
-Or use Azure CLI directly:
+Or using Azure CLI:
+
 ```bash
+# 1. Add hostname
+az containerapp hostname add \
+    --resource-group rg-production \
+    --name ca-web-production \
+    --hostname astervoids.example.com
+
+# 2. Create certificate
+az containerapp env certificate create \
+    --resource-group rg-production \
+    --name cae-production \
+    --certificate-name cert-astervoids-bootyblocks-com \
+    --hostname astervoids.example.com \
+    --validation-method CNAME
+
+# 3. Bind certificate
 az containerapp hostname bind \
     --resource-group rg-production \
     --name ca-web-production \
     --hostname astervoids.example.com \
-    --environment-certificate <certificate-id> \
+    --environment cae-production \
     --validation-method CNAME
-```
-
-## Automated Alternative (Future Enhancement)
-
-To fully automate this in the GitHub Actions workflow, add a second step:
-
-```yaml
-- name: Enable HTTPS Certificate Binding
-  shell: pwsh
-  run: |
-    # Wait for DNS propagation
-    Start-Sleep -Seconds 300
-    
-    # Get deployment outputs
-    $certId = azd env get-values | grep CERTIFICATE_ID | cut -d'=' -f2 | tr -d '"'
-    $appName = azd env get-values | grep CONTAINER_APP_NAME | cut -d'=' -f2 | tr -d '"'
-    
-    # Enable certificate binding
-    ./infra/enable-cert-binding.ps1 `
-      -ResourceGroup "rg-production" `
-      -ContainerAppName $appName `
-      -CustomDomain "astervoids.example.com" `
-      -CertificateId $certId
 ```
 
 ## Troubleshooting
 
-### Certificate Creation Fails
-- Ensure DNS records are properly configured
-- Verify the CNAME points to the Container App FQDN
-- Check the TXT record for domain verification
+### "TXT record not found" Error
+This means DNS verification records haven't propagated yet. Solutions:
+- Wait 5-15 minutes and re-run the deployment
+- Verify DNS records are correctly configured at your registrar
+- Check if you're using Azure DNS name servers
 
-### HTTPS Binding Fails
-- Confirm the managed certificate status is "Succeeded"
-- Verify DNS has fully propagated (use `nslookup`)
-- Ensure the custom domain is already added to the Container App
-
-### Certificate Status Check
+### Check DNS Propagation
 ```bash
+# Check TXT record
+nslookup -type=TXT asuid.astervoids.example.com
+
+# Check CNAME record  
+nslookup astervoids.example.com
+```
+
+### View Current Configuration
+```bash
+# List hostnames on container app
+az containerapp hostname list \
+    --resource-group rg-production \
+    --name ca-web-production
+
+# List certificates in environment
 az containerapp env certificate list \
     --resource-group rg-production \
-    --name cae-production \
-    --query "[?properties.subjectName=='astervoids.example.com']" \
-    --output table
+    --name cae-production
 ```
