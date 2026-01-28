@@ -70,6 +70,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Register required Azure providers
+        run: |
+          # Register Microsoft.App provider (required for Container Apps)
+          az provider register -n Microsoft.App --wait || true
+          az provider register -n Microsoft.OperationalInsights --wait || true
+
       - name: Authenticate azd with federated credentials
         run: |
           azd auth login --client-id "${{ secrets.AZURE_CLIENT_ID }}" \
@@ -110,30 +116,70 @@ jobs:
         run: |
           echo "Configuring custom domain: $CUSTOM_DOMAIN"
           
-          # Add custom hostname
-          az containerapp hostname add \
+          # Check if hostname already exists and is bound
+          EXISTING=$(az containerapp hostname list \
             --resource-group "$RESOURCE_GROUP" \
             --name "$CONTAINER_APP_NAME" \
-            --hostname "$CUSTOM_DOMAIN" || echo "Hostname may already exist"
+            --query "[?name=='$CUSTOM_DOMAIN'].bindingType" -o tsv 2>/dev/null || echo "")
           
-          # Create and bind certificate
+          if [ "$EXISTING" = "SniEnabled" ]; then
+            echo "Custom domain already configured with HTTPS"
+            exit 0
+          fi
+          
+          # Add custom hostname (skip if already exists)
+          if [ -z "$EXISTING" ]; then
+            echo "Adding custom hostname..."
+            az containerapp hostname add \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APP_NAME" \
+              --hostname "$CUSTOM_DOMAIN" || echo "Failed to add hostname - DNS may not be propagated yet"
+          fi
+          
+          # Create certificate (skip if already exists)
           CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
-          az containerapp env certificate create \
+          CERT_EXISTS=$(az containerapp env certificate list \
             --resource-group "$RESOURCE_GROUP" \
             --name "$CONTAINER_APPS_ENVIRONMENT" \
-            --certificate-name "$CERT_NAME" \
-            --hostname "$CUSTOM_DOMAIN" \
-            --validation-method CNAME || echo "Certificate may already exist"
+            --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
+          
+          if [ -z "$CERT_EXISTS" ]; then
+            echo "Creating managed certificate..."
+            az containerapp env certificate create \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APPS_ENVIRONMENT" \
+              --certificate-name "$CERT_NAME" \
+              --hostname "$CUSTOM_DOMAIN" \
+              --validation-method CNAME || echo "Failed to create certificate"
+          fi
+          
+          # Wait for certificate to be ready (up to 3 minutes)
+          echo "Waiting for certificate provisioning..."
+          CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
+          for i in {1..18}; do
+            STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
+            echo "Certificate state: $STATE (attempt $i/18)"
+            if [ "$STATE" = "Succeeded" ]; then
+              break
+            elif [ "$STATE" = "Failed" ]; then
+              echo "Certificate provisioning failed"
+              exit 0
+            fi
+            sleep 10
+          done
           
           # Bind certificate to hostname
-          az containerapp hostname bind \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$CONTAINER_APP_NAME" \
-            --hostname "$CUSTOM_DOMAIN" \
-            --environment "$CONTAINER_APPS_ENVIRONMENT" \
-            --validation-method CNAME || echo "Binding may already exist"
-          
-          echo "Custom domain configuration complete"
+          if [ "$STATE" = "Succeeded" ]; then
+            echo "Binding certificate..."
+            az containerapp hostname bind \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APP_NAME" \
+              --hostname "$CUSTOM_DOMAIN" \
+              --environment "$CONTAINER_APPS_ENVIRONMENT" \
+              --validation-method CNAME && echo "HTTPS enabled for $CUSTOM_DOMAIN"
+          else
+            echo "Certificate not ready yet. Run deployment again after DNS propagates."
+          fi
 
       - name: Deployment Summary
         run: |
