@@ -110,10 +110,16 @@ jobs:
           echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
           
           # Export values for custom domain step
-          echo "CONTAINER_APP_NAME=$(azd env get-values | grep CONTAINER_APP_NAME | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-          echo "CONTAINER_APPS_ENVIRONMENT=$(azd env get-values | grep CONTAINER_APPS_ENVIRONMENT | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=$(azd env get-values | grep RESOURCE_GROUP | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-          echo "CUSTOM_DOMAIN=$(azd env get-values | grep CUSTOM_DOMAIN | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "CONTAINER_APP_NAME=$(azd env get-values | grep '^CONTAINER_APP_NAME=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "CONTAINER_APPS_ENVIRONMENT=$(azd env get-values | grep '^CONTAINER_APPS_ENVIRONMENT=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "RESOURCE_GROUP=$(azd env get-values | grep '^RESOURCE_GROUP=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          
+          # Build full custom domain from components
+          DOMAIN_NAME=$(azd env get-values | grep '^CUSTOM_DOMAIN_NAME=' | cut -d'=' -f2 | tr -d '"')
+          SUBDOMAIN=$(azd env get-values | grep '^CUSTOM_SUBDOMAIN=' | cut -d'=' -f2 | tr -d '"')
+          if [ -n "$DOMAIN_NAME" ] && [ -n "$SUBDOMAIN" ]; then
+            echo "CUSTOM_DOMAIN=${SUBDOMAIN}.${DOMAIN_NAME}" >> $GITHUB_ENV
+          fi
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_LOCATION: eastus
