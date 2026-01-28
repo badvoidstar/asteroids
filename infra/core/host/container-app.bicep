@@ -37,6 +37,9 @@ param memory string = '0.5Gi'
 @description('Environment variables for the container')
 param env array = []
 
+@description('Custom domain name (optional, e.g., astervoids.example.com)')
+param customDomainName string = ''
+
 // Reference existing Container Apps Environment
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' existing = {
   name: containerAppsEnvironmentName
@@ -61,6 +64,13 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         targetPort: targetPort
         transport: 'auto'
         allowInsecure: false
+        customDomains: !empty(customDomainName) ? [
+          {
+            name: customDomainName
+            bindingType: 'SniEnabled'
+            certificateId: managedCertificate.id
+          }
+        ] : []
       }
       registries: [
         {
@@ -106,6 +116,21 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
   }
 }
 
+// Managed certificate for custom domain (only created if custom domain is specified)
+resource managedCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2023-05-01' = if (!empty(customDomainName)) {
+  name: 'cert-${replace(customDomainName, '.', '-')}'
+  parent: containerAppsEnvironment
+  location: location
+  tags: tags
+  properties: {
+    subjectName: customDomainName
+    domainControlValidation: 'CNAME'
+  }
+}
+
 output name string = containerApp.name
 output uri string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+output customUri string = !empty(customDomainName) ? 'https://${customDomainName}' : ''
 output id string = containerApp.id
+output fqdn string = containerApp.properties.configuration.ingress.fqdn
+output verificationId string = containerApp.properties.customDomainVerificationId
