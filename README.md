@@ -5,7 +5,6 @@ A classic Asteroids game built with HTML5 Canvas and ASP.NET Core.
 ## Play Online
 
 - **GitHub Pages:** https://badvoidstar.github.io/asteroids/
-- **Azure Container Apps:** https://ca-web-dev.redgrass-104110a0.westus3.azurecontainerapps.io/
 
 ## Local Development
 
