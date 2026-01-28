@@ -9,10 +9,10 @@
       "value": "${AZURE_LOCATION}"
     },
     "customDomainName": {
-      "value": "${CUSTOM_DOMAIN_NAME=bootyblocks.com}"
+      "value": "${CUSTOM_DOMAIN_NAME=}"
     },
     "customSubdomain": {
-      "value": "${CUSTOM_SUBDOMAIN=asteroids}"
+      "value": "${CUSTOM_SUBDOMAIN=}"
     }
   }
 }

@@ -37,7 +37,7 @@ param memory string = '0.5Gi'
 @description('Environment variables for the container')
 param env array = []
 
-@description('Custom domain name (optional, e.g., asteroids.bootyblocks.com)')
+@description('Custom domain name (optional, e.g., app.yourdomain.com)')
 param customDomainName string = ''
 
 // Reference existing Container Apps Environment

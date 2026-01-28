@@ -90,6 +90,14 @@ jobs:
           
           # Set any additional environment variables needed for deployment
           azd env set AZURE_LOCATION eastus
+          
+          # Set custom domain from secrets (if provided)
+          if [ -n "${{ secrets.CUSTOM_DOMAIN_NAME }}" ]; then
+            azd env set CUSTOM_DOMAIN_NAME "${{ secrets.CUSTOM_DOMAIN_NAME }}"
+          fi
+          if [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
+            azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}"
+          fi
 
       - name: Provision and Deploy to Azure
         id: deploy

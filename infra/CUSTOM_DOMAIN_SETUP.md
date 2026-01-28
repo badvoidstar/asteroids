@@ -6,15 +6,28 @@ Custom domain configuration for Azure Container Apps requires DNS verification t
 1. **Phase 1 (Automated)**: Deploy the app without custom domain, create DNS zone and verification records
 2. **Phase 2 (Automated with retry)**: Add custom domain and enable HTTPS after DNS propagates
 
+## Prerequisites: GitHub Secrets
+
+To enable custom domain support, you must configure these GitHub Secrets:
+
+| Secret | Example Value | Description |
+|--------|---------------|-------------|
+| `CUSTOM_DOMAIN_NAME` | `yourdomain.com` | Your root domain name |
+| `CUSTOM_SUBDOMAIN` | `app` | Subdomain for the application |
+
+If these secrets are not set, the deployment will succeed but skip custom domain configuration entirely.
+
+**To add secrets:** Go to your repo → Settings → Secrets and variables → Actions → New repository secret
+
 ## How It Works
 
 ### Initial Deployment
-When you deploy to the `production` environment, the workflow:
+When you deploy to the `production` environment with secrets configured, the workflow:
 1. Creates the Container App (without custom domain)
-2. Creates the Azure DNS Zone for `bootyblocks.com`
+2. Creates the Azure DNS Zone for your domain
 3. Creates DNS records:
-   - CNAME record: `asteroids.bootyblocks.com` → Container App FQDN
-   - TXT record: `asuid.asteroids.bootyblocks.com` → Domain verification ID
+   - CNAME record: `<subdomain>.<yourdomain.com>` → Container App FQDN
+   - TXT record: `asuid.<subdomain>.<yourdomain.com>` → Domain verification ID
 
 ### Custom Domain Setup
 After the base deployment, the workflow attempts to:
@@ -42,11 +55,11 @@ The name servers are output after deployment as `DNS_NAME_SERVERS`.
 If your domain is hosted elsewhere, you need to manually create:
 
 1. **CNAME Record**:
-   - Name: `asteroids` (or your subdomain)
+   - Name: `<your-subdomain>` (e.g., `app`)
    - Value: `<container-app-fqdn>` (e.g., `ca-web-production.redfield-xxxxx.eastus.azurecontainerapps.io`)
 
 2. **TXT Record** (for domain verification):
-   - Name: `asuid.asteroids` (or `asuid.<your-subdomain>`)
+   - Name: `asuid.<your-subdomain>` (e.g., `asuid.app`)
    - Value: The `DOMAIN_VERIFICATION_ID` from deployment output
 
 ## Manual Custom Domain Setup
@@ -59,7 +72,7 @@ If the automated setup fails (e.g., DNS not propagated yet), run manually:
     -ResourceGroup "rg-production" `
     -ContainerAppName "ca-web-production" `
     -EnvironmentName "cae-production" `
-    -CustomDomain "asteroids.bootyblocks.com"
+    -CustomDomain "app.yourdomain.com"
 ```
 
 Or using Azure CLI:
@@ -69,21 +82,21 @@ Or using Azure CLI:
 az containerapp hostname add \
     --resource-group rg-production \
     --name ca-web-production \
-    --hostname asteroids.bootyblocks.com
+    --hostname app.yourdomain.com
 
 # 2. Create certificate
 az containerapp env certificate create \
     --resource-group rg-production \
     --name cae-production \
-    --certificate-name cert-asteroids-bootyblocks-com \
-    --hostname asteroids.bootyblocks.com \
+    --certificate-name cert-app-yourdomain-com \
+    --hostname app.yourdomain.com \
     --validation-method CNAME
 
 # 3. Bind certificate
 az containerapp hostname bind \
     --resource-group rg-production \
     --name ca-web-production \
-    --hostname asteroids.bootyblocks.com \
+    --hostname app.yourdomain.com \
     --environment cae-production \
     --validation-method CNAME
 ```
@@ -98,11 +111,11 @@ This means DNS verification records haven't propagated yet. Solutions:
 
 ### Check DNS Propagation
 ```bash
-# Check TXT record
-nslookup -type=TXT asuid.asteroids.bootyblocks.com
+# Check TXT record (replace with your domain)
+nslookup -type=TXT asuid.app.yourdomain.com
 
 # Check CNAME record  
-nslookup asteroids.bootyblocks.com
+nslookup app.yourdomain.com
 ```
 
 ### View Current Configuration

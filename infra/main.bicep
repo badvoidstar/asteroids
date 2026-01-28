@@ -15,10 +15,10 @@ param webServiceName string = ''
 @description('Container image tag')
 param webImageTag string = ''
 
-@description('Custom domain name for the web app (e.g., bootyblocks.com)')
+@description('Custom domain name for the web app (e.g., yourdomain.com)')
 param customDomainName string = ''
 
-@description('Subdomain for the web app (e.g., asteroids)')
+@description('Subdomain for the web app (e.g., app)')
 param customSubdomain string = ''
 
 // Determine if custom domain should be configured (only for production)

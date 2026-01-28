@@ -22,13 +22,13 @@
     The name of the Container Apps Environment.
 
 .PARAMETER CustomDomain
-    The custom domain name (e.g., asteroids.bootyblocks.com).
+    The custom domain name (e.g., app.yourdomain.com).
 
 .EXAMPLE
     .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
         -ContainerAppName "ca-web-production" `
         -EnvironmentName "cae-production" `
-        -CustomDomain "asteroids.bootyblocks.com"
+        -CustomDomain "app.yourdomain.com"
 #>
 
 param(
