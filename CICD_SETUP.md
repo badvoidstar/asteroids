@@ -118,7 +118,7 @@ The workflow is defined in `.github/workflows/azure-deploy.yml` and includes:
 
 ### Build Job
 - Checks out the code
-- Sets up .NET 8.0
+- Sets up .NET 10.0
 - Restores dependencies
 - Builds the solution
 - Runs tests
@@ -138,7 +138,7 @@ The workflow is defined in `.github/workflows/azure-deploy.yml` and includes:
 You can customize the deployment by modifying these variables in the workflow file:
 
 - `AZURE_ENV_NAME`: The environment name (default: `production`)
-- `DOTNET_VERSION`: The .NET SDK version (default: `8.0.x`)
+- `DOTNET_VERSION`: The .NET SDK version (default: `10.0.x`)
 - `AZURE_LOCATION`: The Azure region (default: `eastus`)
 
 ### Infrastructure

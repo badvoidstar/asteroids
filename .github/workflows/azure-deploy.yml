@@ -21,7 +21,7 @@ permissions:
 
 env:
   AZURE_ENV_NAME: production
-  DOTNET_VERSION: '8.0.x'
+  DOTNET_VERSION: '10.0.x'
 
 jobs:
   build:
