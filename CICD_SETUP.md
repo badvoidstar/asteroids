@@ -85,9 +85,16 @@ az ad app federated-credential create \
 
 Add the following secrets to your GitHub repository (Settings → Secrets and variables → Actions):
 
+**Required for deployment:**
 1. `AZURE_CLIENT_ID` - The appId from step 1
 2. `AZURE_TENANT_ID` - Your Azure AD tenant ID (get it with `az account show --query tenantId -o tsv`)
 3. `AZURE_SUBSCRIPTION_ID` - Your subscription ID (get it with `az account show --query id -o tsv`)
+
+**Optional for custom domain:**
+4. `CUSTOM_DOMAIN_NAME` - Your root domain (e.g., `yourdomain.com`)
+5. `CUSTOM_SUBDOMAIN` - Subdomain for the app (e.g., `app`)
+
+If the custom domain secrets are configured, the workflow will automatically set up HTTPS. See [Custom Domain Setup](infra/CUSTOM_DOMAIN_SETUP.md) for detailed instructions on DNS configuration.
 
 ## Testing the Workflow
 
