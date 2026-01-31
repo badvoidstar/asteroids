@@ -38,13 +38,13 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore dependencies
-        run: dotnet restore agentic.sln
+        run: dotnet restore astervoids.sln
 
       - name: Build solution
-        run: dotnet build agentic.sln --configuration Release --no-restore
+        run: dotnet build astervoids.sln --configuration Release --no-restore
 
       - name: Run tests
-        run: dotnet test agentic.sln --configuration Release --no-build --verbosity normal
+        run: dotnet test astervoids.sln --configuration Release --no-build --verbosity normal
 
   deploy:
     name: Deploy to Azure
