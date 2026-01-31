@@ -177,7 +177,7 @@ If deployment fails:
 If the build fails:
 1. Ensure the .NET SDK version matches the project requirements
 2. Check for any missing dependencies
-3. Run the build locally to reproduce the issue: `dotnet build agentic.sln`
+3. Run the build locally to reproduce the issue: `dotnet build asteroids.sln`
 
 ## Additional Resources
 

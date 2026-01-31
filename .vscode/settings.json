@@ -9,7 +9,7 @@
         "WASD"
     ],
     "chat.tools.terminal.autoApprove": {
-        "/^start c:\\\\Users\\\\sguest\\\\agentic\\\\asteroids\\.html$/": {
+        "/^start c:\\\\Users\\\\sguest\\\\asteroids\\\\asteroids\\.html$/": {
             "approve": true,
             "matchCommandLine": true
         }
