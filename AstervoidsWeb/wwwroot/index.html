@@ -169,7 +169,7 @@
         }
 
         #start-screen h1 {
-            font-size: 64px;
+            font-size: 51px;
             margin-bottom: 40px;
             letter-spacing: 8px;
         }
@@ -182,23 +182,6 @@
 
         #start-screen .start-prompt span {
             color: #fff;
-        }
-
-        /* Show appropriate prompt based on touch state */
-        #start-screen .desktop-prompt {
-            display: block;
-        }
-
-        #start-screen .touch-prompt {
-            display: none;
-        }
-
-        .touch-enabled #start-screen .desktop-prompt {
-            display: none;
-        }
-
-        .touch-enabled #start-screen .touch-prompt {
-            display: block;
         }
 
         @keyframes pulse {
@@ -347,8 +330,7 @@
         <!-- Start screen overlay -->
         <div id="start-screen">
             <h1>ASTERVOIDS</h1>
-            <div class="start-prompt desktop-prompt">Press <span>ENTER</span> to Start</div>
-            <div class="start-prompt touch-prompt">Touch to Start</div>
+            <div class="start-prompt">Touch/Enter to Start</div>
         </div>
 
         <!-- Mobile touch controls -->
