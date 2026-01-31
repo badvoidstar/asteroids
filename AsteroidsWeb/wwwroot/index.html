@@ -3,6 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <!-- iOS standalone mode (Add to Home Screen) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Asteroids">
+    <!-- Android theme -->
+    <meta name="theme-color" content="#000000">
+    <meta name="mobile-web-app-capable" content="yes">
+    <!-- Web App Manifest for Add to Home Screen -->
+    <link rel="manifest" href="manifest.json">
     <title>Asteroids</title>
     <style>
         /* ============================================
@@ -108,6 +117,64 @@
             color: #fff;
         }
 
+        /* Start screen overlay */
+        #start-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #fff;
+            z-index: 100;
+        }
+
+        #start-screen.hidden {
+            display: none;
+        }
+
+        #start-screen h1 {
+            font-size: 64px;
+            margin-bottom: 40px;
+            letter-spacing: 8px;
+        }
+
+        #start-screen .start-prompt {
+            font-size: 24px;
+            color: #888;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        #start-screen .start-prompt span {
+            color: #fff;
+        }
+
+        /* Show appropriate prompt based on touch state */
+        #start-screen .desktop-prompt {
+            display: block;
+        }
+
+        #start-screen .touch-prompt {
+            display: none;
+        }
+
+        .touch-enabled #start-screen .desktop-prompt {
+            display: none;
+        }
+
+        .touch-enabled #start-screen .touch-prompt {
+            display: block;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
         /* Mobile touch controls */
         #mobile-controls {
             display: none;
@@ -201,6 +268,21 @@
         .touch-enabled #touch-restart.visible {
             display: flex;
         }
+
+        /* Fullscreen button - only visible on touch devices */
+        #touch-fullscreen {
+            width: 50px;
+            height: 50px;
+            top: 50px;
+            left: 10px;
+            font-size: 20px;
+        }
+
+        /* Hide fullscreen button when already in fullscreen or standalone mode */
+        .fullscreen-active #touch-fullscreen,
+        .standalone-mode #touch-fullscreen {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -229,6 +311,13 @@
             <div class="menu-item"><span>SPACE</span> - Shoot</div>
         </div>
 
+        <!-- Start screen overlay -->
+        <div id="start-screen">
+            <h1>ASTEROIDS</h1>
+            <div class="start-prompt desktop-prompt">Press <span>ENTER</span> to Start</div>
+            <div class="start-prompt touch-prompt">Touch to Start</div>
+        </div>
+
         <!-- Mobile touch controls -->
         <div id="mobile-controls">
             <div id="touch-left" class="touch-btn">◀</div>
@@ -237,6 +326,7 @@
             <div id="touch-fire" class="touch-btn">FIRE</div>
             <div id="touch-pause" class="touch-btn">❚❚</div>
             <div id="touch-restart" class="touch-btn">RESTART</div>
+            <div id="touch-fullscreen" class="touch-btn">⛶</div>
         </div>
     </div>
 
@@ -1176,7 +1266,7 @@
         score: 0,             // Current score
         lives: 0,             // Remaining lives
         wave: 0,              // Current wave number
-        state: 'playing',     // 'playing', 'respawning', 'gameover', 'waveDelay', 'paused'
+        state: 'start',       // 'start', 'playing', 'respawning', 'gameover', 'waveDelay', 'paused'
         waveDelayTimer: 0,    // Countdown for wave transition
         speedMultiplier: 1,   // Current speed scaling
         previousState: null,  // State before pausing (to resume correctly)
@@ -1185,6 +1275,9 @@
 
     // Pause menu element reference
     const pauseMenu = document.getElementById('pause-menu');
+    
+    // Start screen element reference
+    const startScreen = document.getElementById('start-screen');
 
     // Input tracking
     const keys = {};
@@ -1215,6 +1308,9 @@
         game.state = 'playing';
         game.speedMultiplier = 1;
         
+        // Hide start screen
+        startScreen.classList.add('hidden');
+        
         // Initialize audio system
         AudioSystem.init();
         AudioSystem.resume();
@@ -1227,6 +1323,15 @@
         spawnWave();
         
         updateHUD();
+    }
+    
+    /**
+     * Start game from start screen
+     */
+    function startGame() {
+        if (game.state === 'start') {
+            init();
+        }
     }
 
     /**
@@ -1383,6 +1488,14 @@
      * Handle player input each frame
      */
     function handleInput() {
+        if (game.state === 'start') {
+            // Check for start
+            if (keys['Enter']) {
+                startGame();
+            }
+            return;
+        }
+        
         if (game.state === 'gameover') {
             // Check for restart
             if (keys['Enter']) {
@@ -1556,6 +1669,11 @@
         // Handle player input
         handleInput();
         
+        // Update asteroids during start screen for visual effect
+        if (game.state === 'start') {
+            game.asteroids.forEach(asteroid => asteroid.update(canvas, dt));
+        }
+        
         // Update game state based on current state (skip when paused)
         if ((game.state === 'playing' || game.state === 'waveDelay') && game.state !== 'paused') {
             // Update ship
@@ -1605,7 +1723,9 @@
         // Draw game entities
         game.asteroids.forEach(asteroid => asteroid.draw(ctx));
         game.bullets.forEach(bullet => bullet.draw(ctx));
-        game.ship.draw(ctx);
+        if (game.state !== 'start') {
+            game.ship.draw(ctx);
+        }
         
         // Draw state-specific overlays
         if (game.state === 'waveDelay') {
@@ -1748,6 +1868,33 @@
         }, { passive: false });
     }
 
+    // Fullscreen button handler
+    const fullscreenBtn = document.getElementById('touch-fullscreen');
+    if (fullscreenBtn) {
+        fullscreenBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const container = document.getElementById('game-container');
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else if (container.requestFullscreen) {
+                container.requestFullscreen();
+            } else if (container.webkitRequestFullscreen) {
+                container.webkitRequestFullscreen(); // Safari
+            }
+        }, { passive: false });
+    }
+
+    // Track fullscreen state
+    document.addEventListener('fullscreenchange', () => {
+        document.getElementById('game-container').classList.toggle('fullscreen-active', !!document.fullscreenElement);
+        resizeCanvas();
+    });
+
+    // Detect standalone mode (Add to Home Screen)
+    if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
+        document.getElementById('game-container').classList.add('standalone-mode');
+    }
+
     // Show/hide restart button based on game state
     const originalGameLoop = gameLoop;
     function gameLoopWithMobileUI() {
@@ -1766,6 +1913,10 @@
     // Also enable touch controls on first touch anywhere on game
     document.getElementById('game-container').addEventListener('touchstart', (e) => {
         enableTouchControls();
+        // Start game on touch if on start screen
+        if (game.state === 'start') {
+            startGame();
+        }
         if (e.target.classList.contains('touch-btn')) return;
         e.preventDefault();
     }, { passive: false });
@@ -1802,8 +1953,18 @@
     // Initial canvas sizing before game starts
     resizeCanvas();
 
-    // Start the game when page loads
-    init();
+    // Initialize game objects for start screen display (but don't start playing)
+    game.ship = new Ship(canvas.width / 2, canvas.height / 2);
+    game.asteroids = [];
+    game.bullets = [];
+    // Spawn some asteroids for visual effect on start screen
+    for (let i = 0; i < CONFIG.INITIAL_ASTEROIDS; i++) {
+        game.asteroids.push(new Asteroid(
+            Math.random() * canvas.width,
+            Math.random() * canvas.height,
+            'large'
+        ));
+    }
     
     // Mobile UI update loop (only runs after touch controls are enabled)
     function startMobileUILoop() {
