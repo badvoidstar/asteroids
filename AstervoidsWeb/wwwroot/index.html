@@ -130,6 +130,24 @@
             display: block;
         }
 
+        /* Pause menu restart button for touch */
+        #pause-restart-btn {
+            background: rgba(255, 255, 255, 0.15);
+            border: 2px solid rgba(255, 255, 255, 0.6);
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 20px;
+            padding: 12px 30px;
+            border-radius: 8px;
+            margin-top: 10px;
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+
+        #pause-restart-btn:active {
+            background: rgba(255, 255, 255, 0.35);
+        }
+
         /* Start screen overlay */
         #start-screen {
             position: absolute;
@@ -323,7 +341,7 @@
             <div class="menu-item desktop-only"><span>Arrow Keys</span> / <span>WASD</span> - Move</div>
             <div class="menu-item desktop-only"><span>SPACE</span> - Shoot</div>
             <div class="menu-item touch-only">Tap <span>❚❚</span> to Resume</div>
-            <div class="menu-item touch-only">Tap <span>RESTART</span> to Restart</div>
+            <div class="menu-item touch-only"><button id="pause-restart-btn">RESTART</button></div>
         </div>
 
         <!-- Start screen overlay -->
@@ -1873,13 +1891,25 @@
         }, { passive: false });
     }
 
-    // Restart button handler
+    // Restart button handler (mobile controls)
     if (touchButtons.restart) {
         touchButtons.restart.addEventListener('touchstart', (e) => {
             e.preventDefault();
             if (game.state === 'gameover' || game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
                 touchButtons.restart.classList.remove('visible');
+                init();
+            }
+        }, { passive: false });
+    }
+
+    // Pause menu restart button handler
+    const pauseRestartBtn = document.getElementById('pause-restart-btn');
+    if (pauseRestartBtn) {
+        pauseRestartBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (game.state === 'paused') {
+                pauseMenu.classList.remove('visible');
                 init();
             }
         }, { passive: false });
