@@ -1669,11 +1669,15 @@
     // Touch input handling for mobile devices
     // ============================================
 
-    // Detect touch device
-    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    // Only enable touch controls when user actually touches the screen
+    // (not just when touch capability is detected, as many laptops have touch screens)
+    let touchControlsEnabled = false;
     
-    if (isTouchDevice) {
-        document.getElementById('game-container').classList.add('touch-enabled');
+    function enableTouchControls() {
+        if (!touchControlsEnabled) {
+            touchControlsEnabled = true;
+            document.getElementById('game-container').classList.add('touch-enabled');
+        }
     }
 
     // Touch control elements
@@ -1759,7 +1763,9 @@
     }
 
     // Prevent default touch behaviors on game container (no zooming/scrolling)
+    // Also enable touch controls on first touch anywhere on game
     document.getElementById('game-container').addEventListener('touchstart', (e) => {
+        enableTouchControls();
         if (e.target.classList.contains('touch-btn')) return;
         e.preventDefault();
     }, { passive: false });
@@ -1798,8 +1804,9 @@
 
     // Start the game when page loads
     init();
-    if (isTouchDevice) {
-        // Use wrapper that updates mobile UI
+    
+    // Mobile UI update loop (only runs after touch controls are enabled)
+    function startMobileUILoop() {
         requestAnimationFrame(function mobileLoop() {
             if (touchButtons.restart) {
                 touchButtons.restart.classList.toggle('visible', game.state === 'gameover');
@@ -1807,6 +1814,15 @@
             requestAnimationFrame(mobileLoop);
         });
     }
+    
+    // Update enableTouchControls to start mobile UI loop
+    const originalEnableTouchControls = enableTouchControls;
+    enableTouchControls = function() {
+        originalEnableTouchControls();
+        startMobileUILoop();
+        enableTouchControls = originalEnableTouchControls; // Only start loop once
+    };
+    
     requestAnimationFrame(gameLoop);  // Use rAF to provide timestamp
 
     </script>
