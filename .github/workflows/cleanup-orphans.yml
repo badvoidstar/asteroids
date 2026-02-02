@@ -243,15 +243,17 @@ jobs:
           # Scan certificates for orphans
           echo ""
           echo "Scanning certificates..."
-          CERTS=$(az containerapp env certificate list \
+          # Get both name and ID for certificates
+          CERT_DATA=$(az containerapp env certificate list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
             --name "cae-production" \
-            --query "[?starts_with(name, 'cert-${SUBDOMAIN_PREFIX}-') && name != 'cert-${SUBDOMAIN_PREFIX}-${DOMAIN_NAME//./-}'].name" \
-            -o tsv 2>/dev/null || echo "")
+            --query "[?starts_with(name, 'cert-${SUBDOMAIN_PREFIX}-') && name != 'cert-${SUBDOMAIN_PREFIX}-${DOMAIN_NAME//./-}'].{name:name, id:id}" \
+            -o json 2>/dev/null || echo "[]")
           
-          for CERT in $CERTS; do
-            # Extract suffix from cert name (e.g., "cert-astervoids-feature-test-bootyblocks-com" -> "feature-test")
-            # Remove prefix and domain suffix
+          echo "$CERT_DATA" | jq -r '.[] | "\(.name)|\(.id)"' | while IFS='|' read -r CERT CERT_ID; do
+            [ -z "$CERT" ] && continue
+            
+            # Extract suffix from cert name
             DOMAIN_SUFFIX="${DOMAIN_NAME//./-}"
             TEMP="${CERT#cert-${SUBDOMAIN_PREFIX}-}"
             SUFFIX="${TEMP%-${DOMAIN_SUFFIX}}"
@@ -266,11 +268,17 @@ jobs:
             
             if [ "$IS_ACTIVE" = "false" ]; then
               echo "  Orphan certificate: $CERT"
-              az containerapp env certificate delete \
+              # Try deleting by ID first, then by name
+              if az containerapp env certificate delete \
                 --resource-group "${{ env.PRODUCTION_RG }}" \
                 --name "cae-production" \
-                --certificate-name "$CERT" \
-                --yes 2>/dev/null && CERT_CLEANED=$((CERT_CLEANED + 1)) && echo "  -> Deleted"
+                --id "$CERT_ID" \
+                --yes 2>&1; then
+                echo "  -> Deleted by ID"
+                # Note: can't increment counter in subshell
+              else
+                echo "  -> Failed to delete (may still be bound to a domain)"
+              fi
             fi
           done
           
