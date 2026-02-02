@@ -119,6 +119,12 @@ jobs:
           # Set location
           azd env set AZURE_LOCATION eastus
           
+          # For branch deployments, set resource group to production's resource group
+          # This tells azd deploy where to find the container app
+          if [ "${{ steps.vars.outputs.is_production }}" != "true" ]; then
+            azd env set AZURE_RESOURCE_GROUP "rg-production"
+          fi
+          
           # Set custom domain from secrets (if provided)
           if [ -n "${{ secrets.CUSTOM_DOMAIN_NAME }}" ]; then
             azd env set CUSTOM_DOMAIN_NAME "${{ secrets.CUSTOM_DOMAIN_NAME }}"
