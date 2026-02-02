@@ -34,7 +34,14 @@ This project uses [Azure Developer CLI (azd)](https://learn.microsoft.com/azure/
 ### First Time Setup
 
 ```powershell
-./deploy.ps1 -Init
+# Login to Azure (opens browser)
+azd auth login
+
+# Initialize environment (prompts for subscription and region)
+azd init
+
+# Provision infrastructure and deploy
+azd up
 ```
 
 This will:
@@ -53,8 +60,8 @@ This will:
 | **Full provision + deploy** | `azd up` | ~2 min |
 | **View logs** | `azd monitor --logs` | - |
 | **Open in portal** | `azd monitor` | - |
-| **Show deployment info** | `./deploy.ps1 -Status` | - |
-| **Delete all resources** | `./deploy.ps1 -Down` | - |
+| **Show deployment info** | `azd show` | - |
+| **Delete all resources** | `azd down --force --purge` | - |
 
 ### Quick Deploy After Code Changes
 
@@ -79,7 +86,6 @@ That's it! Your changes will be live in about 24 seconds.
 ```
 astervoids/
 ├── azure.yaml              # Azure Developer CLI config
-├── deploy.ps1              # Deployment helper script
 ├── infra/                  # Infrastructure as Code (Bicep)
 │   ├── main.bicep
 │   ├── main.parameters.json
