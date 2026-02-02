@@ -118,7 +118,7 @@ module webBranch 'core/host/container-app.bicep' = if (!isProduction) {
   params: {
     name: !empty(webServiceName) ? webServiceName : 'ca-web-${environmentName}'
     location: location
-    tags: union(tags, { 'azd-service-name': 'web' })
+    tags: union(tags, { 'azd-service-name': 'web-${environmentName}' })  // Unique tag per branch
     containerAppsEnvironmentName: 'cae-production'
     containerRegistryName: 'crproduction${uniqueString(subscription().subscriptionId, sharedResourceGroupName)}'
     imageName: !empty(webImageTag) ? 'asteroids-web:${webImageTag}' : ''
