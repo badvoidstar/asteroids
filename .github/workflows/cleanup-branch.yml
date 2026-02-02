@@ -27,8 +27,8 @@ jobs:
           BRANCH_NAME="${{ github.event.ref }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-          # Sanitize branch name (same logic as deploy workflow)
-          SANITIZED=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20)
+          # Sanitize branch name (same logic as deploy workflow, remove trailing dashes)
+          SANITIZED=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20 | sed 's/-*$//')
           echo "sanitized_branch=$SANITIZED" >> $GITHUB_OUTPUT
           echo "container_app_name=ca-web-$SANITIZED" >> $GITHUB_OUTPUT
 
