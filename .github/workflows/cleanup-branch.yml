@@ -2,8 +2,6 @@ name: Cleanup Branch Deployment
 
 on:
   delete:
-    branches:
-      - '**'
 
 permissions:
   id-token: write
