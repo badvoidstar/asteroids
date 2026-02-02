@@ -148,8 +148,13 @@ jobs:
           echo "**Summary:** Found $ORPHANS_FOUND orphaned deployments, cleaned up $ORPHANS_CLEANED" >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup orphaned DNS records and certificates
-        if: ${{ secrets.CUSTOM_DOMAIN_NAME != '' && secrets.CUSTOM_SUBDOMAIN != '' }}
         run: |
+          # Check if custom domain is configured
+          if [ -z "${{ secrets.CUSTOM_DOMAIN_NAME }}" ] || [ -z "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
+            echo "Custom domain not configured, skipping DNS/cert cleanup"
+            exit 0
+          fi
+          
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🧹 Scanning for Orphaned DNS/Certificates" >> $GITHUB_STEP_SUMMARY
           
