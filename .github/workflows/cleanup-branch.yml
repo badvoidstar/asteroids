@@ -62,10 +62,13 @@ jobs:
             --yes || echo "Container App not found or already deleted"
 
       - name: Delete DNS Records
-        if: ${{ secrets.CUSTOM_DOMAIN_NAME != '' && secrets.CUSTOM_SUBDOMAIN != '' }}
         continue-on-error: true
         run: |
           DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
+          if [ -z "$DOMAIN_NAME" ]; then
+            echo "No custom domain configured, skipping DNS cleanup"
+            exit 0
+          fi
           BRANCH_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
           
           echo "Deleting DNS records for: $BRANCH_SUBDOMAIN.$DOMAIN_NAME"
@@ -85,10 +88,13 @@ jobs:
             --yes || echo "TXT record not found"
 
       - name: Delete Managed Certificate
-        if: ${{ secrets.CUSTOM_DOMAIN_NAME != '' && secrets.CUSTOM_SUBDOMAIN != '' }}
         continue-on-error: true
         run: |
           DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
+          if [ -z "$DOMAIN_NAME" ]; then
+            echo "No custom domain configured, skipping certificate cleanup"
+            exit 0
+          fi
           BRANCH_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
           CERT_NAME="cert-${BRANCH_SUBDOMAIN}-${DOMAIN_NAME//./-}"
           
