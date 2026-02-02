@@ -268,14 +268,13 @@ jobs:
             
             if [ "$IS_ACTIVE" = "false" ]; then
               echo "  Orphan certificate: $CERT"
-              # Try deleting by ID first, then by name
+              # Use --certificate parameter (not --id)
               if az containerapp env certificate delete \
                 --resource-group "${{ env.PRODUCTION_RG }}" \
                 --name "cae-production" \
-                --id "$CERT_ID" \
+                --certificate "$CERT" \
                 --yes 2>&1; then
-                echo "  -> Deleted by ID"
-                # Note: can't increment counter in subshell
+                echo "  -> Deleted"
               else
                 echo "  -> Failed to delete (may still be bound to a domain)"
               fi
@@ -283,5 +282,5 @@ jobs:
           done
           
           echo ""
-          echo "DNS/Cert cleanup: $DNS_CLEANED DNS records, $CERT_CLEANED certificates"
-          echo "**DNS/Cert cleanup:** $DNS_CLEANED DNS records, $CERT_CLEANED certificates" >> $GITHUB_STEP_SUMMARY
+          echo "DNS/Cert cleanup complete"
+          echo "**DNS/Cert cleanup:** Complete" >> $GITHUB_STEP_SUMMARY
