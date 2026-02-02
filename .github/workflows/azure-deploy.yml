@@ -21,6 +21,10 @@ permissions:
 
 env:
   DOTNET_VERSION: '10.0.x'
+  # Shared resource naming conventions
+  PRODUCTION_RG: 'rg-production'
+  CONTAINER_ENV_NAME: 'cae-production'
+  CONTAINER_APP_PREFIX: 'ca-web'
 
 jobs:
   build:
@@ -64,8 +68,9 @@ jobs:
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-          # Sanitize branch name for Azure resources (lowercase, replace / with -, remove special chars, max 20 chars, remove trailing dashes)
-          SANITIZED=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20 | sed 's/-*$//')
+          # Sanitize branch name using shared script
+          chmod +x .github/scripts/sanitize-branch-name.sh
+          SANITIZED=$(.github/scripts/sanitize-branch-name.sh "$BRANCH_NAME")
           echo "sanitized_branch=$SANITIZED" >> $GITHUB_OUTPUT
           
           # Determine if this is production (master branch)
@@ -103,7 +108,7 @@ jobs:
       - name: Check production infrastructure (for branch deployments)
         if: steps.vars.outputs.is_production != 'true'
         run: |
-          if ! az group show --name "rg-production" &>/dev/null; then
+          if ! az group show --name "${{ env.PRODUCTION_RG }}" &>/dev/null; then
             echo "::error::Production environment must be deployed first. Deploy master branch before deploying feature branches."
             exit 1
           fi
@@ -122,7 +127,7 @@ jobs:
           # For branch deployments, set resource group to production's resource group
           # This tells azd deploy where to find the container app
           if [ "${{ steps.vars.outputs.is_production }}" != "true" ]; then
-            azd env set AZURE_RESOURCE_GROUP "rg-production"
+            azd env set AZURE_RESOURCE_GROUP "${{ env.PRODUCTION_RG }}"
           fi
           
           # Set custom domain from secrets (if provided)

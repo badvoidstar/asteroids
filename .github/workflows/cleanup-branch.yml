@@ -1,8 +1,9 @@
 name: Cleanup Branch Deployment
 
 on:
-  delete:
-  # Manual trigger as fallback
+  # Note: The 'delete' event is intentionally not used here because GitHub Actions
+  # does not reliably trigger workflows on branch deletion for this repository.
+  # Use the scheduled cleanup-orphans.yml workflow or manual trigger below instead.
   workflow_dispatch:
     inputs:
       branch_name:
@@ -16,34 +17,30 @@ permissions:
 
 env:
   PRODUCTION_RG: 'rg-production'
+  CONTAINER_ENV_NAME: 'cae-production'
+  CONTAINER_APP_PREFIX: 'ca-web'
 
 jobs:
   cleanup:
     name: Cleanup Branch Resources
     runs-on: ubuntu-latest
-    # For delete events: only run for branch deletions (not tag deletions), and not for master
-    # For workflow_dispatch: always run
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.ref_type == 'branch' && github.event.ref != 'master')
     environment: production
     
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set branch variables
         id: vars
         run: |
-          # Get branch name from event or input
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            BRANCH_NAME="${{ github.event.inputs.branch_name }}"
-          else
-            BRANCH_NAME="${{ github.event.ref }}"
-          fi
+          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-          # Sanitize branch name (same logic as deploy workflow)
-          SANITIZED=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20 | sed 's/-*$//')
+          # Sanitize branch name using shared script
+          chmod +x .github/scripts/sanitize-branch-name.sh
+          SANITIZED=$(.github/scripts/sanitize-branch-name.sh "$BRANCH_NAME")
           echo "sanitized_branch=$SANITIZED" >> $GITHUB_OUTPUT
-          echo "container_app_name=ca-web-$SANITIZED" >> $GITHUB_OUTPUT
+          echo "container_app_name=${{ env.CONTAINER_APP_PREFIX }}-$SANITIZED" >> $GITHUB_OUTPUT
 
       - name: Log in to Azure using OIDC
         uses: azure/login@v2
@@ -102,9 +99,9 @@ jobs:
           
           az containerapp env certificate delete \
             --resource-group "${{ env.PRODUCTION_RG }}" \
-            --name "cae-production" \
-            --certificate-name "$CERT_NAME" \
-            --yes || echo "Certificate not found"
+            --name "${{ env.CONTAINER_ENV_NAME }}" \
+            --certificate "$CERT_NAME" \
+            --yes 2>/dev/null || echo "Certificate not found or already deleted"
 
       - name: Cleanup Summary
         run: |

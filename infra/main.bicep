@@ -27,6 +27,10 @@ var isProduction = environmentName == 'production'
 // For branch deployments, use production's shared infrastructure
 var sharedResourceGroupName = 'rg-production'
 
+// Shared resource naming
+var containerRegistryName = 'crproduction${uniqueString(subscription().subscriptionId, sharedResourceGroupName)}'
+var containerAppsEnvironmentName = 'cae-production'
+
 // Determine if custom domain should be configured
 var useCustomDomain = !empty(customDomainName) && !empty(customSubdomain)
 var fullCustomDomain = useCustomDomain ? '${customSubdomain}.${customDomainName}' : ''
@@ -52,10 +56,10 @@ module containerAppsProduction 'core/host/container-apps.bicep' = if (isProducti
   name: 'container-apps'
   scope: productionRg
   params: {
-    name: 'cae-production'
+    name: containerAppsEnvironmentName
     location: location
     tags: tags
-    containerRegistryName: 'crproduction${uniqueString(subscription().subscriptionId, 'rg-production')}'
+    containerRegistryName: containerRegistryName
   }
 }
 
@@ -67,8 +71,8 @@ module webProduction 'core/host/container-app.bicep' = if (isProduction) {
     name: !empty(webServiceName) ? webServiceName : 'ca-web-production'
     location: location
     tags: union(tags, { 'azd-service-name': 'web' })
-    containerAppsEnvironmentName: 'cae-production'
-    containerRegistryName: 'crproduction${uniqueString(subscription().subscriptionId, 'rg-production')}'
+    containerAppsEnvironmentName: containerAppsEnvironmentName
+    containerRegistryName: containerRegistryName
     imageName: !empty(webImageTag) ? 'astervoids-web:${webImageTag}' : ''
     targetPort: 8080
     external: true
@@ -119,8 +123,8 @@ module webBranch 'core/host/container-app.bicep' = if (!isProduction) {
     name: !empty(webServiceName) ? webServiceName : 'ca-web-${environmentName}'
     location: location
     tags: union(tags, { 'azd-service-name': 'web-${environmentName}' })  // Unique tag per branch
-    containerAppsEnvironmentName: 'cae-production'
-    containerRegistryName: 'crproduction${uniqueString(subscription().subscriptionId, sharedResourceGroupName)}'
+    containerAppsEnvironmentName: containerAppsEnvironmentName
+    containerRegistryName: containerRegistryName
     imageName: !empty(webImageTag) ? 'astervoids-web:${webImageTag}' : ''
     targetPort: 8080
     external: true
@@ -147,14 +151,14 @@ module dnsRecordsBranch 'core/dns/dns-records.bicep' = if (!isProduction && useC
 // ============================================================================
 
 // Use conditional outputs based on deployment type
-output AZURE_CONTAINER_REGISTRY_ENDPOINT string = isProduction ? containerAppsProduction.outputs.registryLoginServer : 'crproduction${uniqueString(subscription().subscriptionId, sharedResourceGroupName)}.azurecr.io'
-output AZURE_CONTAINER_REGISTRY_NAME string = 'crproduction${uniqueString(subscription().subscriptionId, isProduction ? 'rg-production' : sharedResourceGroupName)}'
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = isProduction ? containerAppsProduction.outputs.registryLoginServer : '${containerRegistryName}.azurecr.io'
+output AZURE_CONTAINER_REGISTRY_NAME string = containerRegistryName
 output WEB_URI string = isProduction ? webProduction.outputs.uri : webBranch.outputs.uri
 output WEB_AZURE_URI string = isProduction ? webProduction.outputs.uri : webBranch.outputs.uri
 #disable-next-line BCP318
 output DNS_NAME_SERVERS array = (isProduction && useCustomDomain) ? dnsZone.outputs.nameServers : []
 output CONTAINER_APP_NAME string = isProduction ? webProduction.outputs.name : webBranch.outputs.name
-output CONTAINER_APPS_ENVIRONMENT string = 'cae-production'
+output CONTAINER_APPS_ENVIRONMENT string = containerAppsEnvironmentName
 output RESOURCE_GROUP string = isProduction ? 'rg-production' : sharedResourceGroupName
 output CUSTOM_DOMAIN string = fullCustomDomain
 output DOMAIN_VERIFICATION_ID string = isProduction ? webProduction.outputs.verificationId : webBranch.outputs.verificationId

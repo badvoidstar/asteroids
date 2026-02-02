@@ -12,6 +12,8 @@ permissions:
 
 env:
   PRODUCTION_RG: 'rg-production'
+  CONTAINER_ENV_NAME: 'cae-production'
+  CONTAINER_APP_PREFIX: 'ca-web'
 
 jobs:
   cleanup:
@@ -37,16 +39,19 @@ jobs:
           echo "### 🔍 Scanning for Orphaned Deployments" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Make sanitize script executable
+          chmod +x .github/scripts/sanitize-branch-name.sh
+          
           # Get all remote branches
           git fetch --all
           BRANCHES=$(git branch -r | grep -v HEAD | sed 's/origin\///' | tr -d ' ')
           echo "Active branches:"
           echo "$BRANCHES"
           
-          # Get all container apps matching our naming pattern (ca-web-*)
+          # Get all container apps matching our naming pattern
           CONTAINER_APPS=$(az containerapp list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
-            --query "[?starts_with(name, 'ca-web-')].name" \
+            --query "[?starts_with(name, '${{ env.CONTAINER_APP_PREFIX }}-')].name" \
             -o tsv 2>/dev/null || echo "")
           
           if [ -z "$CONTAINER_APPS" ]; then
@@ -67,20 +72,19 @@ jobs:
             echo "Checking: $APP"
             
             # Skip production container app
-            if [ "$APP" = "ca-web-production" ]; then
+            if [ "$APP" = "${{ env.CONTAINER_APP_PREFIX }}-production" ]; then
               echo "  -> Skipping production"
               continue
             fi
             
             # Extract the sanitized branch name from container app name
-            # Container app name format: ca-web-{sanitized-branch}
-            SANITIZED_BRANCH="${APP#ca-web-}"
+            SANITIZED_BRANCH="${APP#${{ env.CONTAINER_APP_PREFIX }}-}"
             
             # Check if any branch matches this sanitized name
             BRANCH_EXISTS=false
             for BRANCH in $BRANCHES; do
-              # Sanitize the branch name the same way deploy workflow does
-              BRANCH_SANITIZED=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20 | sed 's/-*$//')
+              # Sanitize the branch name using shared script
+              BRANCH_SANITIZED=$(.github/scripts/sanitize-branch-name.sh "$BRANCH")
               
               if [ "$BRANCH_SANITIZED" = "$SANITIZED_BRANCH" ]; then
                 BRANCH_EXISTS=true
@@ -132,8 +136,8 @@ jobs:
                 CERT_NAME="cert-${BRANCH_SUBDOMAIN}-${DOMAIN_NAME//./-}"
                 az containerapp env certificate delete \
                   --resource-group "${{ env.PRODUCTION_RG }}" \
-                  --name "cae-production" \
-                  --certificate-name "$CERT_NAME" \
+                  --name "${{ env.CONTAINER_ENV_NAME }}" \
+                  --certificate "$CERT_NAME" \
                   --yes 2>/dev/null || echo "  -> Certificate not found"
               fi
             fi
@@ -160,19 +164,17 @@ jobs:
           
           DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
           SUBDOMAIN_PREFIX="${{ secrets.CUSTOM_SUBDOMAIN }}"
-          DNS_CLEANED=0
-          CERT_CLEANED=0
           
           # Get list of active container apps (excluding production)
           ACTIVE_APPS=$(az containerapp list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
-            --query "[?starts_with(name, 'ca-web-') && name != 'ca-web-production'].name" \
+            --query "[?starts_with(name, '${{ env.CONTAINER_APP_PREFIX }}-') && name != '${{ env.CONTAINER_APP_PREFIX }}-production'].name" \
             -o tsv 2>/dev/null || echo "")
           
           # Build list of expected subdomain suffixes from active apps
           ACTIVE_SUFFIXES=""
           for APP in $ACTIVE_APPS; do
-            SUFFIX="${APP#ca-web-}"
+            SUFFIX="${APP#${{ env.CONTAINER_APP_PREFIX }}-}"
             ACTIVE_SUFFIXES="$ACTIVE_SUFFIXES $SUFFIX"
           done
           echo "Active branch suffixes: $ACTIVE_SUFFIXES"
@@ -243,14 +245,13 @@ jobs:
           # Scan certificates for orphans
           echo ""
           echo "Scanning certificates..."
-          # Get both name and ID for certificates
-          CERT_DATA=$(az containerapp env certificate list \
+          CERTS=$(az containerapp env certificate list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
-            --name "cae-production" \
-            --query "[?starts_with(name, 'cert-${SUBDOMAIN_PREFIX}-') && name != 'cert-${SUBDOMAIN_PREFIX}-${DOMAIN_NAME//./-}'].{name:name, id:id}" \
-            -o json 2>/dev/null || echo "[]")
+            --name "${{ env.CONTAINER_ENV_NAME }}" \
+            --query "[?starts_with(name, 'cert-${SUBDOMAIN_PREFIX}-') && name != 'cert-${SUBDOMAIN_PREFIX}-${DOMAIN_NAME//./-}'].name" \
+            -o tsv 2>/dev/null || echo "")
           
-          echo "$CERT_DATA" | jq -r '.[] | "\(.name)|\(.id)"' | while IFS='|' read -r CERT CERT_ID; do
+          for CERT in $CERTS; do
             [ -z "$CERT" ] && continue
             
             # Extract suffix from cert name
@@ -268,10 +269,9 @@ jobs:
             
             if [ "$IS_ACTIVE" = "false" ]; then
               echo "  Orphan certificate: $CERT"
-              # Use --certificate parameter (not --id)
               if az containerapp env certificate delete \
                 --resource-group "${{ env.PRODUCTION_RG }}" \
-                --name "cae-production" \
+                --name "${{ env.CONTAINER_ENV_NAME }}" \
                 --certificate "$CERT" \
                 --yes 2>&1; then
                 echo "  -> Deleted"
