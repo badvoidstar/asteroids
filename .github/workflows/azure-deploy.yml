@@ -141,24 +141,26 @@ jobs:
               exit 1
             fi
             
-            # Deploy branch using the branch-deploy bicep
-            az deployment group create \
-              --resource-group "${{ env.PRODUCTION_RG }}" \
-              --template-file infra/branch-deploy.bicep \
-              --parameters branchName="${{ steps.vars.outputs.sanitized_branch }}" \
-              --parameters customDomainName="${{ secrets.CUSTOM_DOMAIN_NAME }}" \
-              --parameters customSubdomain="${{ secrets.CUSTOM_SUBDOMAIN }}" \
-              --parameters containerImage="${{ steps.vars.outputs.container_app_name }}:${{ github.sha }}"
-            
-            # Build and push the container image
+            # Get ACR name first
             ACR_NAME=$(az acr list --resource-group "${{ env.PRODUCTION_RG }}" --query "[0].name" -o tsv)
+            echo "Using ACR: $ACR_NAME"
+            
+            # Build and push the container image FIRST
             az acr build \
               --registry "$ACR_NAME" \
               --image "${{ steps.vars.outputs.container_app_name }}:${{ github.sha }}" \
               --file AstervoidsWeb/Dockerfile \
               .
             
-            # Update the container app with new image
+            # Deploy branch using the branch-deploy bicep (without image - it will use hello-world initially)
+            az deployment group create \
+              --resource-group "${{ env.PRODUCTION_RG }}" \
+              --template-file infra/branch-deploy.bicep \
+              --parameters branchName="${{ steps.vars.outputs.sanitized_branch }}" \
+              --parameters customDomainName="${{ secrets.CUSTOM_DOMAIN_NAME }}" \
+              --parameters customSubdomain="${{ secrets.CUSTOM_SUBDOMAIN }}"
+            
+            # Update the container app with the actual image
             az containerapp update \
               --name "${{ steps.vars.outputs.container_app_name }}" \
               --resource-group "${{ env.PRODUCTION_RG }}" \
