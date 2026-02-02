@@ -149,9 +149,44 @@ jobs:
       - name: Provision and Deploy to Azure
         id: deploy
         run: |
-          # Deploy using azd (works for both production and branch deployments)
-          # azd up handles both provision and deploy with incremental updates
-          azd up --no-prompt
+          IS_PRODUCTION="${{ steps.vars.outputs.is_production }}"
+          SANITIZED_BRANCH="${{ steps.vars.outputs.sanitized_branch }}"
+          
+          if [ "$IS_PRODUCTION" = "true" ]; then
+            # Production: use azd up for full provision + deploy
+            azd up --no-prompt
+          else
+            # Branch: provision with azd, then deploy with az cli to specific container app
+            # First, provision the infrastructure
+            azd provision --no-prompt
+            
+            # Get the container registry name from azd outputs
+            ACR_NAME=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_NAME=' | cut -d'=' -f2 | tr -d '"')
+            ACR_LOGIN_SERVER=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_ENDPOINT=' | cut -d'=' -f2 | tr -d '"')
+            
+            # Build and push image using Docker
+            IMAGE_TAG="${{ github.sha }}"
+            IMAGE_NAME="asteroids-web:${IMAGE_TAG}"
+            FULL_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}"
+            
+            echo "Building and pushing image: $FULL_IMAGE"
+            
+            # Login to ACR
+            az acr login --name "$ACR_NAME"
+            
+            # Build and push
+            docker build -t "$FULL_IMAGE" ./AsteroidsWeb
+            docker push "$FULL_IMAGE"
+            
+            # Update the specific branch container app with the new image
+            CONTAINER_APP_NAME="${{ env.CONTAINER_APP_PREFIX }}-${SANITIZED_BRANCH}"
+            echo "Deploying to container app: $CONTAINER_APP_NAME"
+            
+            az containerapp update \
+              --name "$CONTAINER_APP_NAME" \
+              --resource-group "${{ env.PRODUCTION_RG }}" \
+              --image "$FULL_IMAGE"
+          fi
           
           # Get outputs from azd
           DEPLOY_URL=$(azd env get-values | grep '^WEB_URI=' | cut -d'=' -f2 | tr -d '"')
