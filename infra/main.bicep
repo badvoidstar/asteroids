@@ -122,7 +122,7 @@ module webBranch 'core/host/container-app.bicep' = if (!isProduction) {
   params: {
     name: !empty(webServiceName) ? webServiceName : 'ca-web-${environmentName}'
     location: location
-    tags: union(tags, { 'azd-service-name': 'web' })  // Must match azure.yaml service name for azd deploy
+    tags: union(tags, { 'azd-service-name': 'web-${environmentName}' })  // Unique tag per branch
     containerAppsEnvironmentName: containerAppsEnvironmentName
     containerRegistryName: containerRegistryName
     imageName: !empty(webImageTag) ? 'asteroids-web:${webImageTag}' : ''

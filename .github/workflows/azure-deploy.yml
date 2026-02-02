@@ -128,6 +128,8 @@ jobs:
           # This tells azd deploy where to find the container app
           if [ "${{ steps.vars.outputs.is_production }}" != "true" ]; then
             azd env set AZURE_RESOURCE_GROUP "${{ env.PRODUCTION_RG }}"
+            # Tell azd which container app to deploy to (avoids tag collision with production)
+            azd env set SERVICE_WEB_RESOURCE_NAME "${{ env.CONTAINER_APP_PREFIX }}-${{ steps.vars.outputs.sanitized_branch }}"
           fi
           
           # Set custom domain from secrets (if provided)
