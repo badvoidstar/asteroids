@@ -150,7 +150,7 @@ jobs:
               --registry "$ACR_NAME" \
               --image "${{ steps.vars.outputs.container_app_name }}:${{ github.sha }}" \
               --file AsteroidsWeb/Dockerfile \
-              .
+              ./AsteroidsWeb
             
             # Deploy branch using the branch-deploy bicep (without image - it will use hello-world initially)
             az deployment group create \
