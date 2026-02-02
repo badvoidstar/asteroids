@@ -137,7 +137,8 @@ jobs:
         id: deploy
         run: |
           # Deploy using azd (works for both production and branch deployments)
-          azd up --no-prompt
+          # Use --no-state to force fresh deployment based on current Bicep, ignoring cached state
+          azd up --no-prompt --no-state
           
           # Get outputs from azd
           DEPLOY_URL=$(azd env get-values | grep '^WEB_URI=' | cut -d'=' -f2 | tr -d '"')
