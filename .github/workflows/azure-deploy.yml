@@ -21,7 +21,6 @@ permissions:
 
 env:
   DOTNET_VERSION: '10.0.x'
-  PRODUCTION_RG: 'rg-production'  # Resource group created by production deployment
 
 jobs:
   build:
@@ -73,11 +72,9 @@ jobs:
           if [ "$BRANCH_NAME" = "master" ]; then
             echo "is_production=true" >> $GITHUB_OUTPUT
             echo "env_name=production" >> $GITHUB_OUTPUT
-            echo "container_app_name=ca-web-production" >> $GITHUB_OUTPUT
           else
             echo "is_production=false" >> $GITHUB_OUTPUT
-            echo "env_name=preview-$SANITIZED" >> $GITHUB_OUTPUT
-            echo "container_app_name=ca-web-$SANITIZED" >> $GITHUB_OUTPUT
+            echo "env_name=$SANITIZED" >> $GITHUB_OUTPUT
           fi
 
       - name: Install Azure Developer CLI
@@ -103,21 +100,32 @@ jobs:
                          --federated-credential-provider github \
                          --tenant-id "${{ secrets.AZURE_TENANT_ID }}"
 
+      - name: Check production infrastructure (for branch deployments)
+        if: steps.vars.outputs.is_production != 'true'
+        run: |
+          if ! az group show --name "rg-production" &>/dev/null; then
+            echo "::error::Production environment must be deployed first. Deploy master branch before deploying feature branches."
+            exit 1
+          fi
+
       - name: Set up azd environment
         run: |
-          # Set azd environment variables
-          azd env new ${{ steps.vars.outputs.env_name }} --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location eastus || true
-          azd env select ${{ steps.vars.outputs.env_name }}
+          ENV_NAME="${{ steps.vars.outputs.env_name }}"
           
-          # Set any additional environment variables needed for deployment
+          # Create or select azd environment
+          azd env new "$ENV_NAME" --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location eastus || true
+          azd env select "$ENV_NAME"
+          
+          # Set location
           azd env set AZURE_LOCATION eastus
           
           # Set custom domain from secrets (if provided)
           if [ -n "${{ secrets.CUSTOM_DOMAIN_NAME }}" ]; then
             azd env set CUSTOM_DOMAIN_NAME "${{ secrets.CUSTOM_DOMAIN_NAME }}"
           fi
+          
+          # Set subdomain (with branch suffix for non-production)
           if [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
-            # For branches, append branch name to subdomain
             if [ "${{ steps.vars.outputs.is_production }}" = "true" ]; then
               azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}"
             else
@@ -128,152 +136,160 @@ jobs:
       - name: Provision and Deploy to Azure
         id: deploy
         run: |
-          IS_PRODUCTION="${{ steps.vars.outputs.is_production }}"
+          # Deploy using azd (works for both production and branch deployments)
+          azd up --no-prompt
           
-          if [ "$IS_PRODUCTION" = "true" ]; then
-            # Production: Full provision + deploy with azd
-            azd up --no-prompt
-          else
-            # Branch deployment: Deploy to shared infrastructure
-            # First, check if production infrastructure exists
-            if ! az group show --name "${{ env.PRODUCTION_RG }}" &>/dev/null; then
-              echo "::error::Production environment must be deployed first. Deploy master branch before deploying feature branches."
-              exit 1
-            fi
-            
-            # Get ACR name first
-            ACR_NAME=$(az acr list --resource-group "${{ env.PRODUCTION_RG }}" --query "[0].name" -o tsv)
-            echo "Using ACR: $ACR_NAME"
-            
-            # Build and push the container image FIRST
-            az acr build \
-              --registry "$ACR_NAME" \
-              --image "${{ steps.vars.outputs.container_app_name }}:${{ github.sha }}" \
-              --file AstervoidsWeb/Dockerfile \
-              ./AstervoidsWeb
-            
-            # Deploy branch using the branch-deploy bicep (without image - it will use hello-world initially)
-            az deployment group create \
-              --resource-group "${{ env.PRODUCTION_RG }}" \
-              --template-file infra/branch-deploy.bicep \
-              --parameters branchName="${{ steps.vars.outputs.sanitized_branch }}" \
-              --parameters customDomainName="${{ secrets.CUSTOM_DOMAIN_NAME }}" \
-              --parameters customSubdomain="${{ secrets.CUSTOM_SUBDOMAIN }}"
-            
-            # Update the container app with the actual image
-            az containerapp update \
-              --name "${{ steps.vars.outputs.container_app_name }}" \
-              --resource-group "${{ env.PRODUCTION_RG }}" \
-              --image "$ACR_NAME.azurecr.io/${{ steps.vars.outputs.container_app_name }}:${{ github.sha }}"
-          fi
-          
-          # Get the deployment URL
-          if [ "$IS_PRODUCTION" = "true" ]; then
-            DEPLOY_URL=$(azd env get-values | grep WEB_URI | cut -d'=' -f2 | tr -d '"')
-          else
-            DEPLOY_URL=$(az containerapp show \
-              --name "${{ steps.vars.outputs.container_app_name }}" \
-              --resource-group "${{ env.PRODUCTION_RG }}" \
-              --query "properties.configuration.ingress.fqdn" -o tsv)
-            DEPLOY_URL="https://$DEPLOY_URL"
-          fi
+          # Get outputs from azd
+          DEPLOY_URL=$(azd env get-values | grep '^WEB_URI=' | cut -d'=' -f2 | tr -d '"')
           echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
           
-          # Export values for custom domain step (production only uses azd env)
-          if [ "$IS_PRODUCTION" = "true" ]; then
-            echo "CONTAINER_APP_NAME=$(azd env get-values | grep '^CONTAINER_APP_NAME=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-            echo "CONTAINER_APPS_ENVIRONMENT=$(azd env get-values | grep '^CONTAINER_APPS_ENVIRONMENT=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-            echo "RESOURCE_GROUP=$(azd env get-values | grep '^RESOURCE_GROUP=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
-          else
-            echo "CONTAINER_APP_NAME=${{ steps.vars.outputs.container_app_name }}" >> $GITHUB_ENV
-            echo "CONTAINER_APPS_ENVIRONMENT=cae-production" >> $GITHUB_ENV
-            echo "RESOURCE_GROUP=${{ env.PRODUCTION_RG }}" >> $GITHUB_ENV
-          fi
+          # Export values for custom domain step
+          echo "CONTAINER_APP_NAME=$(azd env get-values | grep '^CONTAINER_APP_NAME=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "CONTAINER_APPS_ENVIRONMENT=$(azd env get-values | grep '^CONTAINER_APPS_ENVIRONMENT=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
+          echo "RESOURCE_GROUP=$(azd env get-values | grep '^RESOURCE_GROUP=' | cut -d'=' -f2 | tr -d '\"')" >> $GITHUB_ENV
           
-          # Build full custom domain from components
-          DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
-          if [ "$IS_PRODUCTION" = "true" ]; then
-            SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}"
-          else
-            SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
-          fi
-          if [ -n "$DOMAIN_NAME" ] && [ -n "$SUBDOMAIN" ]; then
-            echo "CUSTOM_DOMAIN=${SUBDOMAIN}.${DOMAIN_NAME}" >> $GITHUB_ENV
+          # Get custom domain from azd outputs
+          CUSTOM_DOMAIN=$(azd env get-values | grep '^CUSTOM_DOMAIN=' | cut -d'=' -f2 | tr -d '"')
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo "CUSTOM_DOMAIN=$CUSTOM_DOMAIN" >> $GITHUB_ENV
           fi
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_LOCATION: eastus
 
       - name: Configure Custom Domain (if enabled)
         if: env.CUSTOM_DOMAIN != ''
-        continue-on-error: true  # Don't fail the deployment if custom domain setup fails
+        continue-on-error: true
         run: |
           echo "Configuring custom domain: $CUSTOM_DOMAIN"
           
-          # Check if hostname already exists and is bound
+          # Check if hostname already exists and is bound with HTTPS
           EXISTING=$(az containerapp hostname list \
             --resource-group "$RESOURCE_GROUP" \
             --name "$CONTAINER_APP_NAME" \
             --query "[?name=='$CUSTOM_DOMAIN'].bindingType" -o tsv 2>/dev/null || echo "")
           
           if [ "$EXISTING" = "SniEnabled" ]; then
-            echo "Custom domain already configured with HTTPS"
+            echo "✅ Custom domain already configured with HTTPS"
             exit 0
           fi
           
-          # Add custom hostname (skip if already exists)
-          if [ -z "$EXISTING" ]; then
-            echo "Adding custom hostname..."
-            az containerapp hostname add \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APP_NAME" \
-              --hostname "$CUSTOM_DOMAIN" || echo "Failed to add hostname - DNS may not be propagated yet"
-          fi
+          # Function to check DNS propagation
+          check_dns() {
+            echo "Checking DNS propagation for $CUSTOM_DOMAIN..."
+            # Check CNAME record
+            CNAME_RESULT=$(nslookup "$CUSTOM_DOMAIN" 2>/dev/null | grep -i "canonical name" || echo "")
+            # Check TXT verification record
+            TXT_RESULT=$(nslookup -type=TXT "asuid.$CUSTOM_DOMAIN" 2>/dev/null | grep -i "text" || echo "")
+            
+            if [ -n "$CNAME_RESULT" ] && [ -n "$TXT_RESULT" ]; then
+              echo "✅ DNS records found"
+              return 0
+            else
+              echo "⏳ DNS not yet propagated (CNAME: ${CNAME_RESULT:-not found}, TXT: ${TXT_RESULT:-not found})"
+              return 1
+            fi
+          }
           
-          # Create certificate (skip if already exists)
-          CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
-          CERT_EXISTS=$(az containerapp env certificate list \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$CONTAINER_APPS_ENVIRONMENT" \
-            --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
+          # Retry logic with exponential backoff for the entire custom domain setup
+          MAX_RETRIES=3
+          RETRY_DELAY=120  # Start with 2 minutes
           
-          if [ -z "$CERT_EXISTS" ]; then
-            echo "Creating managed certificate..."
-            az containerapp env certificate create \
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo ""
+            echo "=========================================="
+            echo "Custom domain setup attempt $attempt of $MAX_RETRIES"
+            echo "=========================================="
+            
+            # Wait for DNS propagation before attempting (skip wait on first attempt if DNS already propagated)
+            if [ $attempt -gt 1 ] || ! check_dns; then
+              if [ $attempt -gt 1 ]; then
+                WAIT_TIME=$((RETRY_DELAY * (attempt - 1)))
+                echo "Waiting ${WAIT_TIME}s before retry..."
+                sleep $WAIT_TIME
+              fi
+              
+              # Check DNS again after waiting
+              if ! check_dns; then
+                echo "DNS not propagated yet, will retry..."
+                if [ $attempt -eq $MAX_RETRIES ]; then
+                  echo "::warning::DNS not propagated after $MAX_RETRIES attempts. Custom domain setup incomplete."
+                  echo "Run the deployment again later or configure manually."
+                  exit 0
+                fi
+                continue
+              fi
+            fi
+            
+            # Add custom hostname (skip if already exists)
+            if [ -z "$EXISTING" ]; then
+              echo "Adding custom hostname..."
+              if ! az containerapp hostname add \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APP_NAME" \
+                --hostname "$CUSTOM_DOMAIN" 2>&1; then
+                echo "Failed to add hostname, will retry..."
+                continue
+              fi
+            fi
+            
+            # Create certificate
+            CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
+            CERT_EXISTS=$(az containerapp env certificate list \
               --resource-group "$RESOURCE_GROUP" \
               --name "$CONTAINER_APPS_ENVIRONMENT" \
-              --certificate-name "$CERT_NAME" \
-              --hostname "$CUSTOM_DOMAIN" \
-              --validation-method CNAME || echo "Failed to create certificate"
-          fi
-          
-          # Wait for certificate to be ready (up to 3 minutes)
-          echo "Waiting for certificate provisioning..."
-          CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
-          for i in {1..18}; do
-            STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-            echo "Certificate state: $STATE (attempt $i/18)"
-            if [ "$STATE" = "Succeeded" ]; then
-              break
-            elif [ "$STATE" = "Failed" ]; then
-              echo "Certificate provisioning failed"
-              exit 0
+              --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -z "$CERT_EXISTS" ]; then
+              echo "Creating managed certificate..."
+              if ! az containerapp env certificate create \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APPS_ENVIRONMENT" \
+                --certificate-name "$CERT_NAME" \
+                --hostname "$CUSTOM_DOMAIN" \
+                --validation-method CNAME 2>&1; then
+                echo "Failed to create certificate, will retry..."
+                continue
+              fi
             fi
-            sleep 10
+            
+            # Wait for certificate to be ready (up to 5 minutes per attempt)
+            echo "Waiting for certificate provisioning..."
+            CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
+            CERT_READY=false
+            
+            for i in $(seq 1 30); do
+              STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
+              echo "Certificate state: $STATE (check $i/30)"
+              
+              if [ "$STATE" = "Succeeded" ]; then
+                CERT_READY=true
+                break
+              elif [ "$STATE" = "Failed" ]; then
+                echo "Certificate provisioning failed"
+                break
+              fi
+              sleep 10
+            done
+            
+            if [ "$CERT_READY" = "true" ]; then
+              echo "Binding certificate..."
+              if az containerapp hostname bind \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APP_NAME" \
+                --hostname "$CUSTOM_DOMAIN" \
+                --environment "$CONTAINER_APPS_ENVIRONMENT" \
+                --validation-method CNAME 2>&1; then
+                echo "✅ HTTPS enabled for $CUSTOM_DOMAIN"
+                exit 0
+              fi
+            fi
+            
+            echo "Certificate not ready, will retry..."
           done
           
-          # Bind certificate to hostname
-          if [ "$STATE" = "Succeeded" ]; then
-            echo "Binding certificate..."
-            az containerapp hostname bind \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APP_NAME" \
-              --hostname "$CUSTOM_DOMAIN" \
-              --environment "$CONTAINER_APPS_ENVIRONMENT" \
-              --validation-method CNAME && echo "HTTPS enabled for $CUSTOM_DOMAIN"
-          else
-            echo "Certificate not ready yet. Run deployment again after DNS propagates."
-          fi
+          echo "::warning::Custom domain setup incomplete after $MAX_RETRIES attempts."
+          echo "The deployment succeeded but HTTPS is not yet configured."
+          echo "This usually resolves on the next deployment after DNS propagates."
 
       - name: Deployment Summary
         run: |
@@ -290,5 +306,3 @@ jobs:
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "View your deployment in the [Azure Portal](https://portal.azure.com)" >> $GITHUB_STEP_SUMMARY
-
-# Branch test

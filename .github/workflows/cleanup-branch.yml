@@ -16,7 +16,7 @@ jobs:
   cleanup:
     name: Cleanup Branch Resources
     runs-on: ubuntu-latest
-    # Only run for branch deletions (not tag deletions)
+    # Only run for branch deletions (not tag deletions), and not for master
     if: github.event.ref_type == 'branch' && github.event.ref != 'master'
     environment: production
     
@@ -27,7 +27,7 @@ jobs:
           BRANCH_NAME="${{ github.event.ref }}"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-          # Sanitize branch name (same logic as deploy workflow, remove trailing dashes)
+          # Sanitize branch name (same logic as deploy workflow)
           SANITIZED=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[\/]/-/g' | sed 's/[^a-z0-9-]//g' | cut -c1-20 | sed 's/-*$//')
           echo "sanitized_branch=$SANITIZED" >> $GITHUB_OUTPUT
           echo "container_app_name=ca-web-$SANITIZED" >> $GITHUB_OUTPUT
@@ -77,7 +77,7 @@ jobs:
         run: |
           DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
           BRANCH_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
-          CERT_NAME="cert-${BRANCH_SUBDOMAIN//./-}-${DOMAIN_NAME//./-}"
+          CERT_NAME="cert-${BRANCH_SUBDOMAIN}-${DOMAIN_NAME//./-}"
           
           echo "Deleting managed certificate: $CERT_NAME"
           
