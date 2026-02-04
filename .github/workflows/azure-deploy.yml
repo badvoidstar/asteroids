@@ -269,8 +269,14 @@ jobs:
               fi
             fi
             
+            # Check if hostname already exists (refresh check each attempt)
+            HOSTNAME_EXISTS=$(az containerapp hostname list \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APP_NAME" \
+              --query "[?name=='$CUSTOM_DOMAIN'].name" -o tsv 2>/dev/null || echo "")
+            
             # Add custom hostname (skip if already exists)
-            if [ -z "$EXISTING" ]; then
+            if [ -z "$HOSTNAME_EXISTS" ]; then
               echo "Adding custom hostname..."
               if ! az containerapp hostname add \
                 --resource-group "$RESOURCE_GROUP" \
@@ -279,6 +285,8 @@ jobs:
                 echo "Failed to add hostname, will retry..."
                 continue
               fi
+            else
+              echo "Hostname already exists, skipping add..."
             fi
             
             # Create certificate
