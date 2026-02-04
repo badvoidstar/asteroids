@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using AsteroidsWeb.Configuration;
 using AsteroidsWeb.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace AsteroidsWeb.Services;
 
@@ -14,7 +16,13 @@ public class SessionService : ISessionService
     private readonly ConcurrentDictionary<Guid, Guid> _memberToSession = new();
     private readonly Random _random = new();
     private readonly object _nameLock = new();
+    private readonly object _sessionLock = new();
     private readonly ILogger<SessionService>? _logger;
+    private readonly int _maxSessions;
+    private readonly int _maxMembersPerSession;
+
+    public int MaxSessions => _maxSessions;
+    public int MaxMembersPerSession => _maxMembersPerSession;
 
     private static readonly string[] FruitNames = 
     [
@@ -30,61 +38,102 @@ public class SessionService : ISessionService
         "Plantain", "Starfruit", "Tamarind", "Yuzu", "Kumquat"
     ];
 
-    public SessionService() { }
-
-    public SessionService(ILogger<SessionService> logger)
+    public SessionService() 
     {
+        _maxSessions = 6;
+        _maxMembersPerSession = 4;
+    }
+
+    public SessionService(IOptions<SessionSettings> settings, ILogger<SessionService> logger)
+    {
+        _maxSessions = settings.Value.MaxSessions;
+        _maxMembersPerSession = settings.Value.MaxMembersPerSession;
         _logger = logger;
     }
 
-    public (Session Session, Member Creator) CreateSession(string creatorConnectionId)
+    public CreateSessionResult CreateSession(string creatorConnectionId)
     {
-        var session = new Session
+        lock (_sessionLock)
         {
-            Name = GenerateUniqueFruitName()
-        };
+            // Check if connection is already in a session
+            if (_connectionToMember.ContainsKey(creatorConnectionId))
+            {
+                _logger?.LogWarning("CreateSession failed: connection {ConnectionId} is already in a session", creatorConnectionId);
+                return new CreateSessionResult(false, null, null, "Already in a session. Leave current session before creating a new one.");
+            }
 
-        var creator = new Member
-        {
-            ConnectionId = creatorConnectionId,
-            Role = MemberRole.Server,
-            SessionId = session.Id
-        };
+            // Check if we've reached the maximum number of sessions
+            var activeCount = _sessions.Count(s => !s.Value.Members.IsEmpty);
+            if (activeCount >= _maxSessions)
+            {
+                _logger?.LogWarning("CreateSession failed: maximum sessions ({MaxSessions}) reached", _maxSessions);
+                return new CreateSessionResult(false, null, null, $"Maximum number of sessions ({_maxSessions}) has been reached");
+            }
 
-        session.Members.TryAdd(creator.Id, creator);
-        _sessions.TryAdd(session.Id, session);
-        _connectionToMember.TryAdd(creatorConnectionId, creator.Id);
-        _memberToSession.TryAdd(creator.Id, session.Id);
+            var session = new Session
+            {
+                Name = GenerateUniqueFruitName()
+            };
 
-        _logger?.LogInformation("Session created: {SessionName} ({SessionId}) by {MemberId}", 
-            session.Name, session.Id, creator.Id);
+            var creator = new Member
+            {
+                ConnectionId = creatorConnectionId,
+                Role = MemberRole.Server,
+                SessionId = session.Id
+            };
 
-        return (session, creator);
+            session.Members.TryAdd(creator.Id, creator);
+            _sessions.TryAdd(session.Id, session);
+            _connectionToMember.TryAdd(creatorConnectionId, creator.Id);
+            _memberToSession.TryAdd(creator.Id, session.Id);
+
+            _logger?.LogInformation("Session created: {SessionName} ({SessionId}) by {MemberId}", 
+                session.Name, session.Id, creator.Id);
+
+            return new CreateSessionResult(true, session, creator, null);
+        }
     }
 
-    public (Session Session, Member Member)? JoinSession(Guid sessionId, string connectionId)
+    public JoinSessionResult JoinSession(Guid sessionId, string connectionId)
     {
-        if (!_sessions.TryGetValue(sessionId, out var session))
+        lock (_sessionLock)
         {
-            _logger?.LogWarning("JoinSession failed: session {SessionId} not found", sessionId);
-            return null;
+            // Check if connection is already in a session
+            if (_connectionToMember.ContainsKey(connectionId))
+            {
+                _logger?.LogWarning("JoinSession failed: connection {ConnectionId} is already in a session", connectionId);
+                return new JoinSessionResult(false, null, null, "Already in a session. Leave current session before joining another.");
+            }
+
+            if (!_sessions.TryGetValue(sessionId, out var session))
+            {
+                _logger?.LogWarning("JoinSession failed: session {SessionId} not found", sessionId);
+                return new JoinSessionResult(false, null, null, "Session not found");
+            }
+
+            // Check if session is full
+            if (session.Members.Count >= _maxMembersPerSession)
+            {
+                _logger?.LogWarning("JoinSession failed: session {SessionId} is full ({MaxMembers} members)", sessionId, _maxMembersPerSession);
+                return new JoinSessionResult(false, null, null, $"Session is full (maximum {_maxMembersPerSession} members)");
+            }
+
+            var member = new Member
+            {
+                ConnectionId = connectionId,
+                Role = MemberRole.Client,
+                SessionId = session.Id
+            };
+
+            session.Members.TryAdd(member.Id, member);
+            _connectionToMember.TryAdd(connectionId, member.Id);
+            _memberToSession.TryAdd(member.Id, session.Id);
+
+            _logger?.LogInformation("Member {MemberId} joined session {SessionName} as Client", 
+                member.Id, session.Name);
+
+            return new JoinSessionResult(true, session, member, null);
         }
-
-        var member = new Member
-        {
-            ConnectionId = connectionId,
-            Role = MemberRole.Client,
-            SessionId = session.Id
-        };
-
-        session.Members.TryAdd(member.Id, member);
-        _connectionToMember.TryAdd(connectionId, member.Id);
-        _memberToSession.TryAdd(member.Id, session.Id);
-
-        _logger?.LogInformation("Member {MemberId} joined session {SessionName} as Client", 
-            member.Id, session.Name);
-
-        return (session, member);
     }
 
     public LeaveSessionResult? LeaveSession(string connectionId)
@@ -159,12 +208,19 @@ public class SessionService : ISessionService
         );
     }
 
-    public IEnumerable<SessionInfo> GetActiveSessions()
+    public ActiveSessionsResult GetActiveSessions()
     {
-        return _sessions.Values
+        var sessions = _sessions.Values
             .Where(s => !s.Members.IsEmpty)
-            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, s.CreatedAt))
-            .OrderByDescending(s => s.CreatedAt);
+            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, _maxMembersPerSession, s.CreatedAt))
+            .OrderByDescending(s => s.CreatedAt)
+            .ToList();
+
+        return new ActiveSessionsResult(
+            sessions,
+            _maxSessions,
+            sessions.Count < _maxSessions
+        );
     }
 
     public Session? GetSession(Guid sessionId)

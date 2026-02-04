@@ -311,22 +311,41 @@
         }
 
         // Sessions
+        let canCreateSession = true;
+        let maxSessions = 6;
+
         async function refreshSessions() {
             try {
-                const sessions = await SessionClient.getActiveSessions();
+                const result = await SessionClient.getActiveSessions();
+                const sessions = result.sessions;
+                maxSessions = result.maxSessions;
+                canCreateSession = result.canCreateSession;
+                
                 const listEl = document.getElementById('session-list');
+                const btnCreate = document.getElementById('btn-create');
+                
+                // Update create button state based on capacity (and not already in a session)
+                if (SessionClient.isConnected() && !SessionClient.isInSession()) {
+                    btnCreate.disabled = !canCreateSession;
+                    btnCreate.title = canCreateSession ? '' : `Maximum sessions (${maxSessions}) reached`;
+                }
                 
                 if (sessions.length === 0) {
-                    listEl.innerHTML = '<em>No active sessions</em>';
+                    listEl.innerHTML = `<em>No active sessions (max: ${maxSessions})</em>`;
                 } else {
-                    listEl.innerHTML = sessions.map(s => `
-                        <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''}" 
-                             onclick="selectSession('${s.id}')">
-                            🍎 <strong>${s.name}</strong> - ${s.memberCount} player(s)
-                        </div>
-                    `).join('');
+                    listEl.innerHTML = sessions.map(s => {
+                        const isFull = s.memberCount >= s.maxMembers;
+                        return `
+                            <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''} ${isFull ? 'full' : ''}" 
+                                 onclick="selectSession('${s.id}')"
+                                 title="${isFull ? 'Session is full' : 'Click to join'}">
+                                🍎 <strong>${s.name}</strong> - ${s.memberCount}/${s.maxMembers} player(s)
+                                ${isFull ? '<span style="color: #ff4444;"> (FULL)</span>' : ''}
+                            </div>
+                        `;
+                    }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${sessions.length}/${maxSessions} sessions</div>`;
                 }
-                log(`Found ${sessions.length} active session(s)`, 'info');
+                log(`Found ${sessions.length}/${maxSessions} active session(s)`, 'info');
             } catch (err) {
                 log('Error refreshing sessions: ' + err.message, 'error');
             }
@@ -340,9 +359,18 @@
 
         async function joinSelectedSession() {
             if (!selectedSessionId) return;
+            if (SessionClient.isInSession()) {
+                log('Already in a session. Leave current session first.', 'warn');
+                return;
+            }
             try {
                 log(`Joining session ${selectedSessionId}...`);
                 const result = await SessionClient.joinSession(selectedSessionId);
+                if (!result) {
+                    log('Failed to join session - may be full or you are already in a session', 'error');
+                    await refreshSessions();
+                    return;
+                }
                 updateSessionUI(result.session, result.member);
                 log(`Joined session "${result.session.name}" as ${result.member.role}`, 'event');
             } catch (err) {
@@ -351,9 +379,18 @@
         }
 
         async function createSession() {
+            if (SessionClient.isInSession()) {
+                log('Already in a session. Leave current session first.', 'warn');
+                return;
+            }
             try {
                 log('Creating new session...');
                 const result = await SessionClient.createSession();
+                if (!result) {
+                    log('Failed to create session - server may be at capacity or you are already in a session', 'error');
+                    await refreshSessions();
+                    return;
+                }
                 updateSessionUI(result.session, result.member);
                 log(`Created session "${result.session.name}" as ${result.member.role}`, 'event');
             } catch (err) {
@@ -528,11 +565,13 @@
 
         SessionClient.on('onMemberJoined', (member) => {
             log(`Member joined: ${member.id.substring(0, 8)}... as ${member.role}`, 'event');
-            // Refresh member list
+            // Refresh member list from updated session state
             const session = SessionClient.getCurrentSession();
-            if (session) {
-                refreshSessions();
+            const currentMember = SessionClient.getCurrentMember();
+            if (session && session.members) {
+                updateMemberList(session.members, currentMember?.id);
             }
+            refreshSessions();
         });
 
         SessionClient.on('onMemberLeft', (info) => {
@@ -540,12 +579,17 @@
             if (info.promotedMemberId) {
                 log(`Promoted ${info.promotedMemberId.substring(0, 8)}... to ${info.promotedRole}`, 'event');
             }
-            // Update our role if we were promoted
+            // Refresh member list from updated session state
+            const session = SessionClient.getCurrentSession();
             const member = SessionClient.getCurrentMember();
-            if (member) {
-                const session = SessionClient.getCurrentSession();
+            if (session && session.members) {
+                updateMemberList(session.members, member?.id);
+            }
+            // Update session UI if we were promoted
+            if (session && member) {
                 updateSessionUI(session, member);
             }
+            refreshSessions();
         });
 
         SessionClient.on('onRoleChanged', (newRole, affectedObjectIds) => {

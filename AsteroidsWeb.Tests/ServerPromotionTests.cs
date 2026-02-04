@@ -19,7 +19,7 @@ public class ServerPromotionTests
     public void ServerLeaves_WithMultipleClients_ShouldPromoteOneClient()
     {
         // Arrange
-        var (session, server) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
         _sessionService.JoinSession(session.Id, "client1-conn");
         _sessionService.JoinSession(session.Id, "client2-conn");
         _sessionService.JoinSession(session.Id, "client3-conn");
@@ -42,8 +42,12 @@ public class ServerPromotionTests
     public void ServerLeaves_ShouldReturnAffectedObjectIds()
     {
         // Arrange
-        var (session, server) = _sessionService.CreateSession("server-conn");
-        var (_, client) = _sessionService.JoinSession(session.Id, "client-conn")!.Value;
+        var result = _sessionService.CreateSession("server-conn");
+        var session = result.Session!;
+        var server = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "client-conn");
+        Assert.True(joinResult.Success);
+        var client = joinResult.Member!;
 
         // Create objects - some by server, some by client
         var serverObj1 = _objectService.CreateObject(session.Id, server.Id);
@@ -51,21 +55,21 @@ public class ServerPromotionTests
         var clientObj = _objectService.CreateObject(session.Id, client.Id);
 
         // Act
-        var result = _sessionService.LeaveSession("server-conn");
+        var leaveResult = _sessionService.LeaveSession("server-conn");
 
         // Assert
-        result.Should().NotBeNull();
-        result!.AffectedObjectIds.Should().HaveCount(2);
-        result.AffectedObjectIds.Should().Contain(serverObj1!.Id);
-        result.AffectedObjectIds.Should().Contain(serverObj2!.Id);
-        result.AffectedObjectIds.Should().NotContain(clientObj!.Id);
+        leaveResult.Should().NotBeNull();
+        leaveResult!.AffectedObjectIds.Should().HaveCount(2);
+        leaveResult.AffectedObjectIds.Should().Contain(serverObj1!.Id);
+        leaveResult.AffectedObjectIds.Should().Contain(serverObj2!.Id);
+        leaveResult.AffectedObjectIds.Should().NotContain(clientObj!.Id);
     }
 
     [Fact]
     public void ServerLeaves_SessionVersionShouldIncrement()
     {
         // Arrange
-        var (session, _) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
         _sessionService.JoinSession(session.Id, "client-conn");
         var initialVersion = session.Version;
 
@@ -81,7 +85,7 @@ public class ServerPromotionTests
     public void ClientLeaves_ShouldNotAffectServerRole()
     {
         // Arrange
-        var (session, server) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
         _sessionService.JoinSession(session.Id, "client-conn");
 
         // Act
@@ -99,7 +103,7 @@ public class ServerPromotionTests
     public void ServerLeaves_NoClients_ShouldDestroySession()
     {
         // Arrange
-        var (session, _) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
 
         // Act
         var result = _sessionService.LeaveSession("server-conn");
@@ -115,11 +119,11 @@ public class ServerPromotionTests
     public void ConcurrentJoinsAndLeaves_ShouldMaintainSessionIntegrity()
     {
         // Arrange
-        var (session, _) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
         var sessionId = session.Id;
 
-        // Simulate rapid joins
-        var joinTasks = Enumerable.Range(0, 10)
+        // Simulate rapid joins (only 3 since max is 4)
+        var joinTasks = Enumerable.Range(0, 3)
             .Select(i => Task.Run(() => _sessionService.JoinSession(sessionId, $"client-{i}")))
             .ToArray();
 
@@ -127,10 +131,10 @@ public class ServerPromotionTests
 
         // All joins should succeed
         var currentSession = _sessionService.GetSession(sessionId);
-        currentSession!.Members.Count.Should().Be(11); // 1 server + 10 clients
+        currentSession!.Members.Count.Should().Be(4); // 1 server + 3 clients
 
         // Simulate rapid leaves (clients only)
-        var leaveTasks = Enumerable.Range(0, 10)
+        var leaveTasks = Enumerable.Range(0, 3)
             .Select(i => Task.Run(() => _sessionService.LeaveSession($"client-{i}")))
             .ToArray();
 
@@ -146,17 +150,17 @@ public class ServerPromotionTests
     public void RapidServerChanges_ShouldAlwaysHaveOneServer()
     {
         // Arrange
-        var (session, _) = _sessionService.CreateSession("server-conn");
+        var session = _sessionService.CreateSession("server-conn").Session!;
         var sessionId = session.Id;
 
-        // Add clients
-        for (int i = 0; i < 5; i++)
+        // Add clients (max 3 since max members is 4)
+        for (int i = 0; i < 3; i++)
         {
             _sessionService.JoinSession(sessionId, $"client-{i}");
         }
 
         // Rapidly leave as server multiple times
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 3; i++)
         {
             var serverMember = _sessionService.GetSession(sessionId)!.Members.Values
                 .First(m => m.Role == MemberRole.Server);

@@ -116,6 +116,10 @@ const SessionClient = (function() {
         // Session events
         connection.on('OnMemberJoined', (memberInfo) => {
             console.log('[SessionClient] Member joined:', memberInfo);
+            // Add member to local session state
+            if (currentSession && currentSession.members) {
+                currentSession.members.push(memberInfo);
+            }
             if (callbacks.onMemberJoined) {
                 callbacks.onMemberJoined(memberInfo);
             }
@@ -124,10 +128,22 @@ const SessionClient = (function() {
         connection.on('OnMemberLeft', (info) => {
             console.log('[SessionClient] Member left:', info);
             
+            // Remove member from local session state
+            if (currentSession && currentSession.members) {
+                currentSession.members = currentSession.members.filter(m => m.id !== info.memberId);
+            }
+
             // Check if we were promoted
             if (info.promotedMemberId && currentMember && 
                 info.promotedMemberId === currentMember.id) {
                 currentMember.role = info.promotedRole;
+                // Update local member in session members list
+                if (currentSession && currentSession.members) {
+                    const self = currentSession.members.find(m => m.id === currentMember.id);
+                    if (self) {
+                        self.role = info.promotedRole;
+                    }
+                }
                 if (callbacks.onRoleChanged) {
                     callbacks.onRoleChanged(info.promotedRole, info.affectedObjectIds);
                 }
@@ -171,13 +187,21 @@ const SessionClient = (function() {
 
         try {
             const response = await connection.invoke('CreateSession');
-            currentSession = {
-                id: response.sessionId,
-                name: response.sessionName
-            };
+            if (!response) {
+                console.log('[SessionClient] CreateSession failed - server at capacity');
+                return null;
+            }
+            
             currentMember = {
                 id: response.memberId,
-                role: response.role
+                role: response.role,
+                joinedAt: new Date().toISOString()
+            };
+            currentSession = {
+                id: response.sessionId,
+                name: response.sessionName,
+                members: [currentMember],
+                objects: []
             };
 
             console.log('[SessionClient] Session created:', currentSession.name);
@@ -207,7 +231,8 @@ const SessionClient = (function() {
         try {
             const response = await connection.invoke('JoinSession', sessionId);
             if (!response) {
-                throw new Error('Session not found');
+                console.log('[SessionClient] JoinSession failed - session full or already in a session');
+                return null;
             }
 
             currentSession = {
@@ -270,7 +295,12 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('GetActiveSessions');
+            const response = await connection.invoke('GetActiveSessions');
+            return {
+                sessions: response.sessions || [],
+                maxSessions: response.maxSessions,
+                canCreateSession: response.canCreateSession
+            };
         } catch (err) {
             console.error('[SessionClient] Get sessions failed:', err);
             throw err;

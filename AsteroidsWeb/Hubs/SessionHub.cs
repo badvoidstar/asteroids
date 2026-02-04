@@ -26,9 +26,18 @@ public class SessionHub : Hub
     /// <summary>
     /// Creates a new session and joins as the server.
     /// </summary>
-    public async Task<CreateSessionResponse> CreateSession()
+    public async Task<CreateSessionResponse?> CreateSession()
     {
-        var (session, creator) = _sessionService.CreateSession(Context.ConnectionId);
+        var result = _sessionService.CreateSession(Context.ConnectionId);
+
+        if (!result.Success)
+        {
+            _logger.LogWarning("CreateSession failed: {Error}", result.ErrorMessage);
+            return null;
+        }
+
+        var session = result.Session!;
+        var creator = result.Creator!;
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
@@ -50,13 +59,14 @@ public class SessionHub : Hub
     public async Task<JoinSessionResponse?> JoinSession(Guid sessionId)
     {
         var result = _sessionService.JoinSession(sessionId, Context.ConnectionId);
-        if (result == null)
+        if (!result.Success)
         {
-            _logger.LogWarning("Failed to join session {SessionId} - not found", sessionId);
+            _logger.LogWarning("Failed to join session {SessionId}: {Error}", sessionId, result.ErrorMessage);
             return null;
         }
 
-        var (session, member) = result.Value;
+        var session = result.Session!;
+        var member = result.Member!;
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
@@ -129,10 +139,14 @@ public class SessionHub : Hub
     /// <summary>
     /// Gets all active sessions.
     /// </summary>
-    public IEnumerable<SessionListItem> GetActiveSessions()
+    public ActiveSessionsResponse GetActiveSessions()
     {
-        return _sessionService.GetActiveSessions()
-            .Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.CreatedAt));
+        var result = _sessionService.GetActiveSessions();
+        return new ActiveSessionsResponse(
+            result.Sessions.Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.MaxMembers, s.CreatedAt)),
+            result.MaxSessions,
+            result.CanCreateSession
+        );
     }
 
     /// <summary>
@@ -242,6 +256,7 @@ public record JoinSessionResponse(
 );
 public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
 public record MemberLeftInfo(Guid MemberId, Guid? PromotedMemberId, string? PromotedRole, IEnumerable<Guid> AffectedObjectIds);
-public record SessionListItem(Guid Id, string Name, int MemberCount, DateTime CreatedAt);
+public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt);
+public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, string AffiliatedRole, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
