@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Test Harness - Asteroids Multiplayer</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #00ff00;
+            margin: 0;
+            padding: 20px;
+        }
+        h1, h2, h3 {
+            color: #00ff00;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: #111;
+            border: 1px solid #333;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .panel h3 {
+            margin-top: 0;
+        }
+        button {
+            background: transparent;
+            border: 1px solid #00ff00;
+            color: #00ff00;
+            padding: 8px 16px;
+            margin: 5px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #00ff00;
+            color: #000;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 3px;
+        }
+        .status.connected {
+            background: rgba(0, 255, 0, 0.1);
+            border: 1px solid #00ff00;
+        }
+        .status.disconnected {
+            background: rgba(255, 0, 0, 0.1);
+            border: 1px solid #ff4444;
+            color: #ff4444;
+        }
+        .log {
+            background: #000;
+            border: 1px solid #333;
+            padding: 10px;
+            height: 200px;
+            overflow-y: auto;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 5px;
+        }
+        .log-entry.info { color: #00ff00; }
+        .log-entry.warn { color: #ffff00; }
+        .log-entry.error { color: #ff4444; }
+        .log-entry.event { color: #00ffff; }
+        input, select {
+            background: #000;
+            border: 1px solid #333;
+            color: #00ff00;
+            padding: 8px;
+            margin: 5px;
+            font-family: inherit;
+        }
+        .session-list {
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .session-item {
+            padding: 8px;
+            border: 1px solid #333;
+            margin: 5px 0;
+            cursor: pointer;
+        }
+        .session-item:hover {
+            background: rgba(0, 255, 0, 0.1);
+        }
+        .session-item.selected {
+            border-color: #00ff00;
+            background: rgba(0, 255, 0, 0.2);
+        }
+        .member-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .member-badge {
+            padding: 5px 10px;
+            border: 1px solid #333;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .member-badge.server {
+            border-color: #ffff00;
+            color: #ffff00;
+        }
+        .member-badge.client {
+            border-color: #00ffff;
+            color: #00ffff;
+        }
+        .member-badge.self {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        .object-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .object-item {
+            padding: 8px;
+            border: 1px solid #333;
+            margin: 5px 0;
+            font-size: 12px;
+        }
+        .object-item .object-id {
+            color: #888;
+        }
+        .object-item .object-data {
+            color: #00ffff;
+            margin-top: 5px;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        #session-ui-container {
+            margin: 20px 0;
+        }
+        .full-width {
+            grid-column: 1 / -1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Session Test Harness</h1>
+        <p>Test the multiplayer session infrastructure before game integration.</p>
+
+        <div class="grid">
+            <!-- Connection Panel -->
+            <div class="panel">
+                <h3>Connection</h3>
+                <div id="connection-status" class="status disconnected">
+                    ○ Disconnected
+                </div>
+                <div class="controls">
+                    <button id="btn-connect" onclick="connect()">Connect</button>
+                    <button id="btn-disconnect" onclick="disconnect()" disabled>Disconnect</button>
+                </div>
+            </div>
+
+            <!-- Session Panel -->
+            <div class="panel">
+                <h3>Session</h3>
+                <div id="session-status">Not in a session</div>
+                <div class="controls">
+                    <button id="btn-create" onclick="createSession()" disabled>Create Session</button>
+                    <button id="btn-join" onclick="joinSelectedSession()" disabled>Join Session</button>
+                    <button id="btn-leave" onclick="leaveSession()" disabled>Leave Session</button>
+                    <button id="btn-refresh" onclick="refreshSessions()" disabled>Refresh List</button>
+                </div>
+                <h4>Available Sessions</h4>
+                <div id="session-list" class="session-list">
+                    <em>Not connected</em>
+                </div>
+                <div id="selected-session-info" style="margin-top: 10px; padding: 10px; border: 1px solid #333; display: none;">
+                    <strong>Selected Session:</strong>
+                    <div id="selected-session-details"></div>
+                </div>
+            </div>
+
+            <!-- Members Panel -->
+            <div class="panel">
+                <h3>Members</h3>
+                <div id="member-list" class="member-list">
+                    <em>Join a session to see members</em>
+                </div>
+            </div>
+
+            <!-- Objects Panel -->
+            <div class="panel">
+                <h3>Synchronized Objects</h3>
+                <div class="controls">
+                    <button id="btn-create-object" onclick="createTestObject()" disabled>Create Object</button>
+                    <button id="btn-update-objects" onclick="updateTestObjects()" disabled>Update All</button>
+                    <button id="btn-delete-object" onclick="deleteLastObject()" disabled>Delete Last</button>
+                </div>
+                <div>Objects: <span id="object-count">0</span></div>
+                <div id="object-list" class="object-list">
+                    <em>No objects</em>
+                </div>
+            </div>
+
+            <!-- Event Log -->
+            <div class="panel full-width">
+                <h3>Event Log</h3>
+                <button onclick="clearLog()">Clear Log</button>
+                <div id="event-log" class="log"></div>
+            </div>
+        </div>
+
+        <!-- Built-in Session UI (optional test) -->
+        <div class="panel" style="margin-top: 20px;">
+            <h3>Built-in Session UI Component</h3>
+            <button onclick="toggleSessionUI()">Toggle Session UI</button>
+            <div id="session-ui-container" style="display: none;"></div>
+        </div>
+    </div>
+
+    <!-- SignalR -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    
+    <!-- Session modules -->
+    <script src="/js/session-client.js"></script>
+    <script src="/js/session-ui.js"></script>
+    <script src="/js/object-sync.js"></script>
+
+    <script>
+        // State
+        let selectedSessionId = null;
+
+        // Logging
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('event-log');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('event-log').innerHTML = '';
+        }
+
+        // Connection
+        async function connect() {
+            log('Connecting to session hub...');
+            const success = await SessionClient.connect();
+            if (success) {
+                updateConnectionUI(true);
+                ObjectSync.init();
+                await refreshSessions();
+            }
+        }
+
+        async function disconnect() {
+            log('Disconnecting...');
+            await SessionClient.disconnect();
+            updateConnectionUI(false);
+        }
+
+        function updateConnectionUI(connected) {
+            const statusEl = document.getElementById('connection-status');
+            const btnConnect = document.getElementById('btn-connect');
+            const btnDisconnect = document.getElementById('btn-disconnect');
+            const btnCreate = document.getElementById('btn-create');
+            const btnJoin = document.getElementById('btn-join');
+            const btnRefresh = document.getElementById('btn-refresh');
+
+            if (connected) {
+                statusEl.className = 'status connected';
+                statusEl.textContent = '● Connected';
+                btnConnect.disabled = true;
+                btnDisconnect.disabled = false;
+                btnCreate.disabled = false;
+                btnRefresh.disabled = false;
+                updateJoinButtonState();
+            } else {
+                statusEl.className = 'status disconnected';
+                statusEl.textContent = '○ Disconnected';
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = true;
+                btnCreate.disabled = true;
+                btnJoin.disabled = true;
+                btnRefresh.disabled = true;
+                document.getElementById('btn-leave').disabled = true;
+                document.getElementById('session-list').innerHTML = '<em>Not connected</em>';
+                document.getElementById('session-status').textContent = 'Not in a session';
+                clearSelectedSessionInfo();
+                updateMemberList([]);
+                updateObjectList([]);
+            }
+        }
+
+        // Sessions
+        let canCreateSession = true;
+        let maxSessions = 6;
+        let availableSessions = [];
+
+        async function refreshSessions() {
+            try {
+                const result = await SessionClient.getActiveSessions();
+                availableSessions = result.sessions;
+                maxSessions = result.maxSessions;
+                canCreateSession = result.canCreateSession;
+                
+                const listEl = document.getElementById('session-list');
+                const btnCreate = document.getElementById('btn-create');
+                const btnJoin = document.getElementById('btn-join');
+                
+                // Update create button state based on capacity (and not already in a session)
+                if (SessionClient.isConnected() && !SessionClient.isInSession()) {
+                    btnCreate.disabled = !canCreateSession;
+                    btnCreate.title = canCreateSession ? '' : `Maximum sessions (${maxSessions}) reached`;
+                }
+                
+                // Update join button state
+                updateJoinButtonState();
+                
+                if (availableSessions.length === 0) {
+                    listEl.innerHTML = `<em>No active sessions (max: ${maxSessions})</em>`;
+                    clearSelectedSessionInfo();
+                } else {
+                    listEl.innerHTML = availableSessions.map(s => {
+                        const isFull = s.memberCount >= s.maxMembers;
+                        return `
+                            <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''} ${isFull ? 'full' : ''}" 
+                                 onclick="selectSession('${s.id}')"
+                                 title="${isFull ? 'Session is full' : 'Click to select'}">
+                                🍎 <strong>${s.name}</strong> - ${s.memberCount}/${s.maxMembers} player(s)
+                                ${isFull ? '<span style="color: #ff4444;"> (FULL)</span>' : ''}
+                            </div>
+                        `;
+                    }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${availableSessions.length}/${maxSessions} sessions</div>`;
+                    
+                    // Update selected session info if still valid
+                    if (selectedSessionId) {
+                        const selectedSession = availableSessions.find(s => s.id === selectedSessionId);
+                        if (selectedSession) {
+                            showSelectedSessionInfo(selectedSession);
+                        } else {
+                            // Selected session no longer exists
+                            selectedSessionId = null;
+                            clearSelectedSessionInfo();
+                        }
+                    }
+                }
+                log(`Found ${availableSessions.length}/${maxSessions} active session(s)`, 'info');
+            } catch (err) {
+                log('Error refreshing sessions: ' + err.message, 'error');
+            }
+        }
+
+        function selectSession(sessionId) {
+            selectedSessionId = sessionId;
+            const selectedSession = availableSessions.find(s => s.id === sessionId);
+            if (selectedSession) {
+                showSelectedSessionInfo(selectedSession);
+                log(`Selected session "${selectedSession.name}"`, 'info');
+            }
+            updateJoinButtonState();
+            // Re-render list to show selection
+            const listEl = document.getElementById('session-list');
+            if (availableSessions.length > 0) {
+                listEl.innerHTML = availableSessions.map(s => {
+                    const isFull = s.memberCount >= s.maxMembers;
+                    return `
+                        <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''} ${isFull ? 'full' : ''}" 
+                             onclick="selectSession('${s.id}')"
+                             title="${isFull ? 'Session is full' : 'Click to select'}">
+                            🍎 <strong>${s.name}</strong> - ${s.memberCount}/${s.maxMembers} player(s)
+                            ${isFull ? '<span style="color: #ff4444;"> (FULL)</span>' : ''}
+                        </div>
+                    `;
+                }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${availableSessions.length}/${maxSessions} sessions</div>`;
+            }
+        }
+
+        function showSelectedSessionInfo(session) {
+            const infoEl = document.getElementById('selected-session-info');
+            const detailsEl = document.getElementById('selected-session-details');
+            const isFull = session.memberCount >= session.maxMembers;
+            detailsEl.innerHTML = `
+                <div>🍎 <strong>${session.name}</strong></div>
+                <div>ID: <span style="color: #888;">${session.id.substring(0, 8)}...</span></div>
+                <div>Players: ${session.memberCount}/${session.maxMembers} ${isFull ? '<span style="color: #ff4444;">(FULL)</span>' : ''}</div>
+            `;
+            infoEl.style.display = 'block';
+        }
+
+        function clearSelectedSessionInfo() {
+            const infoEl = document.getElementById('selected-session-info');
+            infoEl.style.display = 'none';
+            selectedSessionId = null;
+            updateJoinButtonState();
+        }
+
+        function updateJoinButtonState() {
+            const btnJoin = document.getElementById('btn-join');
+            if (!SessionClient.isConnected() || SessionClient.isInSession()) {
+                btnJoin.disabled = true;
+                btnJoin.title = SessionClient.isInSession() ? 'Already in a session' : 'Not connected';
+                return;
+            }
+            
+            if (!selectedSessionId) {
+                btnJoin.disabled = true;
+                btnJoin.title = 'Select a session first';
+                return;
+            }
+            
+            const selectedSession = availableSessions.find(s => s.id === selectedSessionId);
+            if (!selectedSession) {
+                btnJoin.disabled = true;
+                btnJoin.title = 'Selected session no longer exists';
+                return;
+            }
+            
+            const isFull = selectedSession.memberCount >= selectedSession.maxMembers;
+            btnJoin.disabled = isFull;
+            btnJoin.title = isFull ? 'Session is full' : `Join "${selectedSession.name}"`;
+        }
+
+        async function joinSelectedSession() {
+            if (!selectedSessionId) {
+                log('No session selected. Select a session first.', 'warn');
+                return;
+            }
+            if (SessionClient.isInSession()) {
+                log('Already in a session. Leave current session first.', 'warn');
+                return;
+            }
+            try {
+                log(`Joining session ${selectedSessionId}...`);
+                const result = await SessionClient.joinSession(selectedSessionId);
+                if (!result) {
+                    log('Failed to join session - may be full or you are already in a session', 'error');
+                    await refreshSessions();
+                    return;
+                }
+                updateSessionUI(result.session, result.member);
+                clearSelectedSessionInfo();
+                log(`Joined session "${result.session.name}" as ${result.member.role}`, 'event');
+            } catch (err) {
+                log('Error joining session: ' + err.message, 'error');
+            }
+        }
+
+        async function createSession() {
+            if (SessionClient.isInSession()) {
+                log('Already in a session. Leave current session first.', 'warn');
+                return;
+            }
+            try {
+                log('Creating new session...');
+                const result = await SessionClient.createSession();
+                if (!result) {
+                    log('Failed to create session - server may be at capacity or you are already in a session', 'error');
+                    await refreshSessions();
+                    return;
+                }
+                updateSessionUI(result.session, result.member);
+                log(`Created session "${result.session.name}" as ${result.member.role}`, 'event');
+            } catch (err) {
+                log('Error creating session: ' + err.message, 'error');
+            }
+        }
+
+        async function leaveSession() {
+            try {
+                log('Leaving session...');
+                await SessionClient.leaveSession();
+                document.getElementById('session-status').textContent = 'Not in a session';
+                document.getElementById('btn-leave').disabled = true;
+                document.getElementById('btn-create').disabled = !canCreateSession;
+                document.getElementById('btn-create-object').disabled = true;
+                document.getElementById('btn-update-objects').disabled = true;
+                document.getElementById('btn-delete-object').disabled = true;
+                updateMemberList([]);
+                updateObjectList([]);
+                selectedSessionId = null;
+                await refreshSessions();
+                log('Left session', 'event');
+            } catch (err) {
+                log('Error leaving session: ' + err.message, 'error');
+            }
+        }
+
+        function updateSessionUI(session, member) {
+            document.getElementById('session-status').innerHTML = `
+                <strong>🍎 ${session.name}</strong><br>
+                Role: <span style="color: ${member.role === 'Server' ? '#ffff00' : '#00ffff'}">${member.role}</span><br>
+                My ID: <span style="color: #888">${member.id.substring(0, 8)}...</span>
+            `;
+            document.getElementById('btn-leave').disabled = false;
+            document.getElementById('btn-create').disabled = true;
+            document.getElementById('btn-join').disabled = true;
+            document.getElementById('btn-create-object').disabled = false;
+            document.getElementById('btn-update-objects').disabled = false;
+            document.getElementById('btn-delete-object').disabled = false;
+
+            // Update members
+            if (session.members) {
+                updateMemberList(session.members, member.id);
+            }
+
+            // Update objects
+            if (session.objects) {
+                updateObjectList(session.objects);
+            }
+        }
+
+        function updateMemberList(members, selfId = null) {
+            const listEl = document.getElementById('member-list');
+            if (!members || members.length === 0) {
+                listEl.innerHTML = '<em>No members</em>';
+                return;
+            }
+
+            const memberArray = Array.isArray(members) ? members : Object.values(members);
+            listEl.innerHTML = memberArray.map(m => {
+                const isSelf = m.id === selfId || m.id === SessionClient.getCurrentMember()?.id;
+                const roleClass = m.role === 'Server' ? 'server' : 'client';
+                return `<div class="member-badge ${roleClass} ${isSelf ? 'self' : ''}">
+                    ${m.role === 'Server' ? '👑' : '🎮'} ${m.id.substring(0, 8)}...
+                    ${isSelf ? '(you)' : ''}
+                </div>`;
+            }).join('');
+        }
+
+        function updateObjectList(objects) {
+            const listEl = document.getElementById('object-list');
+            const countEl = document.getElementById('object-count');
+            
+            const objectArray = Array.isArray(objects) ? objects : Object.values(objects);
+            countEl.textContent = objectArray.length;
+
+            if (objectArray.length === 0) {
+                listEl.innerHTML = '<em>No objects</em>';
+                return;
+            }
+
+            listEl.innerHTML = objectArray.map(o => `
+                <div class="object-item">
+                    <span class="object-id">${o.id.substring(0, 8)}...</span>
+                    [${o.affiliatedRole}] v${o.version}
+                    <div class="object-data">${JSON.stringify(o.data)}</div>
+                </div>
+            `).join('');
+        }
+
+        // Objects
+        let objectCounter = 0;
+        
+        async function createTestObject() {
+            try {
+                objectCounter++;
+                const data = {
+                    type: 'test-object',
+                    index: objectCounter,
+                    x: Math.random() * 800,
+                    y: Math.random() * 600,
+                    timestamp: Date.now()
+                };
+                log(`Creating object #${objectCounter}...`);
+                await ObjectSync.createObject(data);
+            } catch (err) {
+                log('Error creating object: ' + err.message, 'error');
+            }
+        }
+
+        async function updateTestObjects() {
+            try {
+                const objects = ObjectSync.getAllObjects();
+                if (objects.length === 0) {
+                    log('No objects to update', 'warn');
+                    return;
+                }
+
+                for (const obj of objects) {
+                    ObjectSync.updateObject(obj.id, {
+                        x: Math.random() * 800,
+                        y: Math.random() * 600,
+                        timestamp: Date.now()
+                    });
+                }
+                await ObjectSync.flushUpdates();
+                log(`Updated ${objects.length} object(s)`, 'info');
+            } catch (err) {
+                log('Error updating objects: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteLastObject() {
+            try {
+                const objects = ObjectSync.getAllObjects();
+                if (objects.length === 0) {
+                    log('No objects to delete', 'warn');
+                    return;
+                }
+
+                const lastObj = objects[objects.length - 1];
+                log(`Deleting object ${lastObj.id.substring(0, 8)}...`);
+                await ObjectSync.deleteObject(lastObj.id);
+            } catch (err) {
+                log('Error deleting object: ' + err.message, 'error');
+            }
+        }
+
+        // Session UI toggle
+        function toggleSessionUI() {
+            const container = document.getElementById('session-ui-container');
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                SessionUI.init('#session-ui-container', (session, member, action) => {
+                    log(`Session UI: ${action}`, 'event');
+                    if (session && member) {
+                        updateSessionUI(session, member);
+                    }
+                });
+            } else {
+                container.style.display = 'none';
+                SessionUI.destroy();
+            }
+        }
+
+        // Event handlers
+        SessionClient.on('onConnected', () => {
+            log('Connected to session hub', 'event');
+        });
+
+        SessionClient.on('onDisconnected', (error) => {
+            log('Disconnected: ' + (error?.message || 'Unknown'), 'warn');
+            updateConnectionUI(false);
+        });
+
+        SessionClient.on('onMemberJoined', (member) => {
+            log(`Member joined: ${member.id.substring(0, 8)}... as ${member.role}`, 'event');
+            // Refresh member list from updated session state
+            const session = SessionClient.getCurrentSession();
+            const currentMember = SessionClient.getCurrentMember();
+            if (session && session.members) {
+                updateMemberList(session.members, currentMember?.id);
+            }
+            refreshSessions();
+        });
+
+        SessionClient.on('onMemberLeft', (info) => {
+            log(`Member left: ${info.memberId.substring(0, 8)}...`, 'event');
+            if (info.promotedMemberId) {
+                log(`Promoted ${info.promotedMemberId.substring(0, 8)}... to ${info.promotedRole}`, 'event');
+            }
+            // Refresh member list from updated session state
+            const session = SessionClient.getCurrentSession();
+            const member = SessionClient.getCurrentMember();
+            if (session && session.members) {
+                updateMemberList(session.members, member?.id);
+            }
+            // Update session UI if we were promoted
+            if (session && member) {
+                updateSessionUI(session, member);
+            }
+            refreshSessions();
+        });
+
+        SessionClient.on('onRoleChanged', (newRole, affectedObjectIds) => {
+            log(`Your role changed to: ${newRole}`, 'event');
+            log(`Affected objects: ${affectedObjectIds.length}`, 'info');
+            const session = SessionClient.getCurrentSession();
+            const member = SessionClient.getCurrentMember();
+            if (session && member) {
+                updateSessionUI(session, member);
+            }
+        });
+
+        SessionClient.on('onError', (error) => {
+            log('Error: ' + error, 'error');
+        });
+
+        // Object sync handlers
+        ObjectSync.on('onObjectCreated', (obj) => {
+            log(`Object created: ${obj.id.substring(0, 8)}...`, 'event');
+            updateObjectList(ObjectSync.getAllObjects());
+        });
+
+        ObjectSync.on('onObjectUpdated', (obj) => {
+            log(`Object updated: ${obj.id.substring(0, 8)}... v${obj.version}`, 'info');
+            updateObjectList(ObjectSync.getAllObjects());
+        });
+
+        ObjectSync.on('onObjectDeleted', (obj) => {
+            log(`Object deleted: ${obj.id.substring(0, 8)}...`, 'event');
+            updateObjectList(ObjectSync.getAllObjects());
+        });
+
+        // Initialize
+        log('Session Test Harness loaded', 'info');
+        log('Click "Connect" to begin', 'info');
+    </script>
+</body>
+</html>
