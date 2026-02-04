@@ -190,12 +190,17 @@
                 <div id="session-status">Not in a session</div>
                 <div class="controls">
                     <button id="btn-create" onclick="createSession()" disabled>Create Session</button>
+                    <button id="btn-join" onclick="joinSelectedSession()" disabled>Join Session</button>
                     <button id="btn-leave" onclick="leaveSession()" disabled>Leave Session</button>
                     <button id="btn-refresh" onclick="refreshSessions()" disabled>Refresh List</button>
                 </div>
                 <h4>Available Sessions</h4>
                 <div id="session-list" class="session-list">
                     <em>Not connected</em>
+                </div>
+                <div id="selected-session-info" style="margin-top: 10px; padding: 10px; border: 1px solid #333; display: none;">
+                    <strong>Selected Session:</strong>
+                    <div id="selected-session-details"></div>
                 </div>
             </div>
 
@@ -286,6 +291,7 @@
             const btnConnect = document.getElementById('btn-connect');
             const btnDisconnect = document.getElementById('btn-disconnect');
             const btnCreate = document.getElementById('btn-create');
+            const btnJoin = document.getElementById('btn-join');
             const btnRefresh = document.getElementById('btn-refresh');
 
             if (connected) {
@@ -295,16 +301,19 @@
                 btnDisconnect.disabled = false;
                 btnCreate.disabled = false;
                 btnRefresh.disabled = false;
+                updateJoinButtonState();
             } else {
                 statusEl.className = 'status disconnected';
                 statusEl.textContent = '○ Disconnected';
                 btnConnect.disabled = false;
                 btnDisconnect.disabled = true;
                 btnCreate.disabled = true;
+                btnJoin.disabled = true;
                 btnRefresh.disabled = true;
                 document.getElementById('btn-leave').disabled = true;
                 document.getElementById('session-list').innerHTML = '<em>Not connected</em>';
                 document.getElementById('session-status').textContent = 'Not in a session';
+                clearSelectedSessionInfo();
                 updateMemberList([]);
                 updateObjectList([]);
             }
@@ -313,16 +322,18 @@
         // Sessions
         let canCreateSession = true;
         let maxSessions = 6;
+        let availableSessions = [];
 
         async function refreshSessions() {
             try {
                 const result = await SessionClient.getActiveSessions();
-                const sessions = result.sessions;
+                availableSessions = result.sessions;
                 maxSessions = result.maxSessions;
                 canCreateSession = result.canCreateSession;
                 
                 const listEl = document.getElementById('session-list');
                 const btnCreate = document.getElementById('btn-create');
+                const btnJoin = document.getElementById('btn-join');
                 
                 // Update create button state based on capacity (and not already in a session)
                 if (SessionClient.isConnected() && !SessionClient.isInSession()) {
@@ -330,22 +341,38 @@
                     btnCreate.title = canCreateSession ? '' : `Maximum sessions (${maxSessions}) reached`;
                 }
                 
-                if (sessions.length === 0) {
+                // Update join button state
+                updateJoinButtonState();
+                
+                if (availableSessions.length === 0) {
                     listEl.innerHTML = `<em>No active sessions (max: ${maxSessions})</em>`;
+                    clearSelectedSessionInfo();
                 } else {
-                    listEl.innerHTML = sessions.map(s => {
+                    listEl.innerHTML = availableSessions.map(s => {
                         const isFull = s.memberCount >= s.maxMembers;
                         return `
                             <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''} ${isFull ? 'full' : ''}" 
                                  onclick="selectSession('${s.id}')"
-                                 title="${isFull ? 'Session is full' : 'Click to join'}">
+                                 title="${isFull ? 'Session is full' : 'Click to select'}">
                                 🍎 <strong>${s.name}</strong> - ${s.memberCount}/${s.maxMembers} player(s)
                                 ${isFull ? '<span style="color: #ff4444;"> (FULL)</span>' : ''}
                             </div>
                         `;
-                    }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${sessions.length}/${maxSessions} sessions</div>`;
+                    }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${availableSessions.length}/${maxSessions} sessions</div>`;
+                    
+                    // Update selected session info if still valid
+                    if (selectedSessionId) {
+                        const selectedSession = availableSessions.find(s => s.id === selectedSessionId);
+                        if (selectedSession) {
+                            showSelectedSessionInfo(selectedSession);
+                        } else {
+                            // Selected session no longer exists
+                            selectedSessionId = null;
+                            clearSelectedSessionInfo();
+                        }
+                    }
                 }
-                log(`Found ${sessions.length}/${maxSessions} active session(s)`, 'info');
+                log(`Found ${availableSessions.length}/${maxSessions} active session(s)`, 'info');
             } catch (err) {
                 log('Error refreshing sessions: ' + err.message, 'error');
             }
@@ -353,12 +380,79 @@
 
         function selectSession(sessionId) {
             selectedSessionId = sessionId;
-            refreshSessions();
-            joinSelectedSession();
+            const selectedSession = availableSessions.find(s => s.id === sessionId);
+            if (selectedSession) {
+                showSelectedSessionInfo(selectedSession);
+                log(`Selected session "${selectedSession.name}"`, 'info');
+            }
+            updateJoinButtonState();
+            // Re-render list to show selection
+            const listEl = document.getElementById('session-list');
+            if (availableSessions.length > 0) {
+                listEl.innerHTML = availableSessions.map(s => {
+                    const isFull = s.memberCount >= s.maxMembers;
+                    return `
+                        <div class="session-item ${s.id === selectedSessionId ? 'selected' : ''} ${isFull ? 'full' : ''}" 
+                             onclick="selectSession('${s.id}')"
+                             title="${isFull ? 'Session is full' : 'Click to select'}">
+                            🍎 <strong>${s.name}</strong> - ${s.memberCount}/${s.maxMembers} player(s)
+                            ${isFull ? '<span style="color: #ff4444;"> (FULL)</span>' : ''}
+                        </div>
+                    `;
+                }).join('') + `<div style="color: #888; font-size: 11px; margin-top: 5px;">${availableSessions.length}/${maxSessions} sessions</div>`;
+            }
+        }
+
+        function showSelectedSessionInfo(session) {
+            const infoEl = document.getElementById('selected-session-info');
+            const detailsEl = document.getElementById('selected-session-details');
+            const isFull = session.memberCount >= session.maxMembers;
+            detailsEl.innerHTML = `
+                <div>🍎 <strong>${session.name}</strong></div>
+                <div>ID: <span style="color: #888;">${session.id.substring(0, 8)}...</span></div>
+                <div>Players: ${session.memberCount}/${session.maxMembers} ${isFull ? '<span style="color: #ff4444;">(FULL)</span>' : ''}</div>
+            `;
+            infoEl.style.display = 'block';
+        }
+
+        function clearSelectedSessionInfo() {
+            const infoEl = document.getElementById('selected-session-info');
+            infoEl.style.display = 'none';
+            selectedSessionId = null;
+            updateJoinButtonState();
+        }
+
+        function updateJoinButtonState() {
+            const btnJoin = document.getElementById('btn-join');
+            if (!SessionClient.isConnected() || SessionClient.isInSession()) {
+                btnJoin.disabled = true;
+                btnJoin.title = SessionClient.isInSession() ? 'Already in a session' : 'Not connected';
+                return;
+            }
+            
+            if (!selectedSessionId) {
+                btnJoin.disabled = true;
+                btnJoin.title = 'Select a session first';
+                return;
+            }
+            
+            const selectedSession = availableSessions.find(s => s.id === selectedSessionId);
+            if (!selectedSession) {
+                btnJoin.disabled = true;
+                btnJoin.title = 'Selected session no longer exists';
+                return;
+            }
+            
+            const isFull = selectedSession.memberCount >= selectedSession.maxMembers;
+            btnJoin.disabled = isFull;
+            btnJoin.title = isFull ? 'Session is full' : `Join "${selectedSession.name}"`;
         }
 
         async function joinSelectedSession() {
-            if (!selectedSessionId) return;
+            if (!selectedSessionId) {
+                log('No session selected. Select a session first.', 'warn');
+                return;
+            }
             if (SessionClient.isInSession()) {
                 log('Already in a session. Leave current session first.', 'warn');
                 return;
@@ -372,6 +466,7 @@
                     return;
                 }
                 updateSessionUI(result.session, result.member);
+                clearSelectedSessionInfo();
                 log(`Joined session "${result.session.name}" as ${result.member.role}`, 'event');
             } catch (err) {
                 log('Error joining session: ' + err.message, 'error');
@@ -404,6 +499,7 @@
                 await SessionClient.leaveSession();
                 document.getElementById('session-status').textContent = 'Not in a session';
                 document.getElementById('btn-leave').disabled = true;
+                document.getElementById('btn-create').disabled = !canCreateSession;
                 document.getElementById('btn-create-object').disabled = true;
                 document.getElementById('btn-update-objects').disabled = true;
                 document.getElementById('btn-delete-object').disabled = true;
@@ -424,6 +520,8 @@
                 My ID: <span style="color: #888">${member.id.substring(0, 8)}...</span>
             `;
             document.getElementById('btn-leave').disabled = false;
+            document.getElementById('btn-create').disabled = true;
+            document.getElementById('btn-join').disabled = true;
             document.getElementById('btn-create-object').disabled = false;
             document.getElementById('btn-update-objects').disabled = false;
             document.getElementById('btn-delete-object').disabled = false;
