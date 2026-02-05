@@ -189,6 +189,140 @@
             50% { opacity: 1; }
         }
 
+        /* Session picker styles */
+        #session-picker {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 400px;
+            padding: 0 20px;
+        }
+
+        #session-picker .picker-status {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 15px;
+            min-height: 20px;
+        }
+
+        #session-picker .picker-status.error {
+            color: #ff4444;
+        }
+
+        #session-picker .picker-status.connecting {
+            color: #ffff00;
+        }
+
+        #session-list {
+            width: 100%;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            border: 1px solid #444;
+            border-radius: 4px;
+        }
+
+        #session-list:empty::after {
+            content: 'No sessions available';
+            display: block;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+        }
+
+        .session-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.15s;
+        }
+
+        .session-item:last-child {
+            border-bottom: none;
+        }
+
+        .session-item:hover:not(.disabled) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .session-item.selected {
+            background: rgba(255, 255, 255, 0.2);
+            border-left: 3px solid #fff;
+        }
+
+        .session-item.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .session-item .session-name {
+            font-size: 16px;
+        }
+
+        .session-item .session-players {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .session-item.disabled .session-players {
+            color: #ff4444;
+        }
+
+        #picker-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+        }
+
+        .picker-btn {
+            background: transparent;
+            border: 2px solid #fff;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 18px;
+            padding: 12px 24px;
+            cursor: pointer;
+            transition: all 0.15s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .picker-btn:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .picker-btn:active:not(:disabled) {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .picker-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            border-color: #666;
+            color: #666;
+        }
+
+        .picker-btn.primary {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .picker-btn.solo {
+            border-color: #888;
+            color: #888;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
+        .picker-btn.solo:hover:not(:disabled) {
+            border-color: #fff;
+            color: #fff;
+        }
+
         /* Mobile touch controls */
         #mobile-controls {
             display: none;
@@ -307,6 +441,7 @@
         <!-- HUD: displays game stats -->
         <div id="hud">
             <span id="score">Score: 0</span>
+            <span id="session-indicator"></span>
             <span id="wave">Wave: 1</span>
             <span id="lives">Lives: 3</span>
         </div>
@@ -330,7 +465,15 @@
         <!-- Start screen overlay -->
         <div id="start-screen">
             <h1>ASTERVOIDS</h1>
-            <div class="start-prompt">Touch/Enter to Start</div>
+            <div id="session-picker">
+                <div id="picker-status" class="picker-status connecting">Connecting...</div>
+                <div id="session-list"></div>
+                <div id="picker-buttons">
+                    <button id="btn-join" class="picker-btn primary" disabled>Join Session</button>
+                    <button id="btn-create" class="picker-btn" disabled>Create Session</button>
+                    <button id="btn-solo" class="picker-btn solo">Solo Play</button>
+                </div>
+            </div>
         </div>
 
         <!-- Mobile touch controls -->
@@ -344,6 +487,11 @@
             <div id="touch-fullscreen" class="touch-btn">⛶</div>
         </div>
     </div>
+
+    <!-- SignalR for session connectivity -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <!-- Session client module -->
+    <script src="/js/session-client.js"></script>
 
     <script>
     /* ================================================================
@@ -1290,8 +1438,15 @@
         waveDelayTimer: 0,    // Countdown for wave transition
         speedMultiplier: 1,   // Current speed scaling
         previousState: null,  // State before pausing (to resume correctly)
-        lastFrameTime: 0      // Timestamp of last frame for delta time
+        lastFrameTime: 0,     // Timestamp of last frame for delta time
+        mode: 'solo',         // 'solo' or 'session'
+        sessionInfo: null     // Current session details when in session mode
     };
+    
+    // Helper to check if in session mode
+    function isSessionMode() {
+        return game.mode === 'session';
+    }
 
     // Pause menu element reference
     const pauseMenu = document.getElementById('pause-menu');
@@ -1487,9 +1642,12 @@
     }
 
     /**
-     * Toggle pause state
+     * Toggle pause state (disabled in session mode)
      */
     function togglePause() {
+        // Pause is disabled in session mode
+        if (isSessionMode()) return;
+
         if (game.state === 'paused') {
             // Resume game
             game.state = game.previousState || 'playing';
@@ -1516,26 +1674,29 @@
      */
     function handleInput() {
         if (game.state === 'start') {
-            // Check for start
-            if (keys['Enter']) {
-                startGame();
-            }
+            // Session picker handles start - don't process Enter here
             return;
         }
         
         if (game.state === 'gameover') {
-            // Check for restart
+            // Check for restart/return to menu
             if (keys['Enter']) {
-                init();
+                if (isSessionMode()) {
+                    // Return to start screen for session mode
+                    returnToStartScreen();
+                } else {
+                    // Restart for solo mode
+                    init();
+                }
             }
             return;
         }
 
         if (game.state === 'paused') {
-            // Allow restart from pause menu
+            // Allow restart from pause menu (solo only, session can't pause)
             if (keys['Enter']) {
                 pauseMenu.classList.remove('visible');
-                init();
+                returnToStartScreen();
             }
             return;
         }
@@ -1644,6 +1805,11 @@
             game.state = 'gameover';
             // Stop background beat on game over
             AudioSystem.beat.stop();
+            
+            // In session mode, leave the session on game over
+            if (isSessionMode() && SessionClient.isConnected()) {
+                SessionClient.leaveSession().catch(console.error);
+            }
         } else {
             // Respawn ship at center with invulnerability
             game.ship.reset(canvas);
@@ -1657,6 +1823,18 @@
         scoreDisplay.textContent = `Score: ${game.score}`;
         waveDisplay.textContent = `Wave: ${game.wave}`;
         livesDisplay.textContent = `Lives: ${game.lives}`;
+        
+        // Update session indicator
+        const sessionIndicator = document.getElementById('session-indicator');
+        if (sessionIndicator) {
+            if (isSessionMode() && game.sessionInfo) {
+                sessionIndicator.textContent = `🎮 ${game.sessionInfo.name}`;
+                sessionIndicator.style.display = '';
+            } else {
+                sessionIndicator.textContent = '';
+                sessionIndicator.style.display = 'none';
+            }
+        }
     }
 
     /**
@@ -1763,7 +1941,12 @@
             drawCenteredText('GAME OVER', canvas.height / 2 - 40, 48);
             drawCenteredText(`Final Score: ${game.score}`, canvas.height / 2 + 10, 24);
             if (!touchControlsEnabled) {
-                drawCenteredText('Press ENTER to restart', canvas.height / 2 + 50, 20);
+                // Show different message based on mode
+                if (isSessionMode()) {
+                    drawCenteredText('Press ENTER for menu', canvas.height / 2 + 50, 20);
+                } else {
+                    drawCenteredText('Press ENTER to restart', canvas.height / 2 + 50, 20);
+                }
             }
         }
         
@@ -1891,7 +2074,12 @@
             if (game.state === 'gameover' || game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
                 touchButtons.restart.classList.remove('visible');
-                init();
+                // Return to menu for session mode, restart for solo
+                if (isSessionMode()) {
+                    returnToStartScreen();
+                } else {
+                    init();
+                }
             }
         }, { passive: false });
     }
@@ -1903,7 +2091,7 @@
             e.preventDefault();
             if (game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
-                init();
+                returnToStartScreen();
             }
         }, { passive: false });
     }
@@ -1939,11 +2127,8 @@
     // Also enable touch controls on first touch anywhere on game
     document.getElementById('game-container').addEventListener('touchstart', (e) => {
         enableTouchControls();
-        // Start game on touch if on start screen
-        if (game.state === 'start') {
-            startGame();
-        }
-        if (e.target.classList.contains('touch-btn')) return;
+        // Don't auto-start on touch - let session picker handle it
+        if (e.target.classList.contains('touch-btn') || e.target.closest('#session-picker')) return;
         e.preventDefault();
     }, { passive: false });
 
@@ -2002,6 +2187,10 @@
             if (touchButtons.restart) {
                 touchButtons.restart.classList.toggle('visible', game.state === 'gameover');
             }
+            // Hide pause button in session mode
+            if (touchButtons.pause) {
+                touchButtons.pause.style.display = isSessionMode() ? 'none' : '';
+            }
             requestAnimationFrame(mobileLoop);
         });
     }
@@ -2013,6 +2202,345 @@
         startMobileUILoop();
         enableTouchControls = originalEnableTouchControls; // Only start loop once
     };
+
+    // ============================================
+    // SECTION 10: SESSION PICKER
+    // Multiplayer session management UI
+    // ============================================
+
+    const sessionPicker = {
+        statusEl: document.getElementById('picker-status'),
+        listEl: document.getElementById('session-list'),
+        btnJoin: document.getElementById('btn-join'),
+        btnCreate: document.getElementById('btn-create'),
+        btnSolo: document.getElementById('btn-solo'),
+        sessions: [],
+        selectedSessionId: null,
+        maxSessions: 6,
+        canCreate: false,
+        refreshInterval: null,
+        connected: false
+    };
+
+    // Update status message
+    function setPickerStatus(message, type = '') {
+        sessionPicker.statusEl.textContent = message;
+        sessionPicker.statusEl.className = 'picker-status' + (type ? ' ' + type : '');
+    }
+
+    // Render session list
+    function renderSessionList() {
+        const { listEl, sessions, selectedSessionId } = sessionPicker;
+        listEl.innerHTML = '';
+
+        if (sessions.length === 0) {
+            return; // CSS :empty will show "No sessions available"
+        }
+
+        sessions.forEach(session => {
+            const isFull = session.memberCount >= session.maxMembers;
+            const item = document.createElement('div');
+            item.className = 'session-item' + 
+                (session.id === selectedSessionId ? ' selected' : '') +
+                (isFull ? ' disabled' : '');
+            item.dataset.sessionId = session.id;
+            item.innerHTML = `
+                <span class="session-name">${session.name}</span>
+                <span class="session-players">${session.memberCount}/${session.maxMembers}${isFull ? ' FULL' : ''}</span>
+            `;
+            if (!isFull) {
+                item.addEventListener('click', () => selectSession(session.id));
+            }
+            listEl.appendChild(item);
+        });
+    }
+
+    // Select a session
+    function selectSession(sessionId) {
+        sessionPicker.selectedSessionId = sessionId;
+        renderSessionList();
+        updatePickerButtons();
+    }
+
+    // Update button states
+    function updatePickerButtons() {
+        const { btnJoin, btnCreate, selectedSessionId, sessions, canCreate, connected } = sessionPicker;
+        
+        // Join button - enabled if connected and a non-full session is selected
+        const selectedSession = sessions.find(s => s.id === selectedSessionId);
+        const canJoin = connected && selectedSession && selectedSession.memberCount < selectedSession.maxMembers;
+        btnJoin.disabled = !canJoin;
+
+        // Create button - enabled if connected and not at max sessions
+        btnCreate.disabled = !connected || !canCreate;
+        if (!canCreate && connected) {
+            btnCreate.title = 'Maximum sessions reached';
+        } else {
+            btnCreate.title = '';
+        }
+    }
+
+    // Refresh session list from server
+    async function refreshSessionList() {
+        if (!SessionClient.isConnected()) return;
+
+        try {
+            const result = await SessionClient.getActiveSessions();
+            sessionPicker.sessions = result.sessions || [];
+            sessionPicker.maxSessions = result.maxSessions;
+            sessionPicker.canCreate = result.canCreateSession;
+
+            // Clear selection if selected session no longer exists
+            if (sessionPicker.selectedSessionId) {
+                const stillExists = sessionPicker.sessions.find(s => s.id === sessionPicker.selectedSessionId);
+                if (!stillExists) {
+                    sessionPicker.selectedSessionId = null;
+                }
+            }
+
+            renderSessionList();
+            updatePickerButtons();
+            setPickerStatus(`${sessionPicker.sessions.length}/${sessionPicker.maxSessions} sessions`);
+        } catch (err) {
+            console.error('Failed to refresh sessions:', err);
+            setPickerStatus('Failed to load sessions', 'error');
+        }
+    }
+
+    // Connect to session hub
+    async function connectToSessionHub() {
+        setPickerStatus('Connecting...', 'connecting');
+
+        try {
+            const success = await SessionClient.connect();
+            if (success) {
+                sessionPicker.connected = true;
+                await refreshSessionList();
+                // Auto-refresh every 5 seconds while on start screen
+                sessionPicker.refreshInterval = setInterval(() => {
+                    if (game.state === 'start') {
+                        refreshSessionList();
+                    }
+                }, 5000);
+            } else {
+                throw new Error('Connection failed');
+            }
+        } catch (err) {
+            console.error('Session hub connection failed:', err);
+            setPickerStatus('Offline - Solo play only', 'error');
+            sessionPicker.connected = false;
+            updatePickerButtons();
+        }
+    }
+
+    // Stop session refresh
+    function stopSessionRefresh() {
+        if (sessionPicker.refreshInterval) {
+            clearInterval(sessionPicker.refreshInterval);
+            sessionPicker.refreshInterval = null;
+        }
+    }
+
+    // Handle join session
+    async function handleJoinSession() {
+        if (!sessionPicker.selectedSessionId) return;
+
+        const session = sessionPicker.sessions.find(s => s.id === sessionPicker.selectedSessionId);
+        if (!session) return;
+
+        setPickerStatus('Joining...', 'connecting');
+        sessionPicker.btnJoin.disabled = true;
+        sessionPicker.btnCreate.disabled = true;
+
+        try {
+            const result = await SessionClient.joinSession(sessionPicker.selectedSessionId);
+            if (result) {
+                game.mode = 'session';
+                game.sessionInfo = {
+                    id: result.session.id,
+                    name: result.session.name,
+                    memberId: result.member.id,
+                    role: result.member.role
+                };
+                stopSessionRefresh();
+                startGameFromPicker();
+            } else {
+                // Session full or other error
+                setPickerStatus('Could not join - session may be full', 'error');
+                await refreshSessionList();
+            }
+        } catch (err) {
+            console.error('Join session failed:', err);
+            setPickerStatus('Failed to join session', 'error');
+            await refreshSessionList();
+        }
+    }
+
+    // Handle create session
+    async function handleCreateSession() {
+        setPickerStatus('Creating...', 'connecting');
+        sessionPicker.btnJoin.disabled = true;
+        sessionPicker.btnCreate.disabled = true;
+
+        try {
+            const result = await SessionClient.createSession();
+            if (result) {
+                game.mode = 'session';
+                game.sessionInfo = {
+                    id: result.session.id,
+                    name: result.session.name,
+                    memberId: result.member.id,
+                    role: result.member.role
+                };
+                stopSessionRefresh();
+                startGameFromPicker();
+            } else {
+                setPickerStatus('Could not create - max sessions reached', 'error');
+                await refreshSessionList();
+            }
+        } catch (err) {
+            console.error('Create session failed:', err);
+            setPickerStatus('Failed to create session', 'error');
+            await refreshSessionList();
+        }
+    }
+
+    // Handle solo play
+    function handleSoloPlay() {
+        game.mode = 'solo';
+        game.sessionInfo = null;
+        stopSessionRefresh();
+        startGameFromPicker();
+    }
+
+    // Start game from picker (replaces old startGame for picker context)
+    function startGameFromPicker() {
+        if (game.state === 'start') {
+            init();
+        }
+    }
+
+    // Return to start screen
+    function returnToStartScreen(errorMessage = null) {
+        // Leave session if in one
+        if (isSessionMode() && SessionClient.isConnected()) {
+            SessionClient.leaveSession().catch(console.error);
+        }
+
+        // Reset game mode
+        game.mode = 'solo';
+        game.sessionInfo = null;
+
+        // Reset game state
+        game.state = 'start';
+        game.score = 0;
+        game.lives = CONFIG.STARTING_LIVES;
+        game.wave = 0;
+        pauseMenu.classList.remove('visible');
+        startScreen.classList.remove('hidden');
+
+        // Stop audio
+        AudioSystem.beat.stop();
+        AudioSystem.thrustSound.stop();
+
+        // Reinitialize start screen visuals
+        game.ship = new Ship(canvas.width / 2, canvas.height / 2);
+        game.astervoids = [];
+        game.bullets = [];
+        for (let i = 0; i < CONFIG.START_SCREEN_ASTERVOIDS; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = CONFIG.ASTEROID_BASE_SPEED + Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE;
+            game.astervoids.push(new Asteroid(
+                Math.random() * canvas.width,
+                Math.random() * canvas.height,
+                CONFIG.INITIAL_ASTEROID_RADIUS,
+                Math.cos(angle) * speed,
+                Math.sin(angle) * speed
+            ));
+        }
+
+        // Update picker
+        sessionPicker.selectedSessionId = null;
+        if (errorMessage) {
+            setPickerStatus(errorMessage, 'error');
+        }
+
+        // Reconnect and refresh if needed
+        if (!SessionClient.isConnected()) {
+            connectToSessionHub();
+        } else {
+            refreshSessionList();
+            // Restart refresh interval
+            if (!sessionPicker.refreshInterval) {
+                sessionPicker.refreshInterval = setInterval(() => {
+                    if (game.state === 'start') {
+                        refreshSessionList();
+                    }
+                }, 5000);
+            }
+        }
+    }
+
+    // Setup picker button handlers
+    sessionPicker.btnJoin.addEventListener('click', handleJoinSession);
+    sessionPicker.btnCreate.addEventListener('click', handleCreateSession);
+    sessionPicker.btnSolo.addEventListener('click', handleSoloPlay);
+
+    // Keyboard navigation for session picker
+    document.addEventListener('keydown', (e) => {
+        if (game.state !== 'start') return;
+
+        const { sessions, selectedSessionId } = sessionPicker;
+        const currentIndex = sessions.findIndex(s => s.id === selectedSessionId);
+
+        if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+            e.preventDefault();
+            // Find next non-full session
+            for (let i = currentIndex + 1; i < sessions.length; i++) {
+                if (sessions[i].memberCount < sessions[i].maxMembers) {
+                    selectSession(sessions[i].id);
+                    break;
+                }
+            }
+        } else if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+            e.preventDefault();
+            // Find previous non-full session
+            for (let i = currentIndex - 1; i >= 0; i--) {
+                if (sessions[i].memberCount < sessions[i].maxMembers) {
+                    selectSession(sessions[i].id);
+                    break;
+                }
+            }
+        } else if (e.code === 'Enter') {
+            e.preventDefault();
+            if (selectedSessionId && !sessionPicker.btnJoin.disabled) {
+                handleJoinSession();
+            }
+        }
+    });
+
+    // Session client event handlers
+    SessionClient.on('onDisconnected', (error) => {
+        sessionPicker.connected = false;
+        if (game.state !== 'start') {
+            // Mid-game disconnect - return to start screen
+            returnToStartScreen('Disconnected from server');
+        } else {
+            setPickerStatus('Disconnected - reconnecting...', 'error');
+            // Try to reconnect after a delay
+            setTimeout(connectToSessionHub, 2000);
+        }
+    });
+
+    // Leave session on page unload
+    window.addEventListener('beforeunload', () => {
+        if (isSessionMode() && SessionClient.isConnected()) {
+            SessionClient.leaveSession();
+        }
+    });
+
+    // Initialize session connection
+    connectToSessionHub();
     
     requestAnimationFrame(gameLoop);  // Use rAF to provide timestamp
 
