@@ -1145,10 +1145,9 @@
 
         /**
          * Update ship state based on physics and input
-         * @param {object} canvas - Canvas element for wrapping
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
-        update(canvas, dt = 1) {
+        update(dt = 1) {
             // Apply friction to slow down gradually (adjust for delta time)
             const friction = Math.pow(CONFIG.SHIP_FRICTION, dt);
             this.velocityX *= friction;
@@ -1724,8 +1723,9 @@
 
     /**
      * Handle player input each frame
+     * @param {number} dt - Delta time multiplier (1.0 = 60fps)
      */
-    function handleInput() {
+    function handleInput(dt = 1) {
         if (game.state === 'start') {
             // Session picker handles start - don't process Enter here
             return;
@@ -1756,12 +1756,12 @@
         
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
         
-        // Rotation
+        // Rotation (adjusted for delta time)
         if (input.left()) {
-            game.ship.angle -= CONFIG.SHIP_TURN_SPEED;
+            game.ship.angle -= CONFIG.SHIP_TURN_SPEED * dt;
         }
         if (input.right()) {
-            game.ship.angle += CONFIG.SHIP_TURN_SPEED;
+            game.ship.angle += CONFIG.SHIP_TURN_SPEED * dt;
         }
         
         // Thrust
@@ -1926,7 +1926,7 @@
         // --- UPDATE PHASE ---
         
         // Handle player input
-        handleInput();
+        handleInput(dt);
         
         // Update asteroids during start screen for visual effect
         if (game.state === 'start') {
