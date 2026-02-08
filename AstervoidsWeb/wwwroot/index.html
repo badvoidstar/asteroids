@@ -510,8 +510,8 @@
                 <div id="session-list"></div>
                 <div id="picker-buttons">
                     <div class="button-row">
-                        <button id="btn-create" class="picker-btn" disabled>Create</button>
-                        <button id="btn-action" class="picker-btn action" style="display: none;">Start</button>
+                        <button id="btn-leave-create" class="picker-btn" disabled>Create</button>
+                        <button id="btn-start-enter" class="picker-btn action" style="display: none;">Start</button>
                     </div>
                     <button id="btn-solo" class="picker-btn solo">Solo Play</button>
                 </div>
@@ -2101,8 +2101,8 @@
         // Handle player input
         handleInput(dt);
         
-        // Update astervoids during start screen for visual effect
-        if (game.state === 'start') {
+        // Update astervoids during start screen and lobby for visual effect
+        if (game.state === 'start' || game.state === 'lobby') {
             game.astervoids.forEach(asteroid => asteroid.update(dt));
         }
         
@@ -2169,7 +2169,7 @@
         // Draw game entities (now in gameplay coordinates)
         game.astervoids.forEach(asteroid => asteroid.draw(ctx));
         game.bullets.forEach(bullet => bullet.draw(ctx));
-        if (game.state !== 'start') {
+        if (game.state !== 'start' && game.state !== 'lobby') {
             game.ship.draw(ctx);
         }
         
@@ -2480,16 +2480,16 @@
     const sessionPicker = {
         statusEl: document.getElementById('picker-status'),
         listEl: document.getElementById('session-list'),
-        btnCreate: document.getElementById('btn-create'),
-        btnAction: document.getElementById('btn-action'),
+        btnLeaveCreate: document.getElementById('btn-leave-create'),
+        btnStartEnter: document.getElementById('btn-start-enter'),
         btnSolo: document.getElementById('btn-solo'),
         sessions: [],
         selectedSessionId: null,    // Highlighted session (keyboard nav)
         currentSessionId: null,     // Session player is actually IN
         isServer: false,            // Whether current player is the server/host
+        gameStarted: false,         // Whether the game has been started in current session
         maxSessions: 6,
         canCreate: false,
-        refreshInterval: null,
         connected: false
     };
 
@@ -2539,65 +2539,83 @@
 
     // Update button states
     function updatePickerButtons() {
-        const { btnCreate, btnAction, currentSessionId, isServer, canCreate, connected } = sessionPicker;
+        const { btnLeaveCreate, btnStartEnter, currentSessionId, isServer, gameStarted, canCreate, connected } = sessionPicker;
         
-        // Create button - enabled if connected and not at max sessions
-        btnCreate.disabled = !connected || !canCreate;
-        if (!canCreate && connected) {
-            btnCreate.title = 'Maximum sessions reached';
+        // Leave/Create button - context aware
+        if (currentSessionId) {
+            // In a session - show Leave
+            btnLeaveCreate.textContent = 'Leave';
+            btnLeaveCreate.disabled = false;
+            btnLeaveCreate.className = 'picker-btn action leave';
         } else {
-            btnCreate.title = '';
+            // Not in a session - show Create
+            btnLeaveCreate.textContent = 'Create';
+            btnLeaveCreate.disabled = !connected || !canCreate;
+            btnLeaveCreate.className = 'picker-btn';
+            if (!canCreate && connected) {
+                btnLeaveCreate.title = 'Maximum sessions reached';
+            } else {
+                btnLeaveCreate.title = '';
+            }
         }
 
-        // Action button - context-aware Start/Leave
+        // Start/Enter button - only visible when in a session
         if (currentSessionId) {
-            btnAction.style.display = '';
-            btnAction.disabled = false;
+            btnStartEnter.style.display = '';
             if (isServer) {
-                btnAction.textContent = 'Start';
-                btnAction.className = 'picker-btn action';
+                btnStartEnter.textContent = 'Start';
+                btnStartEnter.className = 'picker-btn action';
+                btnStartEnter.disabled = gameStarted; // Disable if already started
             } else {
-                btnAction.textContent = 'Leave';
-                btnAction.className = 'picker-btn action leave';
+                btnStartEnter.textContent = 'Enter';
+                btnStartEnter.className = 'picker-btn action';
+                btnStartEnter.disabled = !gameStarted; // Disable until server starts
             }
         } else {
-            btnAction.style.display = 'none';
+            btnStartEnter.style.display = 'none';
         }
     }
 
-    // Refresh session list from server
+    // Refresh session list from server (or from pushed data)
+    function updateSessionList(result) {
+        sessionPicker.sessions = result.sessions || [];
+        sessionPicker.maxSessions = result.maxSessions;
+        sessionPicker.canCreate = result.canCreateSession;
+
+        // If in a session, check if it still exists and update gameStarted
+        if (sessionPicker.currentSessionId) {
+            const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
+            if (!currentSession) {
+                // Session was deleted - leave lobby state
+                handleLeaveLobby('Session ended');
+                return;
+            }
+            // Update gameStarted from session data
+            sessionPicker.gameStarted = currentSession.gameStarted;
+        }
+
+        renderSessionList();
+        updatePickerButtons();
+        
+        // Update status based on current state
+        if (sessionPicker.currentSessionId) {
+            const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
+            if (currentSession) {
+                const roleText = sessionPicker.isServer ? 'host' : 'member';
+                setPickerStatus(`In ${currentSession.name} (${roleText}) - ${currentSession.memberCount}/${currentSession.maxMembers}`);
+            }
+        } else {
+            setPickerStatus(`${sessionPicker.sessions.length}/${sessionPicker.maxSessions} sessions`);
+        }
+    }
+
+    // Fetch session list from server (initial load)
     async function refreshSessionList() {
         if (!SessionClient.isConnected()) return;
 
         try {
             const result = await SessionClient.getActiveSessions();
-            sessionPicker.sessions = result.sessions || [];
-            sessionPicker.maxSessions = result.maxSessions;
-            sessionPicker.canCreate = result.canCreateSession;
-
-            // If in a session, check if it still exists
-            if (sessionPicker.currentSessionId) {
-                const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
-                if (!currentSession) {
-                    // Session was deleted - leave lobby state
-                    handleLeaveLobby('Session ended');
-                    return;
-                }
-            }
-
-            renderSessionList();
-            updatePickerButtons();
-            
-            // Update status based on current state
-            if (sessionPicker.currentSessionId) {
-                const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
-                if (currentSession) {
-                    const roleText = sessionPicker.isServer ? 'host' : 'member';
-                    setPickerStatus(`In ${currentSession.name} (${roleText}) - ${currentSession.memberCount}/${currentSession.maxMembers}`);
-                }
-            } else {
-                setPickerStatus(`${sessionPicker.sessions.length}/${sessionPicker.maxSessions} sessions`);
-            }
+            updateSessionList(result);
         } catch (err) {
             console.error('Failed to refresh sessions:', err);
             setPickerStatus('Failed to load sessions', 'error');
@@ -2613,12 +2631,7 @@
             if (success) {
                 sessionPicker.connected = true;
                 await refreshSessionList();
-                // Auto-refresh every 5 seconds while on start or lobby screen
-                sessionPicker.refreshInterval = setInterval(() => {
-                    if (game.state === 'start' || game.state === 'lobby') {
-                        refreshSessionList();
-                    }
-                }, 5000);
+                // No polling - we rely on SignalR push notifications
             } else {
                 throw new Error('Connection failed');
             }
@@ -2630,14 +2643,6 @@
         }
     }
 
-    // Stop session refresh
-    function stopSessionRefresh() {
-        if (sessionPicker.refreshInterval) {
-            clearInterval(sessionPicker.refreshInterval);
-            sessionPicker.refreshInterval = null;
-        }
-    }
-
     // Handle selecting a session (clicking on it) - immediately joins
     async function handleSelectSession(sessionId) {
         if (sessionId === sessionPicker.currentSessionId) return; // Already in this session
@@ -2646,7 +2651,7 @@
         if (!session || session.memberCount >= session.maxMembers) return;
 
         setPickerStatus('Joining...', 'connecting');
-        sessionPicker.btnCreate.disabled = true;
+        sessionPicker.btnLeaveCreate.disabled = true;
 
         try {
             // Leave current session if in one
@@ -2668,6 +2673,7 @@
                 };
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = result.member.role === 'Server';
+                sessionPicker.gameStarted = result.session.gameStarted;
                 
                 // Recalculate viewport for session aspect ratio
                 resizeCanvas(true);
@@ -2687,7 +2693,7 @@
     // Handle create session - creates and enters lobby
     async function handleCreateSession() {
         setPickerStatus('Creating...', 'connecting');
-        sessionPicker.btnCreate.disabled = true;
+        sessionPicker.btnLeaveCreate.disabled = true;
 
         try {
             // Leave current session if in one
@@ -2712,6 +2718,7 @@
                 };
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = true; // Creator is always server
+                sessionPicker.gameStarted = false; // New session, game not started
                 
                 // Recalculate viewport for session aspect ratio
                 resizeCanvas(true);
@@ -2739,25 +2746,42 @@
             }
             sessionPicker.currentSessionId = null;
             sessionPicker.isServer = false;
+            sessionPicker.gameStarted = false;
         }
         
         game.mode = 'solo';
         game.sessionInfo = null;
-        stopSessionRefresh();
         startGameFromPicker();
     }
 
-    // Handle action button (Start for server, Leave for client)
-    async function handleActionButton() {
+    // Handle Leave/Create button
+    async function handleLeaveCreateButton() {
+        if (sessionPicker.currentSessionId) {
+            // In a session - leave it
+            await handleLeaveLobby();
+        } else {
+            // Not in a session - create one
+            await handleCreateSession();
+        }
+    }
+
+    // Handle Start/Enter button
+    async function handleStartEnterButton() {
         if (!sessionPicker.currentSessionId) return;
 
         if (sessionPicker.isServer) {
-            // Server clicks Start - begin gameplay
-            stopSessionRefresh();
-            startGameFromPicker();
+            // Server clicks Start - signal game start and begin gameplay
+            try {
+                await SessionClient.startGame();
+                sessionPicker.gameStarted = true;
+                startGameFromPicker();
+            } catch (err) {
+                console.error('Failed to start game:', err);
+                setPickerStatus('Failed to start game', 'error');
+            }
         } else {
-            // Client clicks Leave - exit session
-            await handleLeaveLobby();
+            // Client clicks Enter - begin gameplay (game already started by server)
+            startGameFromPicker();
         }
     }
 
@@ -2777,6 +2801,7 @@
         game.sessionInfo = null;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
+        sessionPicker.gameStarted = false;
         
         // Recalculate viewport for solo mode
         resizeCanvas(true);
@@ -2811,6 +2836,7 @@
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.selectedSessionId = null;
+        sessionPicker.gameStarted = false;
 
         // Reset game state
         game.state = 'start';
@@ -2852,20 +2878,12 @@
             connectToSessionHub();
         } else {
             refreshSessionList();
-            // Restart refresh interval
-            if (!sessionPicker.refreshInterval) {
-                sessionPicker.refreshInterval = setInterval(() => {
-                    if (game.state === 'start' || game.state === 'lobby') {
-                        refreshSessionList();
-                    }
-                }, 5000);
-            }
         }
     }
 
     // Setup picker button handlers
-    sessionPicker.btnCreate.addEventListener('click', handleCreateSession);
-    sessionPicker.btnAction.addEventListener('click', handleActionButton);
+    sessionPicker.btnLeaveCreate.addEventListener('click', handleLeaveCreateButton);
+    sessionPicker.btnStartEnter.addEventListener('click', handleStartEnterButton);
     sessionPicker.btnSolo.addEventListener('click', handleSoloPlay);
 
     // Keyboard navigation for session picker
@@ -2890,9 +2908,9 @@
             }
         } else if (e.code === 'Enter') {
             e.preventDefault();
-            // If in a session and is server, start the game
-            if (currentSessionId && sessionPicker.isServer) {
-                handleActionButton();
+            // If in a session, trigger Start/Enter button action
+            if (currentSessionId) {
+                handleStartEnterButton();
             }
         }
         // Note: Escape is handled by the main keydown handler for session exit
@@ -2903,6 +2921,7 @@
         sessionPicker.connected = false;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
+        sessionPicker.gameStarted = false;
         
         if (game.state !== 'start' && game.state !== 'lobby') {
             // Mid-game disconnect - return to start screen
@@ -2923,8 +2942,32 @@
             game.sessionInfo.role = newRole;
         }
         sessionPicker.isServer = newRole === 'Server';
+        // Role data already provided in event - just update UI, no need to refetch
         updatePickerButtons();
-        refreshSessionList();
+    });
+
+    // Handle session list changes (signal from server - fetch fresh data with jitter)
+    let sessionRefreshTimeout = null;
+    SessionClient.on('onSessionsChanged', () => {
+        if (game.state === 'start' || game.state === 'lobby') {
+            // Debounce: cancel pending refresh if another signal arrives
+            if (sessionRefreshTimeout) {
+                clearTimeout(sessionRefreshTimeout);
+            }
+            // Random jitter 0-500ms to prevent thundering herd
+            sessionRefreshTimeout = setTimeout(() => {
+                sessionRefreshTimeout = null;
+                refreshSessionList();
+            }, Math.random() * 500);
+        }
+    });
+
+    // Handle game started notification (for clients)
+    SessionClient.on('onGameStarted', (sessionId) => {
+        if (sessionPicker.currentSessionId === sessionId) {
+            sessionPicker.gameStarted = true;
+            updatePickerButtons();
+        }
     });
 
     // Leave session on page unload

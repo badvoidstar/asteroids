@@ -13,6 +13,9 @@ public class SessionHub : Hub
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
 
+    // Group name for all connected clients to receive session list updates
+    private const string AllClientsGroup = "AllClients";
+
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
@@ -21,6 +24,15 @@ public class SessionHub : Hub
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Called when a client connects - add them to the AllClients group for broadcasts.
+    /// </summary>
+    public override async Task OnConnectedAsync()
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, AllClientsGroup);
+        await base.OnConnectedAsync();
     }
 
     /// <summary>
@@ -45,6 +57,9 @@ public class SessionHub : Hub
         _logger.LogInformation(
             "Session {SessionName} ({SessionId}) created by member {MemberId}",
             session.Name, session.Id, creator.Id);
+
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
 
         return new CreateSessionResponse(
             session.Id,
@@ -83,6 +98,9 @@ public class SessionHub : Hub
             "Member {MemberId} joined session {SessionName} ({SessionId})",
             member.Id, session.Name, session.Id);
 
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
+
         // Return session state including existing objects
         var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
         var objects = session.Objects.Values.Select(o => new ObjectInfo(
@@ -95,7 +113,8 @@ public class SessionHub : Hub
             member.Role.ToString(),
             members,
             objects,
-            session.AspectRatio
+            session.AspectRatio,
+            session.GameStarted
         );
     }
 
@@ -137,6 +156,9 @@ public class SessionHub : Hub
         }
 
         _logger.LogInformation("Member {MemberId} left session {SessionName}", result.MemberId, result.SessionName);
+
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
     }
 
     /// <summary>
@@ -146,10 +168,63 @@ public class SessionHub : Hub
     {
         var result = _sessionService.GetActiveSessions();
         return new ActiveSessionsResponse(
-            result.Sessions.Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.MaxMembers, s.CreatedAt)),
+            result.Sessions.Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.MaxMembers, s.CreatedAt, s.GameStarted)),
             result.MaxSessions,
             result.CanCreateSession
         );
+    }
+
+    /// <summary>
+    /// Starts the game in the current session. Only the server can call this.
+    /// </summary>
+    public async Task<bool> StartGame()
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("StartGame failed - member not found for connection {ConnectionId}", Context.ConnectionId);
+            return false;
+        }
+
+        if (member.Role != MemberRole.Server)
+        {
+            _logger.LogWarning("StartGame failed - member {MemberId} is not the server", member.Id);
+            return false;
+        }
+
+        var session = _sessionService.GetSession(member.SessionId);
+        if (session == null)
+        {
+            _logger.LogWarning("StartGame failed - session not found for member {MemberId}", member.Id);
+            return false;
+        }
+
+        if (session.GameStarted)
+        {
+            _logger.LogWarning("StartGame failed - game already started in session {SessionId}", session.Id);
+            return false;
+        }
+
+        session.GameStarted = true;
+        _logger.LogInformation("Game started in session {SessionName} ({SessionId}) by server {MemberId}",
+            session.Name, session.Id, member.Id);
+
+        // Notify all session members that the game has started
+        await Clients.Group(session.Id.ToString()).SendAsync("OnGameStarted", session.Id);
+
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
+
+        return true;
+    }
+
+    /// <summary>
+    /// Broadcasts a signal to all connected clients that the session list has changed.
+    /// Clients should call GetActiveSessions() to fetch updated data.
+    /// </summary>
+    private async Task BroadcastSessionsChanged()
+    {
+        await Clients.Group(AllClientsGroup).SendAsync("OnSessionsChanged");
     }
 
     /// <summary>
@@ -256,11 +331,12 @@ public record JoinSessionResponse(
     string Role,
     IEnumerable<MemberInfo> Members,
     IEnumerable<ObjectInfo> Objects,
-    double AspectRatio
+    double AspectRatio,
+    bool GameStarted
 );
 public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
 public record MemberLeftInfo(Guid MemberId, Guid? PromotedMemberId, string? PromotedRole, IEnumerable<Guid> AffectedObjectIds);
-public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt);
+public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt, bool GameStarted);
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, string AffiliatedRole, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);

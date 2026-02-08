@@ -47,6 +47,12 @@ public class Session
     public long Version { get; set; } = 1;
 
     /// <summary>
+    /// Whether the game has been started by the server.
+    /// Clients can only enter after this is true.
+    /// </summary>
+    public bool GameStarted { get; set; } = false;
+
+    /// <summary>
     /// Lock object for coordinating server promotion.
     /// </summary>
     internal readonly object PromotionLock = new();

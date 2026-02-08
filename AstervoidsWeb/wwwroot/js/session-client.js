@@ -24,6 +24,8 @@ const SessionClient = (function() {
         onObjectCreated: null,
         onObjectsUpdated: null,
         onObjectDeleted: null,
+        onSessionsChanged: null,
+        onGameStarted: null,
         onError: null
     };
 
@@ -175,6 +177,25 @@ const SessionClient = (function() {
                 callbacks.onObjectDeleted(objectId);
             }
         });
+
+        // Session list changed (signal only - fetch data separately)
+        connection.on('OnSessionsChanged', () => {
+            console.log('[SessionClient] Sessions changed signal received');
+            if (callbacks.onSessionsChanged) {
+                callbacks.onSessionsChanged();
+            }
+        });
+
+        // Game started in current session
+        connection.on('OnGameStarted', (sessionId) => {
+            console.log('[SessionClient] Game started in session:', sessionId);
+            if (currentSession) {
+                currentSession.gameStarted = true;
+            }
+            if (callbacks.onGameStarted) {
+                callbacks.onGameStarted(sessionId);
+            }
+        });
     }
 
     /**
@@ -242,7 +263,8 @@ const SessionClient = (function() {
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
-                aspectRatio: response.aspectRatio
+                aspectRatio: response.aspectRatio,
+                gameStarted: response.gameStarted
             };
             currentMember = {
                 id: response.memberId,
@@ -286,6 +308,29 @@ const SessionClient = (function() {
             }
         } catch (err) {
             console.error('[SessionClient] Leave session failed:', err);
+        }
+    }
+
+    /**
+     * Start the game in the current session. Only the server can call this.
+     */
+    async function startGame() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            throw new Error('Not connected to session hub');
+        }
+        if (!currentSession) {
+            throw new Error('Not in a session');
+        }
+
+        try {
+            const success = await connection.invoke('StartGame');
+            if (success && currentSession) {
+                currentSession.gameStarted = true;
+            }
+            return success;
+        } catch (err) {
+            console.error('[SessionClient] Start game failed:', err);
+            throw err;
         }
     }
 
@@ -413,6 +458,7 @@ const SessionClient = (function() {
         createSession,
         joinSession,
         leaveSession,
+        startGame,
         getActiveSessions,
         createObject,
         updateObjects,
