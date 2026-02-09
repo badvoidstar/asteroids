@@ -7,6 +7,9 @@ const ObjectSync = (function() {
     // Local object registry
     const objects = new Map();
     
+    // Type index for faster lookups - maps type string to Set of object IDs
+    const typeIndex = new Map();
+    
     // Pending updates to be batched
     let pendingUpdates = [];
     let updateTimer = null;
@@ -19,6 +22,61 @@ const ObjectSync = (function() {
         onObjectDeleted: null,
         onSyncError: null
     };
+    
+    /**
+     * Add object to type index
+     */
+    function addToTypeIndex(obj) {
+        const type = obj.data?.type;
+        if (!type) return;
+        
+        if (!typeIndex.has(type)) {
+            typeIndex.set(type, new Set());
+        }
+        typeIndex.get(type).add(obj.id);
+    }
+    
+    /**
+     * Remove object from type index
+     */
+    function removeFromTypeIndex(obj) {
+        const type = obj.data?.type;
+        if (!type) return;
+        
+        const typeSet = typeIndex.get(type);
+        if (typeSet) {
+            typeSet.delete(obj.id);
+            if (typeSet.size === 0) {
+                typeIndex.delete(type);
+            }
+        }
+    }
+    
+    /**
+     * Update type index when object data changes
+     */
+    function updateTypeIndex(obj, oldType, newType) {
+        if (oldType === newType) return;
+        
+        // Remove from old type
+        if (oldType) {
+            const oldSet = typeIndex.get(oldType);
+            if (oldSet) {
+                oldSet.delete(obj.id);
+                if (oldSet.size === 0) {
+                    typeIndex.delete(oldType);
+                }
+            }
+        }
+        
+        // Add to new type
+        if (newType) {
+            if (!typeIndex.has(newType)) {
+                typeIndex.set(newType, new Set());
+            }
+            typeIndex.get(newType).add(obj.id);
+        }
+    }
 
     /**
      * Initialize the object sync module.
@@ -40,18 +98,21 @@ const ObjectSync = (function() {
      */
     function handleSessionJoined(session, member) {
         objects.clear();
+        typeIndex.clear();
         pendingUpdates = [];
 
         if (session.objects) {
             for (const obj of session.objects) {
-                objects.set(obj.id, {
+                const localObj = {
                     id: obj.id,
                     creatorMemberId: obj.creatorMemberId,
                     affiliatedRole: obj.affiliatedRole,
                     data: obj.data || {},
                     version: obj.version,
                     isLocal: false
-                });
+                };
+                objects.set(obj.id, localObj);
+                addToTypeIndex(localObj);
             }
         }
 
@@ -63,6 +124,7 @@ const ObjectSync = (function() {
      */
     function handleSessionLeft() {
         objects.clear();
+        typeIndex.clear();
         pendingUpdates = [];
         if (updateTimer) {
             clearTimeout(updateTimer);
@@ -98,6 +160,7 @@ const ObjectSync = (function() {
         };
 
         objects.set(obj.id, obj);
+        addToTypeIndex(obj);
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -113,9 +176,13 @@ const ObjectSync = (function() {
             if (existing) {
                 // Only apply if version is newer
                 if (update.version > existing.version) {
+                    const oldType = existing.data?.type;
                     existing.data = update.data;
                     existing.version = update.version;
                     existing.affiliatedRole = update.affiliatedRole;
+                    
+                    // Update type index if type changed
+                    updateTypeIndex(existing, oldType, update.data?.type);
 
                     if (callbacks.onObjectUpdated) {
                         callbacks.onObjectUpdated(existing);
@@ -132,6 +199,7 @@ const ObjectSync = (function() {
                     isLocal: false
                 };
                 objects.set(obj.id, obj);
+                addToTypeIndex(obj);
 
                 if (callbacks.onObjectCreated) {
                     callbacks.onObjectCreated(obj);
@@ -146,6 +214,7 @@ const ObjectSync = (function() {
     function handleRemoteObjectDeleted(objectId) {
         const obj = objects.get(objectId);
         if (obj) {
+            removeFromTypeIndex(obj);
             objects.delete(objectId);
 
             if (callbacks.onObjectDeleted) {
@@ -185,8 +254,16 @@ const ObjectSync = (function() {
             return false;
         }
 
+        // Track type changes for index update
+        const oldType = obj.data?.type;
+        
         // Update local data immediately
         Object.assign(obj.data, data);
+        
+        // Update type index if type changed
+        if (data.type !== undefined) {
+            updateTypeIndex(obj, oldType, data.type);
+        }
 
         // Queue for batch sync
         const existingUpdate = pendingUpdates.find(u => u.objectId === objectId);
@@ -293,6 +370,39 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Get objects by type (from data.type field).
+     * Uses type index for O(n) lookup where n = objects of that type, instead of all objects.
+     * @param {string} type - The object type to filter by
+     * @returns {array} Array of objects with matching type
+     */
+    function getObjectsByType(type) {
+        const typeSet = typeIndex.get(type);
+        if (!typeSet || typeSet.size === 0) return [];
+        
+        const result = [];
+        for (const id of typeSet) {
+            const obj = objects.get(id);
+            if (obj) result.push(obj);
+        }
+        return result;
+    }
+
+    /**
+     * Get a single object by type (for singletons like GameState).
+     * Uses type index for efficient lookup.
+     * @param {string} type - The object type to find
+     * @returns {object|null} The first object with matching type, or null
+     */
+    function getObjectByType(type) {
+        const typeSet = typeIndex.get(type);
+        if (!typeSet || typeSet.size === 0) return null;
+        
+        // Get first ID from the set
+        const firstId = typeSet.values().next().value;
+        return objects.get(firstId) || null;
+    }
+
+    /**
      * Register a callback.
      */
     function on(event, callback) {
@@ -315,6 +425,7 @@ const ObjectSync = (function() {
      */
     function clear() {
         objects.clear();
+        typeIndex.clear();
         pendingUpdates = [];
     }
 
@@ -329,6 +440,8 @@ const ObjectSync = (function() {
         getAllObjects,
         getObjectsByRole,
         getLocalObjects,
+        getObjectsByType,
+        getObjectByType,
         getObjectCount,
         on,
         clear

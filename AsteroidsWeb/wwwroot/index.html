@@ -534,6 +534,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
     <!-- Session client module -->
     <script src="/js/session-client.js"></script>
+    <!-- Object sync module -->
+    <script src="/js/object-sync.js"></script>
 
     <script>
     /* ================================================================
@@ -944,7 +946,164 @@
         
         // Start screen
         START_SCREEN_ASTEROIDS: 4,  // Asteroids shown on start screen
-        SPAWN_MIN_DISTANCE: 0.25    // Minimum spawn distance from ship (normalized)
+        SPAWN_MIN_DISTANCE: 0.25,   // Minimum spawn distance from ship (normalized)
+        
+        // Multiplayer settings
+        MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
+        SYNC_INTERVAL: 50,          // Object sync interval in ms (matches ObjectSync)
+        INTERPOLATION_DELAY: 50     // Render delay for smooth interpolation (ms)
+    };
+
+    // ============================================
+    // SECTION 1B: MULTIPLAYER CONSTANTS
+    // Object types and ship colors for multiplayer sync
+    // ============================================
+
+    // Synced object types
+    const OBJECT_TYPES = {
+        SHIP: 'ship',
+        ASTEROID: 'asteroid',
+        BULLET: 'bullet',
+        GAME_STATE: 'gameState'
+    };
+
+    // Ship colors for up to 4 players (distinct, high-contrast)
+    const SHIP_COLORS = [
+        '#00FF00',  // Green (Player 1 / typically Server)
+        '#00FFFF',  // Cyan (Player 2)
+        '#FF00FF',  // Magenta (Player 3)
+        '#FFFF00'   // Yellow (Player 4)
+    ];
+
+    // Remote object state tracking for interpolation
+    const RemoteObjects = {
+        // Map of objectId -> interpolation state
+        states: new Map(),
+        
+        /**
+         * Update remote object state when sync data received
+         * @param {string} objectId - Object ID
+         * @param {object} data - New object data from ObjectSync
+         */
+        updateState(objectId, data) {
+            const now = performance.now();
+            const existing = this.states.get(objectId);
+            
+            if (existing) {
+                // Shift current to previous
+                existing.previous = existing.current;
+                existing.previousTime = existing.currentTime;
+                existing.current = { ...data };
+                existing.currentTime = now;
+                // Store velocity for prediction
+                existing.velocity = {
+                    x: data.velocityX || 0,
+                    y: data.velocityY || 0
+                };
+            } else {
+                // First time seeing this object
+                this.states.set(objectId, {
+                    current: { ...data },
+                    previous: { ...data },
+                    currentTime: now,
+                    previousTime: now - CONFIG.SYNC_INTERVAL,
+                    velocity: {
+                        x: data.velocityX || 0,
+                        y: data.velocityY || 0
+                    }
+                });
+            }
+        },
+        
+        /**
+         * Get interpolated position for rendering
+         * @param {string} objectId - Object ID
+         * @param {number} renderTime - Current render timestamp
+         * @returns {object|null} Interpolated state or null if not found
+         */
+        getInterpolated(objectId, renderTime) {
+            const state = this.states.get(objectId);
+            if (!state) return null;
+            
+            // Calculate interpolation factor
+            const timeDiff = state.currentTime - state.previousTime;
+            if (timeDiff <= 0) return state.current;
+            
+            // Render slightly behind real-time for smooth interpolation
+            const targetTime = renderTime - CONFIG.INTERPOLATION_DELAY;
+            const t = (targetTime - state.previousTime) / timeDiff;
+            
+            if (t <= 0) {
+                // Before previous state - use previous
+                return state.previous;
+            } else if (t <= 1) {
+                // Between previous and current - interpolate
+                return this.lerp(state.previous, state.current, t);
+            } else {
+                // After current - extrapolate using velocity
+                const extraTime = (targetTime - state.currentTime) / 1000; // Convert to seconds
+                return {
+                    ...state.current,
+                    x: wrapNormalized(state.current.x + state.velocity.x * extraTime * 0.001),
+                    y: wrapNormalized(state.current.y + state.velocity.y * extraTime * 0.001),
+                    angle: state.current.angle + (state.current.rotationSpeed || 0) * extraTime
+                };
+            }
+        },
+        
+        /**
+         * Linear interpolation between two states
+         */
+        lerp(a, b, t) {
+            const result = { ...b };
+            
+            // Interpolate position
+            if (a.x !== undefined && b.x !== undefined) {
+                result.x = this.lerpValue(a.x, b.x, t);
+            }
+            if (a.y !== undefined && b.y !== undefined) {
+                result.y = this.lerpValue(a.y, b.y, t);
+            }
+            
+            // Interpolate angle (handle wraparound)
+            if (a.angle !== undefined && b.angle !== undefined) {
+                result.angle = this.lerpAngle(a.angle, b.angle, t);
+            }
+            
+            return result;
+        },
+        
+        /**
+         * Interpolate a single value
+         */
+        lerpValue(a, b, t) {
+            return a + (b - a) * t;
+        },
+        
+        /**
+         * Interpolate angles handling wraparound
+         */
+        lerpAngle(a, b, t) {
+            let diff = b - a;
+            // Handle wraparound
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            return a + diff * t;
+        },
+        
+        /**
+         * Remove object from tracking
+         */
+        remove(objectId) {
+            this.states.delete(objectId);
+        },
+        
+        /**
+         * Clear all tracked objects
+         */
+        clear() {
+            this.states.clear();
+        }
     };
 
     // ============================================
@@ -1278,7 +1437,7 @@
      * All positions and velocities are normalized (0-1 range)
      */
     class Ship {
-        constructor(x, y) {
+        constructor(x, y, colorIndex = 0) {
             this.x = x;                    // Normalized X position (0-1)
             this.y = y;                    // Normalized Y position (0-1)
             this.angle = -Math.PI / 2;     // Facing up initially
@@ -1287,6 +1446,44 @@
             this.thrusting = false;        // Is thrust active?
             this.invulnerable = 0;         // Invulnerability frames remaining
             this.shootCooldown = 0;        // Frames until can shoot again
+            this.colorIndex = colorIndex;  // Player color index (0-3)
+            this.syncObjectId = null;      // ObjectSync ID when in session
+            this.memberId = null;          // Session member ID who owns this ship
+        }
+
+        /**
+         * Serialize ship state for ObjectSync
+         * @returns {object} Ship data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.SHIP,
+                x: this.x,
+                y: this.y,
+                angle: this.angle,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                thrusting: this.thrusting,
+                invulnerable: this.invulnerable,
+                colorIndex: this.colorIndex,
+                memberId: this.memberId
+            };
+        }
+
+        /**
+         * Update ship from sync data (for remote ships)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.angle !== undefined) this.angle = data.angle;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.thrusting !== undefined) this.thrusting = data.thrusting;
+            if (data.invulnerable !== undefined) this.invulnerable = data.invulnerable;
+            if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
+            if (data.memberId !== undefined) this.memberId = data.memberId;
         }
 
         /**
@@ -1371,8 +1568,11 @@
             const pixelY = fromNormalizedY(this.y);
             const size = fromNormalizedSize(CONFIG.SHIP_SIZE);
             
+            // Use ship color (multiplayer) or default white (solo)
+            const shipColor = SHIP_COLORS[this.colorIndex] || CONFIG.STROKE_COLOR;
+            
             // Draw ship triangle
-            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            ctx.strokeStyle = shipColor;
             ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.moveTo(vertices[0].x, vertices[0].y);
@@ -1431,7 +1631,9 @@
                 noseX,
                 noseY,
                 Math.cos(this.angle) * CONFIG.BULLET_SPEED,
-                Math.sin(this.angle) * CONFIG.BULLET_SPEED
+                Math.sin(this.angle) * CONFIG.BULLET_SPEED,
+                this.colorIndex,    // Inherit ship's color
+                this.memberId       // Track owner for scoring
             );
         }
 
@@ -1454,7 +1656,7 @@
      * Position is normalized (0-1), radius/velocity are in reference-dimension units
      */
     class Asteroid {
-        constructor(x, y, radius, velocityX, velocityY) {
+        constructor(x, y, radius, velocityX, velocityY, seed = null) {
             this.x = x;                    // Normalized X position (0-1)
             this.y = y;                    // Normalized Y position (0-1)
             this.radius = radius;          // Normalized size (relative to ref dimension)
@@ -1462,23 +1664,83 @@
             this.velocityY = velocityY;    // Velocity in reference-dimension per second
             this.angle = Math.random() * Math.PI * 2;  // Random rotation
             this.rotationSpeed = randomRange(-0.02, 0.02);  // Spin rate
+            this.seed = seed || Math.random();  // Seed for deterministic shape generation
             this.vertices = this.generateShape();  // Irregular polygon (normalized)
+            this.syncObjectId = null;      // ObjectSync ID when in session
+        }
+
+        /**
+         * Serialize asteroid state for ObjectSync
+         * @returns {object} Asteroid data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.ASTEROID,
+                x: this.x,
+                y: this.y,
+                radius: this.radius,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                angle: this.angle,
+                rotationSpeed: this.rotationSpeed,
+                seed: this.seed
+            };
+        }
+
+        /**
+         * Update asteroid from sync data (for remote asteroids)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.angle !== undefined) this.angle = data.angle;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.rotationSpeed !== undefined) this.rotationSpeed = data.rotationSpeed;
+        }
+
+        /**
+         * Create an asteroid from sync data
+         * @param {object} data - Sync data from ObjectSync
+         * @returns {Asteroid} New asteroid instance
+         */
+        static fromSyncData(data) {
+            const asteroid = new Asteroid(
+                data.x, 
+                data.y, 
+                data.radius, 
+                data.velocityX, 
+                data.velocityY,
+                data.seed
+            );
+            asteroid.angle = data.angle || 0;
+            asteroid.rotationSpeed = data.rotationSpeed || 0;
+            return asteroid;
         }
 
         /**
          * Generate an irregular polygon shape
          * Creates the classic jagged asteroid look
+         * Uses seed for deterministic generation across clients
          * @returns {array} Array of vertices with angle and distance (normalized)
          */
         generateShape() {
             const vertices = [];
             const vertexCount = CONFIG.ASTEROID_VERTICES;
             
+            // Use seeded random for deterministic shape across clients
+            let seedValue = this.seed;
+            const seededRandom = () => {
+                seedValue = (seedValue * 9301 + 49297) % 233280;
+                return seedValue / 233280;
+            };
+            
             for (let i = 0; i < vertexCount; i++) {
                 const angle = (i / vertexCount) * Math.PI * 2;
                 // Vary radius for jagged appearance
                 const variance = 1 - CONFIG.ASTEROID_JAGGEDNESS + 
-                                 Math.random() * CONFIG.ASTEROID_JAGGEDNESS * 2;
+                                 seededRandom() * CONFIG.ASTEROID_JAGGEDNESS * 2;
                 vertices.push({
                     angle: angle,
                     distance: this.radius * variance  // Normalized distance
@@ -1575,12 +1837,63 @@
      * Position is normalized (0-1), velocity is in reference-dimension per second
      */
     class Bullet {
-        constructor(x, y, velocityX, velocityY) {
+        constructor(x, y, velocityX, velocityY, colorIndex = 0, ownerMemberId = null) {
             this.x = x;                    // Normalized X position (0-1)
             this.y = y;                    // Normalized Y position (0-1)
             this.velocityX = velocityX;    // Velocity in reference-dimension per second
             this.velocityY = velocityY;    // Velocity in reference-dimension per second
             this.lifetime = CONFIG.BULLET_LIFETIME;  // Frames until expiry
+            this.colorIndex = colorIndex;  // Owner's color index for multiplayer
+            this.ownerMemberId = ownerMemberId;  // Member ID who fired this bullet
+            this.syncObjectId = null;      // ObjectSync ID when in session
+        }
+
+        /**
+         * Serialize bullet state for ObjectSync
+         * @returns {object} Bullet data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.BULLET,
+                x: this.x,
+                y: this.y,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                lifetime: this.lifetime,
+                colorIndex: this.colorIndex,
+                ownerMemberId: this.ownerMemberId
+            };
+        }
+
+        /**
+         * Update bullet from sync data (for remote bullets)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.lifetime !== undefined) this.lifetime = data.lifetime;
+            if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
+        }
+
+        /**
+         * Create a bullet from sync data
+         * @param {object} data - Sync data from ObjectSync
+         * @returns {Bullet} New bullet instance
+         */
+        static fromSyncData(data) {
+            const bullet = new Bullet(
+                data.x, 
+                data.y, 
+                data.velocityX, 
+                data.velocityY,
+                data.colorIndex || 0,
+                data.ownerMemberId
+            );
+            bullet.lifetime = data.lifetime || CONFIG.BULLET_LIFETIME;
+            return bullet;
         }
 
         /**
@@ -1609,7 +1922,10 @@
             const pixelY = fromNormalizedY(this.y);
             const pixelRadius = fromNormalizedSize(CONFIG.BULLET_RADIUS);
             
-            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            // Use owner's color in multiplayer
+            const bulletColor = SHIP_COLORS[this.colorIndex] || CONFIG.STROKE_COLOR;
+            
+            ctx.strokeStyle = bulletColor;
             ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.arc(pixelX, pixelY, pixelRadius, 0, Math.PI * 2);
@@ -1641,13 +1957,13 @@
 
     // Game state object
     const game = {
-        ship: null,           // Player ship instance
+        ship: null,           // Player ship instance (local player's ship)
         asteroids: [],        // Active asteroids
         bullets: [],          // Active bullets
         score: 0,             // Current score
         lives: 0,             // Remaining lives
         wave: 0,              // Current wave number
-        state: 'start',       // 'start', 'playing', 'respawning', 'gameover', 'waveDelay', 'paused'
+        state: 'start',       // 'start', 'playing', 'respawning', 'gameover', 'waveDelay', 'paused', 'lobby'
         waveDelayTimer: 0,    // Countdown for wave transition
         speedMultiplier: 1,   // Current speed scaling
         previousState: null,  // State before pausing (to resume correctly)
@@ -1660,12 +1976,27 @@
             y: 0,             // Y offset of gameplay area within canvas
             width: 0,         // Width of gameplay area (set in resizeCanvas)
             height: 0         // Height of gameplay area (set in resizeCanvas)
-        }
+        },
+        // Multiplayer state
+        multiplayer: {
+            myShipObjectId: null,     // ObjectSync ID for local player's ship
+            myColorIndex: 0,          // Local player's color index
+            remoteShips: new Map(),   // objectId -> Ship instance for remote players
+            gameStateObjectId: null,  // ObjectSync ID for shared game state
+            isAuthority: false        // True if this client is the Server (authority)
+        },
+        // Cosmetic asteroids for start screen (separate from game asteroids)
+        cosmeticAsteroids: []
     };
     
     // Helper to check if in session mode
     function isSessionMode() {
         return game.mode === 'session';
+    }
+    
+    // Helper to check if this client has authority (is Server)
+    function isAuthority() {
+        return isSessionMode() && game.multiplayer.isAuthority;
     }
 
     // Pause menu element reference
@@ -1694,6 +2025,462 @@
     };
 
     // ============================================
+    // SECTION 4B: MULTIPLAYER SYNC FUNCTIONS
+    // Functions for synchronizing game state in multiplayer sessions
+    // ============================================
+
+    /**
+     * Create a ship object in ObjectSync for the local player
+     * Called when entering a multiplayer game
+     * @param {number} colorIndex - The color index for this player's ship
+     */
+    async function createSyncedShip(colorIndex) {
+        if (!isSessionMode() || !SessionClient.isInSession()) return;
+        
+        const memberId = SessionClient.getCurrentMember()?.id;
+        if (!memberId) return;
+        
+        // Create ship at center with invulnerability
+        game.ship = new Ship(0.5, 0.5, colorIndex);
+        game.ship.memberId = memberId;
+        game.ship.invulnerable = CONFIG.INVULNERABILITY_TIME;
+        game.multiplayer.myColorIndex = colorIndex;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(game.ship.toSyncData());
+            game.ship.syncObjectId = objectInfo.id;
+            game.multiplayer.myShipObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create ship:', err);
+        }
+    }
+
+    /**
+     * Sync local ship state to ObjectSync
+     * Called every frame for the local player's ship
+     */
+    function syncLocalShip() {
+        if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
+        
+        ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toSyncData());
+    }
+
+    /**
+     * Delete the local player's ship from ObjectSync
+     * Called when leaving a session or returning to spectating
+     */
+    async function deleteSyncedShip() {
+        if (!game.multiplayer.myShipObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(game.multiplayer.myShipObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete ship:', err);
+        }
+        
+        game.multiplayer.myShipObjectId = null;
+        game.ship = null;
+    }
+
+    /**
+     * Update remote ships from ObjectSync data
+     * Called every frame to sync remote player ships
+     */
+    function updateRemoteShips() {
+        if (!isSessionMode()) return;
+        
+        const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        const currentRemoteIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of shipObjects) {
+            // Skip our own ship
+            if (obj.data.memberId === myMemberId) continue;
+            
+            currentRemoteIds.add(obj.id);
+            
+            // Update interpolation state
+            RemoteObjects.updateState(obj.id, obj.data);
+            
+            // Get or create remote ship instance
+            let remoteShip = game.multiplayer.remoteShips.get(obj.id);
+            if (!remoteShip) {
+                remoteShip = new Ship(obj.data.x, obj.data.y, obj.data.colorIndex || 0);
+                game.multiplayer.remoteShips.set(obj.id, remoteShip);
+            }
+            
+            // Apply interpolated state for smooth rendering
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                remoteShip.fromSyncData(interpolated);
+            } else {
+                remoteShip.fromSyncData(obj.data);
+            }
+        }
+        
+        // Remove ships that no longer exist
+        for (const [objectId, ship] of game.multiplayer.remoteShips) {
+            if (!currentRemoteIds.has(objectId)) {
+                game.multiplayer.remoteShips.delete(objectId);
+                RemoteObjects.remove(objectId);
+            }
+        }
+    }
+
+    /**
+     * Draw all remote ships
+     * Called during render phase
+     * @param {CanvasRenderingContext2D} ctx - Canvas context
+     */
+    function drawRemoteShips(ctx) {
+        for (const [objectId, ship] of game.multiplayer.remoteShips) {
+            ship.draw(ctx);
+        }
+    }
+
+    /**
+     * Get the next available color index for a new player
+     * @returns {number} Color index (0-3)
+     */
+    function getNextColorIndex() {
+        const usedColors = new Set();
+        const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+        
+        for (const obj of shipObjects) {
+            if (obj.data.colorIndex !== undefined) {
+                usedColors.add(obj.data.colorIndex);
+            }
+        }
+        
+        // Find first unused color
+        for (let i = 0; i < SHIP_COLORS.length; i++) {
+            if (!usedColors.has(i)) {
+                return i;
+            }
+        }
+        
+        // All colors used, wrap around
+        return shipObjects.length % SHIP_COLORS.length;
+    }
+
+    /**
+     * Reset multiplayer state
+     * Called when leaving a session
+     */
+    function resetMultiplayerState() {
+        game.multiplayer.myShipObjectId = null;
+        game.multiplayer.myColorIndex = 0;
+        game.multiplayer.remoteShips.clear();
+        game.multiplayer.gameStateObjectId = null;
+        game.multiplayer.isAuthority = false;
+        RemoteObjects.clear();
+    }
+
+    /**
+     * Create a synced asteroid object (authority only)
+     * @param {Asteroid} asteroid - The asteroid to sync
+     */
+    async function createSyncedAsteroid(asteroid) {
+        if (!isSessionMode() || !isAuthority()) return;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(asteroid.toSyncData());
+            asteroid.syncObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create asteroid:', err);
+        }
+    }
+
+    /**
+     * Sync local asteroids to ObjectSync (authority only)
+     * Called every frame by the authority
+     */
+    function syncLocalAsteroids() {
+        if (!isSessionMode() || !isAuthority()) return;
+        
+        for (const asteroid of game.asteroids) {
+            if (asteroid.syncObjectId) {
+                ObjectSync.updateObject(asteroid.syncObjectId, asteroid.toSyncData());
+            }
+        }
+    }
+
+    /**
+     * Delete a synced asteroid (authority only)
+     * @param {Asteroid} asteroid - The asteroid to delete
+     */
+    async function deleteSyncedAsteroid(asteroid) {
+        if (!asteroid.syncObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(asteroid.syncObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete asteroid:', err);
+        }
+    }
+
+    /**
+     * Update local asteroids from ObjectSync (non-authority clients)
+     * Called every frame by clients
+     */
+    function updateAsteroidsFromSync() {
+        if (!isSessionMode() || isAuthority()) return;
+        
+        const asteroidObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID);
+        const currentSyncIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of asteroidObjects) {
+            currentSyncIds.add(obj.id);
+            
+            // Update interpolation state
+            RemoteObjects.updateState(obj.id, obj.data);
+            
+            // Find existing asteroid by sync ID
+            let asteroid = game.asteroids.find(a => a.syncObjectId === obj.id);
+            
+            if (!asteroid) {
+                // Create new asteroid from sync data
+                asteroid = Asteroid.fromSyncData(obj.data);
+                asteroid.syncObjectId = obj.id;
+                game.asteroids.push(asteroid);
+            }
+            
+            // Apply interpolated state for smooth movement
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                asteroid.fromSyncData(interpolated);
+            } else {
+                asteroid.fromSyncData(obj.data);
+            }
+        }
+        
+        // Remove asteroids that no longer exist in sync
+        game.asteroids = game.asteroids.filter(a => {
+            if (a.syncObjectId && !currentSyncIds.has(a.syncObjectId)) {
+                RemoteObjects.remove(a.syncObjectId);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Create a synced bullet object
+     * @param {Bullet} bullet - The bullet to sync
+     */
+    async function createSyncedBullet(bullet) {
+        if (!isSessionMode()) return;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(bullet.toSyncData());
+            bullet.syncObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create bullet:', err);
+        }
+    }
+
+    /**
+     * Sync local bullets to ObjectSync
+     * Called every frame for bullets owned by this player
+     */
+    function syncLocalBullets() {
+        if (!isSessionMode()) return;
+        
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        
+        for (const bullet of game.bullets) {
+            // Only sync our own bullets
+            if (bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData());
+            }
+        }
+    }
+
+    /**
+     * Delete a synced bullet
+     * @param {Bullet} bullet - The bullet to delete
+     */
+    async function deleteSyncedBullet(bullet) {
+        if (!bullet.syncObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(bullet.syncObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete bullet:', err);
+        }
+    }
+
+    /**
+     * Update bullets from ObjectSync (for remote players' bullets)
+     * Called every frame to sync bullets from other players
+     */
+    function updateBulletsFromSync() {
+        if (!isSessionMode()) return;
+        
+        const bulletObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.BULLET);
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        const currentSyncIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of bulletObjects) {
+            // Skip our own bullets (we already manage them locally)
+            if (obj.data.ownerMemberId === myMemberId) continue;
+            
+            currentSyncIds.add(obj.id);
+            
+            // Update interpolation state
+            RemoteObjects.updateState(obj.id, obj.data);
+            
+            // Find existing bullet by sync ID
+            let bullet = game.bullets.find(b => b.syncObjectId === obj.id);
+            
+            if (!bullet) {
+                // Create new bullet from sync data
+                bullet = Bullet.fromSyncData(obj.data);
+                bullet.syncObjectId = obj.id;
+                game.bullets.push(bullet);
+            }
+            
+            // Apply interpolated state for smooth movement
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                bullet.fromSyncData(interpolated);
+            } else {
+                bullet.fromSyncData(obj.data);
+            }
+        }
+        
+        // Remove remote bullets that no longer exist in sync
+        game.bullets = game.bullets.filter(b => {
+            // Keep local bullets (they expire normally)
+            if (b.ownerMemberId === myMemberId) return true;
+            
+            // Remove remote bullets that are gone from sync
+            if (b.syncObjectId && !currentSyncIds.has(b.syncObjectId)) {
+                RemoteObjects.remove(b.syncObjectId);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Create a GameState object in ObjectSync (authority only)
+     * Called when starting a multiplayer game
+     */
+    async function createSyncedGameState() {
+        if (!isSessionMode() || !isAuthority()) return;
+        
+        try {
+            const gameStateData = {
+                type: OBJECT_TYPES.GAME_STATE,
+                wave: game.wave,
+                state: game.state,
+                lives: game.lives,
+                score: game.score,
+                speedMultiplier: game.speedMultiplier,
+                waveDelayTimer: game.waveDelayTimer
+            };
+            
+            const objectInfo = await ObjectSync.createObject(gameStateData);
+            game.multiplayer.gameStateObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create GameState:', err);
+        }
+    }
+
+    /**
+     * Sync GameState to ObjectSync (authority only)
+     * Called when game state changes
+     */
+    function syncGameState() {
+        if (!isSessionMode() || !isAuthority() || !game.multiplayer.gameStateObjectId) return;
+        
+        const gameStateData = {
+            type: OBJECT_TYPES.GAME_STATE,
+            wave: game.wave,
+            state: game.state,
+            lives: game.lives,
+            score: game.score,
+            speedMultiplier: game.speedMultiplier,
+            waveDelayTimer: game.waveDelayTimer
+        };
+        
+        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData);
+    }
+
+    /**
+     * Update local game state from ObjectSync (non-authority clients)
+     * Called every frame by clients
+     */
+    function updateGameStateFromSync() {
+        if (!isSessionMode() || isAuthority()) return;
+        
+        const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+        if (!gameStateObj || !gameStateObj.data) return;
+        
+        const data = gameStateObj.data;
+        
+        // Update game state from sync (but NOT the state field if we're in lobby - that's spectating)
+        if (data.wave !== undefined) game.wave = data.wave;
+        if (data.lives !== undefined) game.lives = data.lives;
+        if (data.score !== undefined) game.score = data.score;
+        if (data.speedMultiplier !== undefined) game.speedMultiplier = data.speedMultiplier;
+        if (data.waveDelayTimer !== undefined) game.waveDelayTimer = data.waveDelayTimer;
+        
+        // Handle state transitions from server - but only if we've actually entered the game
+        // (not if we're in lobby spectating)
+        if (game.state !== 'lobby' && data.state && data.state !== game.state) {
+            const oldState = game.state;
+            game.state = data.state;
+            
+            // Handle state change effects
+            if (data.state === 'gameover' && oldState !== 'gameover') {
+                AudioSystem.beat.stop();
+                AudioSystem.thrustSound.stop();
+            } else if (data.state === 'playing' && oldState === 'waveDelay') {
+                AudioSystem.playNewWave();
+            }
+        }
+        
+        // Store the gameStateObjectId if we don't have it
+        if (!game.multiplayer.gameStateObjectId) {
+            game.multiplayer.gameStateObjectId = gameStateObj.id;
+        }
+    }
+
+    /**
+     * Handle server promotion - take over authority
+     * Called when this client is promoted to Server role
+     */
+    function handleServerPromotion() {
+        console.log('[Multiplayer] This client promoted to Server - taking over authority');
+        game.multiplayer.isAuthority = true;
+        
+        // Take over GameState syncing
+        const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+        if (gameStateObj) {
+            game.multiplayer.gameStateObjectId = gameStateObj.id;
+        }
+        
+        // Take over asteroid syncing - assign syncObjectIds to existing asteroids
+        const asteroidObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID);
+        for (const obj of asteroidObjects) {
+            // Find matching asteroid by position (approximate)
+            const asteroid = game.asteroids.find(a => 
+                Math.abs(a.x - obj.data.x) < 0.01 && 
+                Math.abs(a.y - obj.data.y) < 0.01 &&
+                !a.syncObjectId
+            );
+            if (asteroid) {
+                asteroid.syncObjectId = obj.id;
+            }
+        }
+    }
+
+    // ============================================
     // SECTION 5: GAME FUNCTIONS
     // Core game logic and mechanics
     // ============================================
@@ -1702,13 +2489,54 @@
      * Initialize or reset the game to starting state
      * Ship starts at center (normalized 0.5, 0.5)
      */
-    function init() {
-        game.ship = new Ship(0.5, 0.5);  // Center in normalized coords
-        game.asteroids = [];
-        game.bullets = [];
-        game.score = 0;
-        game.lives = CONFIG.STARTING_LIVES;
-        game.wave = 0;
+    async function init() {
+        // Determine if we're the authority (Server role in session mode)
+        if (isSessionMode()) {
+            const member = SessionClient.getCurrentMember();
+            game.multiplayer.isAuthority = member?.role === 'Server';
+            
+            // Get a color for this player
+            const colorIndex = getNextColorIndex();
+            
+            // Create synced ship for multiplayer
+            await createSyncedShip(colorIndex);
+            
+            // Fallback: if ship creation failed, create local ship
+            if (!game.ship) {
+                console.warn('[Game] Ship creation failed, creating local fallback');
+                game.ship = new Ship(0.5, 0.5, colorIndex);
+                game.ship.memberId = member?.id;
+                game.ship.invulnerable = CONFIG.INVULNERABILITY_TIME;
+                game.multiplayer.myColorIndex = colorIndex;
+            }
+            
+            // Use shared lives pool for multiplayer
+            game.lives = CONFIG.MULTIPLAYER_LIVES;
+            
+            if (isAuthority()) {
+                // Authority: start fresh game
+                game.asteroids = [];
+                game.bullets = [];
+                game.score = 0;
+                game.wave = 0;
+            } else {
+                // Non-authority: sync existing state from server
+                game.asteroids = [];
+                game.bullets = [];
+                updateAsteroidsFromSync();
+                updateBulletsFromSync();
+                updateGameStateFromSync();
+            }
+        } else {
+            // Solo mode - create local ship
+            game.ship = new Ship(0.5, 0.5, 0);
+            game.lives = CONFIG.STARTING_LIVES;
+            game.asteroids = [];
+            game.bullets = [];
+            game.score = 0;
+            game.wave = 0;
+        }
+        
         game.state = 'playing';
         game.speedMultiplier = 1;
         
@@ -1723,8 +2551,15 @@
         AudioSystem.beat.stop();
         AudioSystem.beat.start();
         
-        // Start first wave
-        spawnWave();
+        // Start first wave (only authority spawns asteroids in multiplayer)
+        if (!isSessionMode() || isAuthority()) {
+            await spawnWave();
+            
+            // Create synced GameState (authority only)
+            if (isSessionMode()) {
+                await createSyncedGameState();
+            }
+        }
         
         updateHUD();
     }
@@ -1742,7 +2577,7 @@
      * Spawn a new wave of asteroids
      * Asteroids spawn away from the ship
      */
-    function spawnWave() {
+    async function spawnWave() {
         game.wave++;
         
         // Calculate number of asteroids for this wave
@@ -1757,7 +2592,7 @@
         
         // Spawn asteroids at random positions away from ship
         for (let i = 0; i < asteroidCount; i++) {
-            spawnAsteroidAwayFromShip();
+            await spawnAsteroidAwayFromShip();
         }
         
         updateHUD();
@@ -1766,15 +2601,20 @@
     /**
      * Spawn a single asteroid at a safe distance from the ship
      * Uses normalized coordinates (0-1 range)
+     * @returns {Asteroid} The spawned asteroid
      */
-    function spawnAsteroidAwayFromShip() {
+    async function spawnAsteroidAwayFromShip() {
         let x, y;
+        
+        // Get reference position (local ship or center if no ship)
+        const refX = game.ship ? game.ship.x : 0.5;
+        const refY = game.ship ? game.ship.y : 0.5;
         
         // Keep trying until we find a safe spawn point (all in normalized coords)
         do {
             x = Math.random();  // 0-1
             y = Math.random();  // 0-1
-        } while (normalizedDistance(x, y, game.ship.x, game.ship.y) < CONFIG.SPAWN_MIN_DISTANCE);
+        } while (normalizedDistance(x, y, refX, refY) < CONFIG.SPAWN_MIN_DISTANCE);
         
         // Random velocity direction
         const angle = Math.random() * Math.PI * 2;
@@ -1782,12 +2622,21 @@
                        Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE) * 
                       game.speedMultiplier;
         
-        game.asteroids.push(new Asteroid(
+        const asteroid = new Asteroid(
             x, y,
             CONFIG.INITIAL_ASTEROID_RADIUS,
             Math.cos(angle) * speed,
             Math.sin(angle) * speed
-        ));
+        );
+        
+        game.asteroids.push(asteroid);
+        
+        // Create synced asteroid in multiplayer (authority only)
+        if (isSessionMode() && isAuthority()) {
+            await createSyncedAsteroid(asteroid);
+        }
+        
+        return asteroid;
     }
 
     /**
@@ -1796,7 +2645,7 @@
      * All values are in normalized coordinates
      * @param {Asteroid} asteroid - The asteroid to split
      */
-    function splitAsteroid(asteroid) {
+    async function splitAsteroid(asteroid) {
         // Add points
         game.score += asteroid.getPoints();
         
@@ -1804,6 +2653,11 @@
         const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
                      asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
         AudioSystem.playExplosion(size);
+        
+        // Delete synced asteroid in multiplayer (authority only)
+        if (isSessionMode() && isAuthority() && asteroid.syncObjectId) {
+            deleteSyncedAsteroid(asteroid);
+        }
         
         // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
@@ -1838,7 +2692,9 @@
         const totalChildMass = children.reduce((sum, r) => sum + r ** 2, 0);
         
         // Spawn child asteroids with energy conservation
-        children.forEach((childRadius, index) => {
+        for (let index = 0; index < children.length; index++) {
+            const childRadius = children[index];
+            
             // Perpendicular direction to original velocity (spreads children apart)
             const spreadAngle = Math.atan2(asteroid.velocityY, asteroid.velocityX) + 
                                (index === 0 ? Math.PI / 2 : -Math.PI / 2);
@@ -1853,14 +2709,21 @@
             
             const angle = spreadAngle + randomRange(-0.5, 0.5);
             
-            game.asteroids.push(new Asteroid(
+            const childAsteroid = new Asteroid(
                 asteroid.x,
                 asteroid.y,
                 childRadius,
                 Math.cos(angle) * childSpeed,
                 Math.sin(angle) * childSpeed
-            ));
-        });
+            );
+            
+            game.asteroids.push(childAsteroid);
+            
+            // Create synced asteroid for child (authority only)
+            if (isSessionMode() && isAuthority()) {
+                await createSyncedAsteroid(childAsteroid);
+            }
+        }
         
         updateHUD();
     }
@@ -1928,6 +2791,9 @@
         
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
         
+        // Need a ship to control
+        if (!game.ship) return;
+        
         // Rotation (adjusted for delta time)
         if (input.left()) {
             game.ship.angle -= CONFIG.SHIP_TURN_SPEED * dt;
@@ -1952,6 +2818,11 @@
             const bullet = game.ship.shoot();
             if (bullet) {
                 game.bullets.push(bullet);
+                
+                // Create synced bullet in multiplayer
+                if (isSessionMode()) {
+                    createSyncedBullet(bullet);
+                }
             }
         }
     }
@@ -1959,9 +2830,18 @@
     /**
      * Check all collisions between game entities
      * All collision checks work in pixel coordinates
+     * In multiplayer, only authority handles collision resolution
      */
     function checkCollisions() {
-        // Bullet vs Asteroid collisions
+        // In multiplayer, non-authority clients don't resolve collisions
+        // They receive the results via ObjectSync (asteroids/bullets disappear)
+        if (isSessionMode() && !isAuthority()) {
+            // Clients still check their own ship collision for immediate feedback
+            checkLocalShipCollision();
+            return;
+        }
+        
+        // Bullet vs Asteroid collisions (authority or solo)
         for (let i = game.bullets.length - 1; i >= 0; i--) {
             const bullet = game.bullets[i];
             
@@ -1977,38 +2857,102 @@
                 
                 if (circlePolygonCollision(bulletCircle, asteroid.getWorldVertices())) {
                     // Remove bullet
-                    game.bullets.splice(i, 1);
+                    const removedBullet = game.bullets.splice(i, 1)[0];
+                    if (isSessionMode() && removedBullet.syncObjectId) {
+                        deleteSyncedBullet(removedBullet);
+                    }
                     
                     // Remove asteroid and potentially spawn children
                     game.asteroids.splice(j, 1);
                     splitAsteroid(asteroid);
+                    
+                    // Sync game state after scoring
+                    if (isSessionMode()) {
+                        syncGameState();
+                    }
                     
                     break;  // Bullet can only hit one asteroid
                 }
             }
         }
         
-        // Ship vs Asteroid collisions (only if not invulnerable)
-        if (game.ship.invulnerable <= 0 && game.state === 'playing') {
-            const shipVertices = game.ship.getVertices();  // Already in pixel coords
+        // Ship vs Asteroid collisions for all ships (authority checks all, solo checks own)
+        if (isSessionMode()) {
+            // Check local ship
+            if (game.ship && game.ship.invulnerable <= 0 && game.state === 'playing') {
+                checkShipAsteroidCollision(game.ship, true);
+            }
             
-            for (const asteroid of game.asteroids) {
-                const asteroidVerts = asteroid.getWorldVertices();  // Already in pixel coords
-                
-                // Check if any ship vertex is inside asteroid
-                for (const vertex of shipVertices) {
-                    if (pointInPolygon(vertex, asteroidVerts)) {
-                        handleShipHit();
-                        return;
-                    }
+            // Check remote ships (authority handles their deaths too)
+            for (const [objectId, ship] of game.multiplayer.remoteShips) {
+                if (ship.invulnerable <= 0) {
+                    checkShipAsteroidCollision(ship, false);
                 }
-                
-                // Check if any asteroid vertex is inside ship triangle
-                for (const vertex of asteroidVerts) {
-                    if (pointInPolygon(vertex, shipVertices)) {
-                        handleShipHit();
-                        return;
-                    }
+            }
+        } else {
+            // Solo mode - just check local ship
+            if (game.ship && game.ship.invulnerable <= 0 && game.state === 'playing') {
+                checkShipAsteroidCollision(game.ship, true);
+            }
+        }
+    }
+
+    /**
+     * Check collision for a specific ship against all asteroids
+     * @param {Ship} ship - The ship to check
+     * @param {boolean} isLocal - Whether this is the local player's ship
+     */
+    function checkShipAsteroidCollision(ship, isLocal) {
+        const shipVertices = ship.getVertices();
+        
+        for (const asteroid of game.asteroids) {
+            const asteroidVerts = asteroid.getWorldVertices();
+            
+            // Check if any ship vertex is inside asteroid
+            for (const vertex of shipVertices) {
+                if (pointInPolygon(vertex, asteroidVerts)) {
+                    handleShipHit(ship, isLocal);
+                    return;
+                }
+            }
+            
+            // Check if any asteroid vertex is inside ship triangle
+            for (const vertex of asteroidVerts) {
+                if (pointInPolygon(vertex, shipVertices)) {
+                    handleShipHit(ship, isLocal);
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * Check only local ship collision (for non-authority clients)
+     * Provides immediate feedback even though authority handles resolution
+     */
+    function checkLocalShipCollision() {
+        if (!game.ship || game.ship.invulnerable > 0 || game.state !== 'playing') return;
+        
+        const shipVertices = game.ship.getVertices();
+        
+        for (const asteroid of game.asteroids) {
+            const asteroidVerts = asteroid.getWorldVertices();
+            
+            for (const vertex of shipVertices) {
+                if (pointInPolygon(vertex, asteroidVerts)) {
+                    // Play sound immediately for feedback
+                    AudioSystem.playShipExplosion();
+                    AudioSystem.thrustSound.stop();
+                    // Authority will handle the actual respawn via sync
+                    return;
+                }
+            }
+            
+            for (const vertex of asteroidVerts) {
+                if (pointInPolygon(vertex, shipVertices)) {
+                    AudioSystem.playShipExplosion();
+                    AudioSystem.thrustSound.stop();
+                    return;
                 }
             }
         }
@@ -2016,29 +2960,37 @@
 
     /**
      * Handle ship being hit by asteroid
+     * @param {Ship} ship - The ship that was hit
+     * @param {boolean} isLocal - Whether this is the local player's ship
      */
-    function handleShipHit() {
+    function handleShipHit(ship, isLocal) {
+        // Decrement shared lives
         game.lives--;
         updateHUD();
         
-        // Play ship explosion sound
-        AudioSystem.playShipExplosion();
-        
-        // Stop thrust sound if playing
-        AudioSystem.thrustSound.stop();
+        // Play ship explosion sound (only for local ship to avoid cacophony)
+        if (isLocal) {
+            AudioSystem.playShipExplosion();
+            AudioSystem.thrustSound.stop();
+        }
         
         if (game.lives <= 0) {
             game.state = 'gameover';
             // Stop background beat on game over
             AudioSystem.beat.stop();
             
-            // In session mode, leave the session on game over
-            if (isSessionMode() && SessionClient.isConnected()) {
-                SessionClient.leaveSession().catch(console.error);
+            // Sync game over state
+            if (isSessionMode() && isAuthority()) {
+                syncGameState();
             }
         } else {
             // Respawn ship at center with invulnerability
-            game.ship.reset();
+            ship.reset();
+            
+            // Sync the ship state after respawn
+            if (isSessionMode() && isLocal && game.multiplayer.myShipObjectId) {
+                ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toSyncData(), true);
+            }
         }
     }
 
@@ -2049,6 +3001,12 @@
         scoreDisplay.textContent = `Score: ${game.score}`;
         waveDisplay.textContent = `Wave: ${game.wave}`;
         livesDisplay.textContent = `Lives: ${game.lives}`;
+        
+        // Show player count in multiplayer
+        if (isSessionMode()) {
+            const playerCount = 1 + game.multiplayer.remoteShips.size;
+            livesDisplay.textContent = `Lives: ${game.lives} | Players: ${playerCount}`;
+        }
         
         // Update session indicator
         const sessionIndicator = document.getElementById('session-indicator');
@@ -2101,49 +3059,117 @@
         // Handle player input
         handleInput(dt);
         
-        // Update asteroids during start screen and lobby for visual effect
-        if (game.state === 'start' || game.state === 'lobby') {
-            game.asteroids.forEach(asteroid => asteroid.update(dt));
+        // Update cosmetic asteroids only on start screen (not in session)
+        if (game.state === 'start' && !isSessionMode()) {
+            game.cosmeticAsteroids.forEach(asteroid => asteroid.update(dt));
         }
         
         // Update game state based on current state
         if (game.state === 'playing' || game.state === 'waveDelay') {
-            // Update ship
-            game.ship.update(dt);
+            // Update local ship
+            if (game.ship) {
+                game.ship.update(dt);
+                
+                // Sync local ship to ObjectSync in multiplayer
+                if (isSessionMode()) {
+                    syncLocalShip();
+                }
+            }
             
-            // Update asteroids
-            game.asteroids.forEach(asteroid => asteroid.update(dt));
+            // Update remote ships from ObjectSync
+            if (isSessionMode()) {
+                updateRemoteShips();
+            }
+            
+            // Update asteroids (authority updates locally, clients sync from server)
+            if (isSessionMode() && !isAuthority()) {
+                // Non-authority clients: update asteroids from ObjectSync
+                updateAsteroidsFromSync();
+            } else {
+                // Solo mode or authority: update asteroids locally
+                game.asteroids.forEach(asteroid => asteroid.update(dt));
+                
+                // Authority: sync asteroid positions to ObjectSync
+                if (isSessionMode() && isAuthority()) {
+                    syncLocalAsteroids();
+                }
+            }
             
             // Update bullets and remove expired ones
+            const myMemberId = SessionClient.getCurrentMember()?.id;
             game.bullets = game.bullets.filter(bullet => {
                 bullet.update(dt);
-                return !bullet.isExpired();
+                
+                // Check if expired
+                if (bullet.isExpired()) {
+                    // Delete synced bullet if it's ours
+                    if (isSessionMode() && bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                        deleteSyncedBullet(bullet);
+                    }
+                    return false;
+                }
+                return true;
             });
+            
+            // Sync local bullets to ObjectSync
+            if (isSessionMode()) {
+                syncLocalBullets();
+                updateBulletsFromSync();
+            }
             
             // Check collisions
             checkCollisions();
             
-            // Check for wave completion
+            // Check for wave completion (only authority checks in multiplayer)
             if (game.asteroids.length === 0 && game.state === 'playing') {
-                game.state = 'waveDelay';
-                game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                if (!isSessionMode() || isAuthority()) {
+                    game.state = 'waveDelay';
+                    game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                    if (isSessionMode()) syncGameState();
+                }
             }
             
             // Handle wave delay countdown (adjusted for delta time)
             if (game.state === 'waveDelay') {
                 game.waveDelayTimer -= dt;
                 if (game.waveDelayTimer <= 0) {
-                    spawnWave();
+                    // Only authority spawns waves in multiplayer
+                    if (!isSessionMode() || isAuthority()) {
+                        spawnWave();
+                        if (isSessionMode()) syncGameState();
+                    }
                     game.state = 'playing';
                     AudioSystem.playNewWave();
                 }
             }
+            
+            // Sync GameState periodically (authority only)
+            if (isSessionMode() && isAuthority()) {
+                syncGameState();
+            }
+            
+            // Update GameState from sync (non-authority clients)
+            if (isSessionMode() && !isAuthority()) {
+                updateGameStateFromSync();
+            }
+            
+            // Update HUD (may have changed from sync)
+            updateHUD();
             
             // Update background beat tempo based on asteroid count
             const maxAsteroids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
             const totalAsteroidArea = game.asteroids.reduce((sum, a) => sum + a.radius * a.radius, 0);
             const maxArea = maxAsteroids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
             AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
+        }
+        
+        // Update remote objects in lobby (for live preview)
+        if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
+            updateRemoteShips();
+            updateAsteroidsFromSync();
+            updateBulletsFromSync();
+            updateGameStateFromSync();
+            updateHUD();
         }
         
         // --- RENDER PHASE ---
@@ -2166,11 +3192,26 @@
             ctx.translate(game.viewport.x, game.viewport.y);
         }
         
+        // Draw cosmetic asteroids only on start screen when not in session
+        if (game.state === 'start' && !isSessionMode()) {
+            game.cosmeticAsteroids.forEach(asteroid => asteroid.draw(ctx));
+        }
+        
         // Draw game entities (now in gameplay coordinates)
         game.asteroids.forEach(asteroid => asteroid.draw(ctx));
         game.bullets.forEach(bullet => bullet.draw(ctx));
-        if (game.state !== 'start' && game.state !== 'lobby') {
-            game.ship.draw(ctx);
+        
+        // Draw ships
+        if (game.state !== 'start') {
+            // Draw remote ships in multiplayer (including during lobby live preview)
+            if (isSessionMode()) {
+                drawRemoteShips(ctx);
+            }
+            
+            // Draw local ship (only when playing, not in lobby)
+            if (game.state !== 'lobby' && game.ship) {
+                game.ship.draw(ctx);
+            }
         }
         
         // Draw state-specific overlays (in gameplay coordinates)
@@ -2434,14 +3475,14 @@
 
     // Initialize game objects for start screen display (but don't start playing)
     // Use normalized coordinates (0.5, 0.5 = center)
-    game.ship = new Ship(0.5, 0.5);
+    game.ship = null;  // No ship on start screen
     game.asteroids = [];
     game.bullets = [];
-    // Spawn some asteroids for visual effect on start screen (normalized coords)
+    // Spawn some cosmetic asteroids for visual effect on start screen (normalized coords)
     for (let i = 0; i < CONFIG.START_SCREEN_ASTEROIDS; i++) {
         const angle = Math.random() * Math.PI * 2;
         const speed = CONFIG.ASTEROID_BASE_SPEED + Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE;
-        game.asteroids.push(new Asteroid(
+        game.cosmeticAsteroids.push(new Asteroid(
             Math.random(),  // 0-1 normalized X
             Math.random(),  // 0-1 normalized Y
             CONFIG.INITIAL_ASTEROID_RADIUS,
@@ -2629,6 +3670,9 @@
         try {
             const success = await SessionClient.connect();
             if (success) {
+                // Initialize ObjectSync after connection
+                ObjectSync.init();
+                
                 sessionPicker.connected = true;
                 await refreshSessionList();
                 // No polling - we rely on SignalR push notifications
@@ -2774,19 +3818,24 @@
             try {
                 await SessionClient.startGame();
                 sessionPicker.gameStarted = true;
-                startGameFromPicker();
+                await startGameFromPicker();
             } catch (err) {
                 console.error('Failed to start game:', err);
                 setPickerStatus('Failed to start game', 'error');
             }
         } else {
             // Client clicks Enter - begin gameplay (game already started by server)
-            startGameFromPicker();
+            await startGameFromPicker();
         }
     }
 
     // Leave lobby and return to start state
     async function handleLeaveLobby(message = null) {
+        // Delete synced ship if we have one
+        if (game.multiplayer.myShipObjectId) {
+            await deleteSyncedShip();
+        }
+        
         if (sessionPicker.currentSessionId && SessionClient.isConnected()) {
             try {
                 await SessionClient.leaveSession();
@@ -2795,6 +3844,9 @@
             }
         }
 
+        // Reset multiplayer state
+        resetMultiplayerState();
+        
         // Reset to start state
         game.state = 'start';
         game.mode = 'solo';
@@ -2813,21 +3865,33 @@
     }
 
     // Start game from picker (replaces old startGame for picker context)
-    function startGameFromPicker() {
+    async function startGameFromPicker() {
         if (game.state === 'start' || game.state === 'lobby') {
             // Recalculate viewport with new session aspect ratio before initializing (force recalc)
             resizeCanvas(true);
-            init();
+            try {
+                await init();
+            } catch (err) {
+                console.error('[Game] Failed to start game:', err);
+            }
         }
     }
 
     // Return to start screen
-    function returnToStartScreen(errorMessage = null) {
+    async function returnToStartScreen(errorMessage = null) {
+        // Delete synced ship if we have one
+        if (game.multiplayer.myShipObjectId) {
+            await deleteSyncedShip();
+        }
+        
         // Leave session if in one
         if (isSessionMode() && SessionClient.isConnected()) {
             SessionClient.leaveSession().catch(console.error);
         }
 
+        // Reset multiplayer state
+        resetMultiplayerState();
+        
         // Reset game mode
         game.mode = 'solo';
         game.sessionInfo = null;
@@ -2854,13 +3918,15 @@
         resizeCanvas(true);
 
         // Reinitialize start screen visuals (normalized coordinates)
-        game.ship = new Ship(0.5, 0.5);
+        game.ship = null;  // No ship on start screen
         game.asteroids = [];
         game.bullets = [];
+        // Respawn cosmetic asteroids
+        game.cosmeticAsteroids = [];
         for (let i = 0; i < CONFIG.START_SCREEN_ASTEROIDS; i++) {
             const angle = Math.random() * Math.PI * 2;
             const speed = CONFIG.ASTEROID_BASE_SPEED + Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE;
-            game.asteroids.push(new Asteroid(
+            game.cosmeticAsteroids.push(new Asteroid(
                 Math.random(),  // 0-1 normalized X
                 Math.random(),  // 0-1 normalized Y
                 CONFIG.INITIAL_ASTEROID_RADIUS,
@@ -2942,6 +4008,12 @@
             game.sessionInfo.role = newRole;
         }
         sessionPicker.isServer = newRole === 'Server';
+        
+        // If promoted to Server while playing, take over authority
+        if (newRole === 'Server' && game.state === 'playing') {
+            handleServerPromotion();
+        }
+        
         // Role data already provided in event - just update UI, no need to refetch
         updatePickerButtons();
     });
@@ -2974,6 +4046,51 @@
     window.addEventListener('beforeunload', () => {
         if ((isSessionMode() || sessionPicker.currentSessionId) && SessionClient.isConnected()) {
             SessionClient.leaveSession();
+        }
+    });
+
+    // Handle visibility change - prevent pause in multiplayer
+    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing
+    let backgroundInterval = null;
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+            // Tab hidden during multiplayer - use setInterval as fallback
+            if (!backgroundInterval) {
+                const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
+                let lastTime = performance.now();
+                backgroundInterval = setInterval(() => {
+                    const now = performance.now();
+                    const elapsed = now - lastTime;
+                    lastTime = now;
+                    const dt = Math.min(elapsed / targetFrameTime, 3);
+                    
+                    // Update local ship
+                    if (game.ship) {
+                        game.ship.update(dt);
+                        syncLocalShip();
+                    }
+                    
+                    // Update asteroids (authority)
+                    if (isAuthority()) {
+                        game.asteroids.forEach(a => a.update(dt));
+                        syncLocalAsteroids();
+                    } else {
+                        updateAsteroidsFromSync();
+                    }
+                    
+                    // Update remote state
+                    updateRemoteShips();
+                    updateBulletsFromSync();
+                    if (!isAuthority()) updateGameStateFromSync();
+                    if (isAuthority()) syncGameState();
+                }, targetFrameTime);
+            }
+        } else {
+            // Tab visible or not in multiplayer - clear background interval
+            if (backgroundInterval) {
+                clearInterval(backgroundInterval);
+                backgroundInterval = null;
+            }
         }
     });
 
