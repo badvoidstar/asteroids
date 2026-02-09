@@ -950,8 +950,9 @@
         
         // Multiplayer settings
         MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
-        SYNC_INTERVAL: 50,          // Object sync interval in ms (matches ObjectSync)
-        INTERPOLATION_DELAY: 50     // Render delay for smooth interpolation (ms)
+        SYNC_INTERVAL: 50,          // Object sync interval in ms (default, can be changed)
+        INTERPOLATION_DELAY: 50,    // Render delay for smooth interpolation (ms)
+        INTERPOLATION_ENABLED: true // Enable/disable interpolation for remote objects
     };
 
     // ============================================
@@ -1024,6 +1025,11 @@
         getInterpolated(objectId, renderTime) {
             const state = this.states.get(objectId);
             if (!state) return null;
+            
+            // If interpolation is disabled, just return current state
+            if (!CONFIG.INTERPOLATION_ENABLED) {
+                return state.current;
+            }
             
             // Calculate interpolation factor
             const timeDiff = state.currentTime - state.previousTime;
@@ -3672,6 +3678,8 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
+                // Apply configured sync interval
+                ObjectSync.setSyncInterval(CONFIG.SYNC_INTERVAL);
                 
                 sessionPicker.connected = true;
                 await refreshSessionList();

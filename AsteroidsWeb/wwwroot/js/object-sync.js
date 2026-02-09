@@ -13,7 +13,9 @@ const ObjectSync = (function() {
     // Pending updates to be batched
     let pendingUpdates = [];
     let updateTimer = null;
-    const batchInterval = 50; // ms - batch updates every 50ms (20 updates/sec max)
+    
+    // Configurable sync interval (ms) - can be changed via setSyncInterval()
+    let batchInterval = 50; // default: 50ms (20 updates/sec max)
 
     // Callbacks
     const callbacks = {
@@ -22,6 +24,22 @@ const ObjectSync = (function() {
         onObjectDeleted: null,
         onSyncError: null
     };
+    
+    /**
+     * Set the sync interval (batch interval for updates)
+     * @param {number} intervalMs - Interval in milliseconds (min: 16, max: 1000)
+     */
+    function setSyncInterval(intervalMs) {
+        batchInterval = Math.max(16, Math.min(1000, intervalMs));
+    }
+    
+    /**
+     * Get the current sync interval
+     * @returns {number} Current batch interval in ms
+     */
+    function getSyncInterval() {
+        return batchInterval;
+    }
     
     /**
      * Add object to type index
@@ -443,6 +461,8 @@ const ObjectSync = (function() {
         getObjectsByType,
         getObjectByType,
         getObjectCount,
+        setSyncInterval,
+        getSyncInterval,
         on,
         clear
     };
