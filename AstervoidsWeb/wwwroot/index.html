@@ -1093,7 +1093,7 @@
                     ...state.current,
                     x: wrapNormalized(state.current.x + state.velocity.x * extraTime),
                     y: wrapNormalized(state.current.y + state.velocity.y * extraTime),
-                    angle: state.current.angle + (state.current.rotationSpeed || 0) * extraTime
+                    angle: state.current.angle + (state.current.rotationSpeed || 0) * CONFIG.TARGET_FPS * extraTime
                 };
             }
         },
@@ -1147,14 +1147,16 @@
             }
             
             // Angle interpolation with Hermite using rotationSpeed as tangents
+            // rotationSpeed is in radians-per-frame (at 60fps), convert to per-second for tangent
             if (state.previous.angle !== undefined && state.current.angle !== undefined) {
                 let dAngle = state.current.angle - state.previous.angle;
                 while (dAngle > Math.PI) dAngle -= Math.PI * 2;
                 while (dAngle < -Math.PI) dAngle += Math.PI * 2;
                 const a0 = state.previous.angle;
                 const a1 = a0 + dAngle;
-                const am0 = (state.previousRotationSpeed || 0) * dt;
-                const am1 = (state.rotationSpeed || 0) * dt;
+                const rpsToPerSec = CONFIG.TARGET_FPS;
+                const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
+                const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
                 result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
             }
             
