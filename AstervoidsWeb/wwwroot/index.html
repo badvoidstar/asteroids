@@ -982,6 +982,8 @@
     const RemoteObjects = {
         // Map of objectId -> interpolation state
         states: new Map(),
+        // Map of objectId -> last version fed to interpolation
+        lastVersions: new Map(),
         // Adaptive delay state
         adaptiveDelay: {
             packetIntervals: [],   // recent inter-packet intervals (ms)
@@ -1162,6 +1164,7 @@
          */
         remove(objectId) {
             this.states.delete(objectId);
+            this.lastVersions.delete(objectId);
         },
         
         /**
@@ -1169,6 +1172,7 @@
          */
         clear() {
             this.states.clear();
+            this.lastVersions.clear();
         }
     };
 
@@ -2168,8 +2172,11 @@
             
             currentRemoteIds.add(obj.id);
             
-            // Update interpolation state
-            RemoteObjects.updateState(obj.id, obj.data);
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
             
             // Get or create remote ship instance
             let remoteShip = game.multiplayer.remoteShips.get(obj.id);
@@ -2310,8 +2317,11 @@
         for (const obj of asteroidObjects) {
             currentSyncIds.add(obj.id);
             
-            // Update interpolation state
-            RemoteObjects.updateState(obj.id, obj.data);
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
             
             // Find existing asteroid by sync ID
             let asteroid = game.astervoids.find(a => a.syncObjectId === obj.id);
@@ -2406,8 +2416,11 @@
             
             currentSyncIds.add(obj.id);
             
-            // Update interpolation state
-            RemoteObjects.updateState(obj.id, obj.data);
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
             
             // Find existing bullet by sync ID
             let bullet = game.bullets.find(b => b.syncObjectId === obj.id);
