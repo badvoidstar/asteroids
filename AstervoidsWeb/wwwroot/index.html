@@ -2509,7 +2509,7 @@
             waveDelayTimer: game.waveDelayTimer
         };
         
-        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, true);
+        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData);
     }
 
     /**
@@ -2987,6 +2987,8 @@
             
             // Check remote ships (authority detects collision and notifies owner)
             for (const [objectId, ship] of game.multiplayer.remoteShips) {
+                // Stop if game is over
+                if (game.state !== 'playing') break;
                 // Skip ships on cooldown or invulnerable
                 if (ship.invulnerable > 0) continue;
                 if (shipCollisionCooldowns.has(objectId)) continue;
