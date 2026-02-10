@@ -29,10 +29,10 @@ param minReplicas int = 0
 param maxReplicas int = 3
 
 @description('CPU cores allocated to the container')
-param cpu string = '0.25'
+param cpu string = '1.0'
 
 @description('Memory allocated to the container')
-param memory string = '0.5Gi'
+param memory string = '1Gi'
 
 @description('Environment variables for the container')
 param env array = []
