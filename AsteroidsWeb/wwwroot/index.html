@@ -1009,21 +1009,26 @@
                 existing.previous = existing.current;
                 existing.previousTime = existing.currentTime;
                 existing.previousVelocity = existing.velocity;
+                existing.previousRotationSpeed = existing.rotationSpeed;
                 existing.current = { ...data };
                 existing.currentTime = now;
                 existing.velocity = {
                     x: data.velocityX || 0,
                     y: data.velocityY || 0
                 };
+                existing.rotationSpeed = data.rotationSpeed || 0;
             } else {
                 const vel = { x: data.velocityX || 0, y: data.velocityY || 0 };
+                const rotSpd = data.rotationSpeed || 0;
                 this.states.set(objectId, {
                     current: { ...data },
                     previous: { ...data },
                     currentTime: now,
                     previousTime: now - CONFIG.SYNC_INTERVAL,
                     velocity: vel,
-                    previousVelocity: vel
+                    previousVelocity: vel,
+                    rotationSpeed: rotSpd,
+                    previousRotationSpeed: rotSpd
                 });
             }
         },
@@ -1141,9 +1146,16 @@
                 result.y = wrapNormalized(h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1);
             }
             
-            // Angle: still use simple lerp with wraparound
+            // Angle interpolation with Hermite using rotationSpeed as tangents
             if (state.previous.angle !== undefined && state.current.angle !== undefined) {
-                result.angle = this.lerpAngle(state.previous.angle, state.current.angle, t);
+                let dAngle = state.current.angle - state.previous.angle;
+                while (dAngle > Math.PI) dAngle -= Math.PI * 2;
+                while (dAngle < -Math.PI) dAngle += Math.PI * 2;
+                const a0 = state.previous.angle;
+                const a1 = a0 + dAngle;
+                const am0 = (state.previousRotationSpeed || 0) * dt;
+                const am1 = (state.rotationSpeed || 0) * dt;
+                result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
             }
             
             return result;
@@ -2497,7 +2509,7 @@
             waveDelayTimer: game.waveDelayTimer
         };
         
-        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData);
+        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, true);
     }
 
     /**
