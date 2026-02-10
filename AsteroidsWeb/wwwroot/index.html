@@ -951,7 +951,7 @@
         // Multiplayer settings
         MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
         SYNC_INTERVAL: 16,          // Object sync interval in ms (default, can be changed)
-        INTERPOLATION_DELAY: 16,    // Render delay for smooth interpolation (ms)
+        INTERPOLATION_DELAY: 32,    // Render delay for smooth interpolation (ms)
         INTERPOLATION_ENABLED: true // Enable/disable interpolation for remote objects
     };
 
@@ -1050,8 +1050,8 @@
                 const extraTime = (targetTime - state.currentTime) / 1000; // Convert to seconds
                 return {
                     ...state.current,
-                    x: wrapNormalized(state.current.x + state.velocity.x * extraTime * 0.001),
-                    y: wrapNormalized(state.current.y + state.velocity.y * extraTime * 0.001),
+                    x: wrapNormalized(state.current.x + state.velocity.x * extraTime),
+                    y: wrapNormalized(state.current.y + state.velocity.y * extraTime),
                     angle: state.current.angle + (state.current.rotationSpeed || 0) * extraTime
                 };
             }
@@ -1063,12 +1063,12 @@
         lerp(a, b, t) {
             const result = { ...b };
             
-            // Interpolate position
+            // Interpolate position (wrap-aware for screen edges)
             if (a.x !== undefined && b.x !== undefined) {
-                result.x = this.lerpValue(a.x, b.x, t);
+                result.x = this.lerpWrapped(a.x, b.x, t);
             }
             if (a.y !== undefined && b.y !== undefined) {
-                result.y = this.lerpValue(a.y, b.y, t);
+                result.y = this.lerpWrapped(a.y, b.y, t);
             }
             
             // Interpolate angle (handle wraparound)
@@ -1080,10 +1080,21 @@
         },
         
         /**
-         * Interpolate a single value
+         * Interpolate a single value with wrap-aware shortest path for [0,1] positions
          */
         lerpValue(a, b, t) {
             return a + (b - a) * t;
+        },
+
+        /**
+         * Wrap-aware lerp for normalized [0,1] positions (shortest path across boundary)
+         */
+        lerpWrapped(a, b, t) {
+            let diff = b - a;
+            // Take shortest path across the [0,1] boundary
+            if (diff > 0.5) diff -= 1;
+            else if (diff < -0.5) diff += 1;
+            return wrapNormalized(a + diff * t);
         },
         
         /**
