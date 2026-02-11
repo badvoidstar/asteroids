@@ -344,15 +344,25 @@ const ObjectSync = (function() {
 
     /**
      * Delete an object.
+     * Removes from local state immediately (local-first) before sending to server.
      */
     async function deleteObject(objectId) {
         if (!SessionClient.isInSession()) {
             throw new Error('Not in a session');
         }
 
+        // Local-first: remove immediately so getObjectsByType() won't return it
+        const obj = objects.get(objectId);
+        if (obj) {
+            removeFromTypeIndex(obj);
+            objects.delete(objectId);
+        }
+
+        // Also remove from pending updates
+        pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
+
         try {
             const success = await SessionClient.deleteObject(objectId);
-            // Object will be removed via the onObjectDeleted event
             return success;
         } catch (err) {
             console.error('[ObjectSync] Delete object failed:', err);

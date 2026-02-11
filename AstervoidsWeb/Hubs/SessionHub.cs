@@ -340,19 +340,71 @@ public class SessionHub : Hub
     }
 
     /// <summary>
-    /// Called by the server member to notify that a ship was hit by an asteroid.
-    /// Broadcasts to all session members so the ship owner can handle the collision.
+    /// Reports that a bullet hit an asteroid. Broadcasts to all session members
+    /// so the asteroid owner can process the collision.
     /// </summary>
-    public async Task NotifyShipHit(Guid shipObjectId)
+    public async Task ReportBulletHit(Guid asteroidObjectId, Guid bulletObjectId)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null || member.Role != MemberRole.Server)
+        if (member == null)
         {
-            _logger.LogWarning("NotifyShipHit failed - caller is not the server");
+            _logger.LogWarning("ReportBulletHit failed - member not found");
             return;
         }
 
-        await Clients.Group(member.SessionId.ToString()).SendAsync("OnShipHit", new ShipHitInfo(shipObjectId));
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitReported",
+            new BulletHitReport(asteroidObjectId, bulletObjectId, member.Id));
+    }
+
+    /// <summary>
+    /// Confirms that a bullet hit was accepted by the asteroid owner.
+    /// Broadcasts to all session members so the bullet owner can handle cleanup.
+    /// </summary>
+    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ConfirmBulletHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
+            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize));
+    }
+
+    /// <summary>
+    /// Rejects a bullet hit because the asteroid was already destroyed.
+    /// Broadcasts to all session members so the bullet owner can un-hide the bullet.
+    /// </summary>
+    public async Task RejectBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("RejectBulletHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitRejected",
+            new BulletHitRejection(bulletObjectId, bulletOwnerMemberId));
+    }
+
+    /// <summary>
+    /// Reports that the caller's ship was hit by an asteroid.
+    /// Broadcasts to all session members so the GameState owner can decrement lives.
+    /// </summary>
+    public async Task ReportShipHit()
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReportShipHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnShipHitReported",
+            new ShipHitReport(member.Id));
     }
 }
 
@@ -380,4 +432,7 @@ public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMemb
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
-public record ShipHitInfo(Guid ShipObjectId);
+public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
+public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);
+public record BulletHitRejection(Guid BulletObjectId, Guid BulletOwnerMemberId);
+public record ShipHitReport(Guid ReporterMemberId);

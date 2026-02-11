@@ -26,7 +26,10 @@ const SessionClient = (function() {
         onObjectDeleted: null,
         onSessionsChanged: null,
         onGameStarted: null,
-        onShipHit: null,
+        onBulletHitReported: null,
+        onBulletHitConfirmed: null,
+        onBulletHitRejected: null,
+        onShipHitReported: null,
         onError: null
     };
 
@@ -198,10 +201,28 @@ const SessionClient = (function() {
             }
         });
 
-        // Ship hit notification from server
-        connection.on('OnShipHit', (hitInfo) => {
-            if (callbacks.onShipHit) {
-                callbacks.onShipHit(hitInfo);
+        // Collision events
+        connection.on('OnBulletHitReported', (report) => {
+            if (callbacks.onBulletHitReported) {
+                callbacks.onBulletHitReported(report);
+            }
+        });
+
+        connection.on('OnBulletHitConfirmed', (confirmation) => {
+            if (callbacks.onBulletHitConfirmed) {
+                callbacks.onBulletHitConfirmed(confirmation);
+            }
+        });
+
+        connection.on('OnBulletHitRejected', (rejection) => {
+            if (callbacks.onBulletHitRejected) {
+                callbacks.onBulletHitRejected(rejection);
+            }
+        });
+
+        connection.on('OnShipHitReported', (report) => {
+            if (callbacks.onShipHitReported) {
+                callbacks.onShipHitReported(report);
             }
         });
     }
@@ -423,17 +444,51 @@ const SessionClient = (function() {
     }
 
     /**
-     * Notify all session members that a ship was hit (server only).
-     * @param {string} shipObjectId - The ObjectSync ID of the ship that was hit
+     * Report that a bullet hit an asteroid. Asteroid owner will process the collision.
      */
-    async function notifyShipHit(shipObjectId) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            return;
-        }
+    async function reportBulletHit(asteroidObjectId, bulletObjectId) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
         try {
-            await connection.invoke('NotifyShipHit', shipObjectId);
+            await connection.invoke('ReportBulletHit', asteroidObjectId, bulletObjectId);
         } catch (err) {
-            console.error('[SessionClient] NotifyShipHit failed:', err);
+            console.error('[SessionClient] ReportBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Confirm that a bullet hit was accepted (called by asteroid owner).
+     */
+    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
+        } catch (err) {
+            console.error('[SessionClient] ConfirmBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Reject a bullet hit because the asteroid no longer exists (called by asteroid owner).
+     */
+    async function rejectBulletHit(bulletObjectId, bulletOwnerMemberId) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('RejectBulletHit', bulletObjectId, bulletOwnerMemberId);
+        } catch (err) {
+            console.error('[SessionClient] RejectBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Report that this player's ship was hit by an asteroid.
+     * GameState owner will decrement lives.
+     */
+    async function reportShipHit() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ReportShipHit');
+        } catch (err) {
+            console.error('[SessionClient] ReportShipHit failed:', err);
         }
     }
 
@@ -488,7 +543,10 @@ const SessionClient = (function() {
         createObject,
         updateObjects,
         deleteObject,
-        notifyShipHit,
+        reportBulletHit,
+        confirmBulletHit,
+        rejectBulletHit,
+        reportShipHit,
         on,
         getCurrentSession,
         getCurrentMember,
