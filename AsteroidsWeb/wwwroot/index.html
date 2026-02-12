@@ -2295,10 +2295,7 @@
      */
     async function createSyncedAsteroid(asteroid) {
         if (!isSessionMode()) return;
-        if (!isAuthority()) {
-            console.warn('[Multiplayer] createSyncedAsteroid skipped: isAuthority=false, isSessionMode=true, game.multiplayer.isAuthority=', game.multiplayer.isAuthority);
-            return;
-        }
+        if (!isAuthority()) return;
         
         try {
             const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session');
@@ -2590,9 +2587,8 @@
      * Called when this client is promoted to Server role
      */
     function handleServerPromotion() {
-        console.log('[Multiplayer] handleServerPromotion called. game.state:', game.state, 'isAuthority before:', game.multiplayer.isAuthority);
+        console.log('[Multiplayer] This client promoted to Server - taking over authority');
         game.multiplayer.isAuthority = true;
-        console.log('[Multiplayer] isAuthority set to true. isAuthority():', isAuthority());
         
         // Take over GameState syncing
         const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);

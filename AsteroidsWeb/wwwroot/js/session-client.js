@@ -162,21 +162,18 @@ const SessionClient = (function() {
 
         // Object events
         connection.on('OnObjectCreated', (objectInfo) => {
-            console.log('[SessionClient] Object created:', objectInfo);
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo);
             }
         });
 
         connection.on('OnObjectsUpdated', (objects) => {
-            console.log('[SessionClient] Objects updated:', objects.length);
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects);
             }
         });
 
         connection.on('OnObjectDeleted', (objectId) => {
-            console.log('[SessionClient] Object deleted:', objectId);
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId);
             }
