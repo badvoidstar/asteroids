@@ -3711,6 +3711,11 @@
             btnLeaveCreate.textContent = 'Leave';
             btnLeaveCreate.disabled = false;
             btnLeaveCreate.className = 'picker-btn action leave';
+            // Clone-replace to clear sticky :active/:hover pseudo-class from touch
+            const fresh = btnLeaveCreate.cloneNode(true);
+            btnLeaveCreate.replaceWith(fresh);
+            sessionPicker.btnLeaveCreate = fresh;
+            fresh.addEventListener('click', handleLeaveCreateButton);
         } else {
             // Not in a session - show Create
             btnLeaveCreate.textContent = 'Create';
@@ -3721,6 +3726,11 @@
             } else {
                 btnLeaveCreate.title = '';
             }
+            // Clone-replace to clear sticky :active/:hover pseudo-class from touch
+            const fresh = btnLeaveCreate.cloneNode(true);
+            btnLeaveCreate.replaceWith(fresh);
+            sessionPicker.btnLeaveCreate = fresh;
+            fresh.addEventListener('click', handleLeaveCreateButton);
         }
 
         // Start/Enter button - only visible when in a session
@@ -3888,6 +3898,7 @@
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = true; // Creator is always server
                 sessionPicker.gameStarted = false; // New session, game not started
+                updatePickerButtons();
                 
                 // Recalculate viewport for session aspect ratio
                 resizeCanvas(true);
