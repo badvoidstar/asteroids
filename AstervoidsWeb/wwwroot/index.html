@@ -466,9 +466,11 @@
             font-size: 20px;
         }
 
-        /* Hide fullscreen button when already in fullscreen or standalone mode */
+        /* Hide fullscreen buttons when already in fullscreen or standalone mode */
         .fullscreen-active #touch-fullscreen,
-        .standalone-mode #touch-fullscreen {
+        .standalone-mode #touch-fullscreen,
+        .fullscreen-active #btn-fullscreen,
+        .standalone-mode #btn-fullscreen {
             display: none;
         }
     </style>
@@ -514,6 +516,7 @@
                         <button id="btn-start-enter" class="picker-btn action" style="display: none;">Start</button>
                     </div>
                     <button id="btn-solo" class="picker-btn solo">Solo Play</button>
+                    <button id="btn-fullscreen" class="picker-btn solo">⛶ Fullscreen</button>
                 </div>
             </div>
         </div>
@@ -3514,20 +3517,31 @@
         }, { passive: false });
     }
 
-    // Fullscreen button handler
+    // Fullscreen toggle helper
+    function toggleFullscreen() {
+        const container = document.getElementById('game-container');
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else if (container.requestFullscreen) {
+            container.requestFullscreen();
+        } else if (container.webkitRequestFullscreen) {
+            container.webkitRequestFullscreen(); // Safari
+        }
+    }
+
+    // Touch fullscreen button (in-game)
     const fullscreenBtn = document.getElementById('touch-fullscreen');
     if (fullscreenBtn) {
         fullscreenBtn.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            const container = document.getElementById('game-container');
-            if (document.fullscreenElement) {
-                document.exitFullscreen();
-            } else if (container.requestFullscreen) {
-                container.requestFullscreen();
-            } else if (container.webkitRequestFullscreen) {
-                container.webkitRequestFullscreen(); // Safari
-            }
+            toggleFullscreen();
         }, { passive: false });
+    }
+
+    // Main menu fullscreen button
+    const menuFullscreenBtn = document.getElementById('btn-fullscreen');
+    if (menuFullscreenBtn) {
+        menuFullscreenBtn.addEventListener('click', () => toggleFullscreen());
     }
 
     // Track fullscreen state
