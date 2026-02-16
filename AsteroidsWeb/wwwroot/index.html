@@ -2140,6 +2140,12 @@
         return isSessionMode() && game.multiplayer.isAuthority;
     }
 
+    // Helper to check if game is over (lives depleted during active play)
+    function isGameOver() {
+        return game.state === 'gameover' ||
+            (game.lives <= 0 && (game.state === 'playing' || game.state === 'waveDelay'));
+    }
+
     // Pause menu element reference
     const pauseMenu = document.getElementById('pause-menu');
     
@@ -2569,7 +2575,7 @@
      * Sync GameState to ObjectSync (authority only)
      * Called when game state changes
      */
-    function syncGameState() {
+    function syncGameState(immediate = false) {
         if (!isSessionMode() || !isAuthority() || !game.multiplayer.gameStateObjectId) return;
         
         const gameStateData = {
@@ -2582,7 +2588,7 @@
             waveDelayTimer: game.waveDelayTimer
         };
         
-        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData);
+        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
     }
 
     /**
@@ -2599,10 +2605,17 @@
         
         // Update game state from sync (but NOT the state field if we're in lobby - that's spectating)
         if (data.wave !== undefined) game.wave = data.wave;
+        const oldLives = game.lives;
         if (data.lives !== undefined) game.lives = data.lives;
         if (data.score !== undefined) game.score = data.score;
         if (data.speedMultiplier !== undefined) game.speedMultiplier = data.speedMultiplier;
         if (data.waveDelayTimer !== undefined) game.waveDelayTimer = data.waveDelayTimer;
+        
+        // Handle lives reaching zero — stop audio
+        if (game.lives <= 0 && oldLives > 0) {
+            AudioSystem.beat.stop();
+            AudioSystem.thrustSound.stop();
+        }
         
         // Handle state transitions from server - but only if we've actually entered the game
         // (not if we're in lobby spectating)
@@ -2611,10 +2624,7 @@
             game.state = data.state;
             
             // Handle state change effects
-            if (data.state === 'gameover' && oldState !== 'gameover') {
-                AudioSystem.beat.stop();
-                AudioSystem.thrustSound.stop();
-            } else if (data.state === 'playing' && oldState === 'waveDelay') {
+            if (data.state === 'playing' && oldState === 'waveDelay') {
                 AudioSystem.playNewWave();
             }
         }
@@ -2931,7 +2941,7 @@
             return;
         }
         
-        if (game.state === 'gameover') {
+        if (isGameOver()) {
             // Check for restart/return to menu
             if (keys['Enter']) {
                 if (isSessionMode()) {
@@ -3116,10 +3126,9 @@
                 game.lives--;
                 updateHUD();
                 if (game.lives <= 0) {
-                    game.state = 'gameover';
                     AudioSystem.beat.stop();
                 }
-                syncGameState();
+                syncGameState(true);
             } else {
                 // Notify GameState owner to decrement lives
                 SessionClient.reportShipHit();
@@ -3209,110 +3218,112 @@
         
         // Update game state based on current state
         if (game.state === 'playing' || game.state === 'waveDelay') {
-            // Update local ship
-            if (game.ship) {
-                game.ship.update(dt);
+            // --- GAMEPLAY (only when lives > 0) ---
+            if (game.lives > 0) {
+                // Update local ship
+                if (game.ship) {
+                    game.ship.update(dt);
+                    
+                    // Sync local ship to ObjectSync in multiplayer
+                    if (isSessionMode()) {
+                        syncLocalShip();
+                    }
+                }
                 
-                // Sync local ship to ObjectSync in multiplayer
+                // Update remote ships from ObjectSync
                 if (isSessionMode()) {
-                    syncLocalShip();
+                    updateRemoteShips();
                 }
-            }
-            
-            // Update remote ships from ObjectSync
-            if (isSessionMode()) {
-                updateRemoteShips();
-            }
-            
-            // Update asteroids: owner updates locally, non-owners sync from server
-            if (isSessionMode()) {
-                const myMemberId = SessionClient.getCurrentMember()?.id;
-                // Update locally-owned asteroids
-                game.asteroids.forEach(asteroid => {
-                    if (!asteroid.syncObjectId) {
-                        asteroid.update(dt); // Unsynced local asteroid
-                    } else {
-                        const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
-                        if (syncObj && syncObj.ownerMemberId === myMemberId) {
-                            asteroid.update(dt); // We own this asteroid
-                        }
-                    }
-                });
-                // Sync owned asteroids to server
-                syncLocalAsteroids();
-                // Update non-owned asteroids from ObjectSync
-                updateAsteroidsFromSync();
-            } else {
-                // Solo mode: update all asteroids locally
-                game.asteroids.forEach(asteroid => asteroid.update(dt));
-            }
-            
-            // Update bullets and remove expired ones
-            const myMemberId = SessionClient.getCurrentMember()?.id;
-            game.bullets = game.bullets.filter(bullet => {
-                bullet.update(dt);
                 
-                // Check if expired
-                if (bullet.isExpired()) {
-                    // Delete synced bullet if it's ours
-                    if (isSessionMode() && bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
-                        deleteSyncedBullet(bullet);
+                // Update asteroids: owner updates locally, non-owners sync from server
+                if (isSessionMode()) {
+                    const myMemberId = SessionClient.getCurrentMember()?.id;
+                    // Update locally-owned asteroids
+                    game.asteroids.forEach(asteroid => {
+                        if (!asteroid.syncObjectId) {
+                            asteroid.update(dt); // Unsynced local asteroid
+                        } else {
+                            const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
+                            if (syncObj && syncObj.ownerMemberId === myMemberId) {
+                                asteroid.update(dt); // We own this asteroid
+                            }
+                        }
+                    });
+                    // Sync owned asteroids to server
+                    syncLocalAsteroids();
+                    // Update non-owned asteroids from ObjectSync
+                    updateAsteroidsFromSync();
+                } else {
+                    // Solo mode: update all asteroids locally
+                    game.asteroids.forEach(asteroid => asteroid.update(dt));
+                }
+                
+                // Update bullets and remove expired ones
+                const myMemberId = SessionClient.getCurrentMember()?.id;
+                game.bullets = game.bullets.filter(bullet => {
+                    bullet.update(dt);
+                    
+                    // Check if expired
+                    if (bullet.isExpired()) {
+                        // Delete synced bullet if it's ours
+                        if (isSessionMode() && bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                            deleteSyncedBullet(bullet);
+                        }
+                        return false;
                     }
-                    return false;
+                    return true;
+                });
+                
+                // Sync local bullets to ObjectSync
+                if (isSessionMode()) {
+                    syncLocalBullets();
+                    updateBulletsFromSync();
                 }
-                return true;
-            });
-            
-            // Sync local bullets to ObjectSync
-            if (isSessionMode()) {
-                syncLocalBullets();
-                updateBulletsFromSync();
-            }
-            
-            // Check collisions
-            checkCollisions();
-            
-            // Check for wave completion (only authority checks in multiplayer)
-            if (game.asteroids.length === 0 && game.state === 'playing') {
-                if (!isSessionMode() || isAuthority()) {
-                    game.state = 'waveDelay';
-                    game.waveDelayTimer = CONFIG.WAVE_DELAY;
-                    if (isSessionMode()) syncGameState();
-                }
-            }
-            
-            // Handle wave delay countdown (adjusted for delta time)
-            if (game.state === 'waveDelay') {
-                game.waveDelayTimer -= dt;
-                if (game.waveDelayTimer <= 0) {
-                    // Only authority spawns waves in multiplayer
+                
+                // Check collisions
+                checkCollisions();
+                
+                // Check for wave completion (only authority checks in multiplayer)
+                if (game.asteroids.length === 0 && game.state === 'playing') {
                     if (!isSessionMode() || isAuthority()) {
-                        spawnWave();
+                        game.state = 'waveDelay';
+                        game.waveDelayTimer = CONFIG.WAVE_DELAY;
                         if (isSessionMode()) syncGameState();
                     }
-                    game.state = 'playing';
-                    AudioSystem.playNewWave();
                 }
+                
+                // Handle wave delay countdown (adjusted for delta time)
+                if (game.state === 'waveDelay') {
+                    game.waveDelayTimer -= dt;
+                    if (game.waveDelayTimer <= 0) {
+                        // Only authority spawns waves in multiplayer
+                        if (!isSessionMode() || isAuthority()) {
+                            spawnWave();
+                            if (isSessionMode()) syncGameState();
+                        }
+                        game.state = 'playing';
+                        AudioSystem.playNewWave();
+                    }
+                }
+                
+                // Update background beat tempo based on asteroid count
+                const maxAsteroids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
+                const totalAsteroidArea = game.asteroids.reduce((sum, a) => sum + a.radius * a.radius, 0);
+                const maxArea = maxAsteroids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
+                AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
             }
             
-            // Sync GameState periodically (authority only)
+            // --- SYNC (always runs while state is playing/waveDelay) ---
+            // Game state sync continues even when lives <= 0, ensuring all
+            // clients receive the final lives count and transition together.
             if (isSessionMode() && isAuthority()) {
                 syncGameState();
             }
-            
-            // Update GameState from sync (non-authority clients)
             if (isSessionMode() && !isAuthority()) {
                 updateGameStateFromSync();
             }
             
-            // Update HUD (may have changed from sync)
             updateHUD();
-            
-            // Update background beat tempo based on asteroid count
-            const maxAsteroids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
-            const totalAsteroidArea = game.asteroids.reduce((sum, a) => sum + a.radius * a.radius, 0);
-            const maxArea = maxAsteroids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
-            AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
         }
         
         // Update remote objects in lobby (for live preview)
@@ -3371,7 +3382,7 @@
             drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 48);
         }
         
-        if (game.state === 'gameover') {
+        if (isGameOver()) {
             drawCenteredText('GAME OVER', getGameHeight() / 2 - 40, 48);
             drawCenteredText(`Final Score: ${game.score}`, getGameHeight() / 2 + 10, 24);
             if (!touchControlsEnabled) {
@@ -3427,14 +3438,14 @@
             }
             
             // In solo mode: toggle pause (if not game over)
-            if (game.state !== 'gameover' && game.state !== 'start') {
+            if (!isGameOver() && game.state !== 'start') {
                 togglePause();
             }
             return;
         }
 
         // Toggle pause with P key (solo mode only, not game over)
-        if (e.code === 'KeyP' && game.state !== 'gameover' && !isSessionMode()) {
+        if (e.code === 'KeyP' && !isGameOver() && !isSessionMode()) {
             togglePause();
             e.preventDefault();
         }
@@ -3522,7 +3533,7 @@
     if (touchButtons.pause) {
         touchButtons.pause.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            if (game.state !== 'gameover') {
+            if (!isGameOver()) {
                 togglePause();
             }
         }, { passive: false });
@@ -3532,7 +3543,7 @@
     if (touchButtons.restart) {
         touchButtons.restart.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            if (game.state === 'gameover' || game.state === 'paused') {
+            if (isGameOver() || game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
                 touchButtons.restart.classList.remove('visible');
                 // Return to menu for session mode, restart for solo
@@ -3658,7 +3669,7 @@
     function startMobileUILoop() {
         requestAnimationFrame(function mobileLoop() {
             if (touchButtons.restart) {
-                touchButtons.restart.classList.toggle('visible', game.state === 'gameover');
+                touchButtons.restart.classList.toggle('visible', isGameOver());
             }
             // Hide pause button in session mode
             if (touchButtons.pause) {
@@ -4293,10 +4304,9 @@
         game.lives--;
         updateHUD();
         if (game.lives <= 0) {
-            game.state = 'gameover';
             AudioSystem.beat.stop();
         }
-        syncGameState();
+        syncGameState(true);
     });
 
     // Handle session list changes (signal from server - fetch fresh data with jitter)
