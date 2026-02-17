@@ -26,13 +26,13 @@ param external bool = true
 param minReplicas int = 0
 
 @description('Maximum number of replicas')
-param maxReplicas int = 3
+param maxReplicas int = 1
 
 @description('CPU cores allocated to the container')
-param cpu string = '0.25'
+param cpu string = '1.0'
 
 @description('Memory allocated to the container')
-param memory string = '0.5Gi'
+param memory string = '2Gi'
 
 @description('Environment variables for the container')
 param env array = []

@@ -189,6 +189,180 @@
             50% { opacity: 1; }
         }
 
+        /* Session picker styles */
+        #session-picker {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 400px;
+            padding: 0 20px;
+        }
+
+        #session-picker .picker-status {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 15px;
+            min-height: 20px;
+        }
+
+        #session-picker .picker-status.error {
+            color: #ff4444;
+        }
+
+        #session-picker .picker-status.connecting {
+            color: #ffff00;
+        }
+
+        #session-list {
+            width: 100%;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            border: 1px solid #444;
+            border-radius: 4px;
+        }
+
+        #session-list:empty::after {
+            content: 'No sessions available';
+            display: block;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+        }
+
+        .session-item {
+            padding: 12px 15px;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.15s;
+        }
+
+        .session-item:last-child {
+            border-bottom: none;
+        }
+
+        .session-item:hover:not(.disabled) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .session-item.selected {
+            background: rgba(255, 255, 255, 0.2);
+            border-left: 3px solid #fff;
+        }
+
+        .session-item.current {
+            background: rgba(100, 255, 100, 0.15);
+            border-left: 3px solid #4f4;
+        }
+
+        .session-item.current .session-name::after {
+            content: ' (joined)';
+            font-size: 10px;
+            color: #4f4;
+        }
+
+        .session-item.disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .session-item .session-name {
+            font-size: 16px;
+        }
+
+        .session-item .session-players {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .session-item.disabled .session-players {
+            color: #ff4444;
+        }
+
+        #picker-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+        }
+
+        .picker-btn {
+            background: transparent;
+            border: 2px solid #fff;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 18px;
+            padding: 12px 24px;
+            cursor: pointer;
+            transition: all 0.15s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .picker-btn:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .picker-btn:active:not(:disabled) {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .picker-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            border-color: #666;
+            color: #666;
+        }
+
+        .picker-btn.primary {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .picker-btn.solo {
+            border-color: #888;
+            color: #888;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
+        .picker-btn.solo:hover:not(:disabled) {
+            border-color: #fff;
+            color: #fff;
+        }
+
+        .picker-btn.action {
+            background: rgba(100, 255, 100, 0.15);
+            border-color: #4f4;
+            color: #4f4;
+        }
+
+        .picker-btn.action:hover:not(:disabled) {
+            background: rgba(100, 255, 100, 0.3);
+        }
+
+        .picker-btn.action.leave {
+            background: rgba(255, 100, 100, 0.15);
+            border-color: #f44;
+            color: #f44;
+        }
+
+        .picker-btn.action.leave:hover:not(:disabled) {
+            background: rgba(255, 100, 100, 0.3);
+        }
+
+        #picker-buttons .button-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        #picker-buttons .button-row .picker-btn {
+            flex: 1;
+        }
+
         /* Mobile touch controls */
         #mobile-controls {
             display: none;
@@ -292,9 +466,11 @@
             font-size: 20px;
         }
 
-        /* Hide fullscreen button when already in fullscreen or standalone mode */
+        /* Hide fullscreen buttons when already in fullscreen or standalone mode */
         .fullscreen-active #touch-fullscreen,
-        .standalone-mode #touch-fullscreen {
+        .standalone-mode #touch-fullscreen,
+        .fullscreen-active #btn-fullscreen,
+        .standalone-mode #btn-fullscreen {
             display: none;
         }
     </style>
@@ -307,6 +483,7 @@
         <!-- HUD: displays game stats -->
         <div id="hud">
             <span id="score">Score: 0</span>
+            <span id="session-indicator"></span>
             <span id="wave">Wave: 1</span>
             <span id="lives">Lives: 3</span>
         </div>
@@ -330,7 +507,18 @@
         <!-- Start screen overlay -->
         <div id="start-screen">
             <h1>ASTERVOIDS</h1>
-            <div class="start-prompt">Touch/Enter to Start</div>
+            <div id="session-picker">
+                <div id="picker-status" class="picker-status connecting">Connecting...</div>
+                <div id="session-list"></div>
+                <div id="picker-buttons">
+                    <div class="button-row">
+                        <button id="btn-leave-create" class="picker-btn" disabled>Create</button>
+                        <button id="btn-start-enter" class="picker-btn action" style="display: none;">Start</button>
+                    </div>
+                    <button id="btn-solo" class="picker-btn solo">Solo Play</button>
+                    <button id="btn-fullscreen" class="picker-btn solo">⛶ Fullscreen</button>
+                </div>
+            </div>
         </div>
 
         <!-- Mobile touch controls -->
@@ -344,6 +532,13 @@
             <div id="touch-fullscreen" class="touch-btn">⛶</div>
         </div>
     </div>
+
+    <!-- SignalR for session connectivity -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <!-- Session client module -->
+    <script src="/js/session-client.js"></script>
+    <!-- Object sync module -->
+    <script src="/js/object-sync.js"></script>
 
     <script>
     /* ================================================================
@@ -697,46 +892,45 @@
     // ============================================
     // SECTION 1: CONFIGURATION
     // All tunable game parameters in one place
+    // All positions are normalized (0-1), sizes relative to shorter dimension
     // ============================================
     const CONFIG = {
-        // Base design dimensions (used for scaling)
-        BASE_WIDTH: 800,            // Reference width for scaling
-        BASE_HEIGHT: 600,           // Reference height for scaling
-        
         // Timing settings
         TARGET_FPS: 60,             // Target frame rate for physics
         
-        // Ship settings
-        SHIP_SIZE: 15,              // Ship triangle size in pixels
-        SHIP_THRUST: 0.15,          // Acceleration when thrusting
+        // Ship settings (normalized: sizes relative to shorter dimension)
+        SHIP_SIZE: 0.025,           // Ship triangle size (normalized)
+        SHIP_THRUST: 0.009,         // Acceleration per frame (normalized, ~0.15/600*60)
         SHIP_FRICTION: 0.99,        // Velocity decay (1 = no friction)
         SHIP_TURN_SPEED: 0.08,      // Rotation speed in radians per frame
-        SHIP_MAX_SPEED: 8,          // Maximum velocity magnitude
+        SHIP_MAX_SPEED: 0.8,        // Maximum velocity per second (normalized)
         
-        // Bullet settings
-        BULLET_SPEED: 10,           // Bullet travel speed
+        // Bullet settings (normalized)
+        BULLET_SPEED: 1.0,          // Bullet speed per second (normalized)
         BULLET_LIFETIME: 60,        // Frames before bullet expires
-        BULLET_RADIUS: 2,           // Bullet size for collision
+        BULLET_RADIUS: 0.0033,      // Bullet size (normalized)
         MAX_BULLETS: 10,            // Maximum bullets on screen
         SHOOT_COOLDOWN: 10,         // Frames between shots
         
-        // Asteroid settings
+        // Asteroid settings (normalized)
         ASTEROID_BASE_COUNT: 1,     // Starting astervoids in wave 1
-        ASTEROID_BASE_SPEED: 1.5,   // Base asteroid speed
-        ASTEROID_SPEED_VARIANCE: 1, // Random speed variation
+        ASTEROID_BASE_SPEED: 0.15,  // Base asteroid speed per second (normalized)
+        ASTEROID_SPEED_VARIANCE: 0.1, // Random speed variation (normalized)
         ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
         ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
-        MIN_ASTEROID_RADIUS: 15,    // Astervoids smaller than this won't split
-        INITIAL_ASTEROID_RADIUS: 50,// Starting asteroid size
+        MIN_ASTEROID_RADIUS: 0.025, // Min radius before no split (normalized)
+        INITIAL_ASTEROID_RADIUS: 0.083, // Starting asteroid size (normalized)
         
         // Asteroid splitting
         SPLIT_COUNT: 2,             // Always split into 2 pieces
         MIN_SPLIT_RATIO: 0.1,       // Smallest piece is at least 10% of original
         
-        // Scoring (points awarded based on asteroid size)
+        // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
         POINTS_MEDIUM: 50,          // Points for medium astervoids
         POINTS_SMALL: 100,          // Points for small astervoids
+        ASTEROID_LARGE_THRESHOLD: 0.067,  // ~40px at 600 ref
+        ASTEROID_MEDIUM_THRESHOLD: 0.042, // ~25px at 600 ref
         
         // Game settings
         STARTING_LIVES: 3,          // Lives at game start
@@ -755,7 +949,274 @@
         
         // Start screen
         START_SCREEN_ASTERVOIDS: 4,  // Astervoids shown on start screen
-        SPAWN_MIN_DISTANCE: 150     // Minimum spawn distance from ship
+        SPAWN_MIN_DISTANCE: 0.25,   // Minimum spawn distance from ship (normalized)
+        
+        // Multiplayer settings
+        MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
+        SYNC_INTERVAL: 24,          // Object sync interval in ms (default, can be changed)
+        INTERPOLATION_DELAY: 32,    // Render delay for smooth interpolation (ms)
+        INTERPOLATION_ENABLED: true, // Enable/disable interpolation for remote objects
+        ADAPTIVE_DELAY_ENABLED: false, // Auto-tune interpolation delay based on jitter
+        SNAP_THRESHOLD: 0.25        // Snap instead of interpolate when position error exceeds this (normalized)
+    };
+
+    // ============================================
+    // SECTION 1B: MULTIPLAYER CONSTANTS
+    // Object types and ship colors for multiplayer sync
+    // ============================================
+
+    // Synced object types
+    const OBJECT_TYPES = {
+        SHIP: 'ship',
+        ASTEROID: 'asteroid',
+        BULLET: 'bullet',
+        GAME_STATE: 'gameState'
+    };
+
+    // Ship colors for up to 4 players (distinct, high-contrast)
+    const SHIP_COLORS = [
+        '#00FF00',  // Green (Player 1 / typically Server)
+        '#00FFFF',  // Cyan (Player 2)
+        '#FF00FF',  // Magenta (Player 3)
+        '#FFFF00'   // Yellow (Player 4)
+    ];
+
+    // Remote object state tracking for interpolation
+    const RemoteObjects = {
+        // Map of objectId -> interpolation state
+        states: new Map(),
+        // Map of objectId -> last version fed to interpolation
+        lastVersions: new Map(),
+        // Adaptive delay state
+        adaptiveDelay: {
+            packetIntervals: [],   // recent inter-packet intervals (ms)
+            maxSamples: 30,
+            computedDelay: CONFIG.INTERPOLATION_DELAY
+        },
+        
+        /**
+         * Update remote object state when sync data received
+         * @param {string} objectId - Object ID
+         * @param {object} data - New object data from ObjectSync
+         */
+        updateState(objectId, data) {
+            const now = performance.now();
+            const existing = this.states.get(objectId);
+            
+            if (existing) {
+                // Track inter-packet interval for adaptive delay
+                if (CONFIG.ADAPTIVE_DELAY_ENABLED) {
+                    this.recordPacketInterval(now - existing.currentTime);
+                }
+                // Shift current to previous
+                existing.previous = existing.current;
+                existing.previousTime = existing.currentTime;
+                existing.previousVelocity = existing.velocity;
+                existing.previousRotationSpeed = existing.rotationSpeed;
+                existing.current = { ...data };
+                existing.currentTime = now;
+                existing.velocity = {
+                    x: data.velocityX || 0,
+                    y: data.velocityY || 0
+                };
+                existing.rotationSpeed = data.rotationSpeed || 0;
+            } else {
+                const vel = { x: data.velocityX || 0, y: data.velocityY || 0 };
+                const rotSpd = data.rotationSpeed || 0;
+                this.states.set(objectId, {
+                    current: { ...data },
+                    previous: { ...data },
+                    currentTime: now,
+                    previousTime: now - CONFIG.SYNC_INTERVAL,
+                    velocity: vel,
+                    previousVelocity: vel,
+                    rotationSpeed: rotSpd,
+                    previousRotationSpeed: rotSpd
+                });
+            }
+        },
+
+        /**
+         * Record a packet interval for adaptive delay calculation
+         */
+        recordPacketInterval(interval) {
+            const ad = this.adaptiveDelay;
+            ad.packetIntervals.push(interval);
+            if (ad.packetIntervals.length > ad.maxSamples) {
+                ad.packetIntervals.shift();
+            }
+            if (ad.packetIntervals.length >= 5) {
+                // Adaptive delay = mean + 2 * stddev (covers ~95% of jitter)
+                const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
+                const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
+                const stddev = Math.sqrt(variance);
+                ad.computedDelay = Math.max(16, Math.min(100, mean + 2 * stddev));
+            }
+        },
+
+        /**
+         * Get the current interpolation delay (adaptive or fixed)
+         */
+        getDelay() {
+            return CONFIG.ADAPTIVE_DELAY_ENABLED ? this.adaptiveDelay.computedDelay : CONFIG.INTERPOLATION_DELAY;
+        },
+        
+        /**
+         * Get interpolated position for rendering
+         * @param {string} objectId - Object ID
+         * @param {number} renderTime - Current render timestamp
+         * @returns {object|null} Interpolated state or null if not found
+         */
+        getInterpolated(objectId, renderTime) {
+            const state = this.states.get(objectId);
+            if (!state) return null;
+            
+            if (!CONFIG.INTERPOLATION_ENABLED) {
+                return state.current;
+            }
+            
+            const timeDiff = state.currentTime - state.previousTime;
+            if (timeDiff <= 0) return state.current;
+            
+            const targetTime = renderTime - this.getDelay();
+            const t = (targetTime - state.previousTime) / timeDiff;
+            
+            if (t <= 0) {
+                return state.previous;
+            } else if (t <= 1) {
+                // Snap check: if positions are too far apart, skip interpolation
+                if (this.shouldSnap(state.previous, state.current)) {
+                    return state.current;
+                }
+                return this.hermite(state, t, timeDiff);
+            } else {
+                // Extrapolate using velocity
+                const extraTime = (targetTime - state.currentTime) / 1000;
+                const refDim = getReferenceDimension();
+                const r = this.getBoundingRadius(state.current);
+                return {
+                    ...state.current,
+                    x: wrapNormalized(state.current.x + state.velocity.x * (refDim / getGameWidth()) * extraTime, wrapMarginX(r)),
+                    y: wrapNormalized(state.current.y + state.velocity.y * (refDim / getGameHeight()) * extraTime, wrapMarginY(r)),
+                    angle: state.current.angle + (state.current.rotationSpeed || 0) * CONFIG.TARGET_FPS * extraTime
+                };
+            }
+        },
+
+        /**
+         * Check if positions are far enough apart to warrant a snap
+         */
+        shouldSnap(a, b) {
+            if (a.x === undefined || b.x === undefined) return false;
+            const r = this.getBoundingRadius(b);
+            const rangeX = 1 + 2 * wrapMarginX(r);
+            const rangeY = 1 + 2 * wrapMarginY(r);
+            let dx = b.x - a.x;
+            let dy = (b.y || 0) - (a.y || 0);
+            // Wrap-aware distance using extended range
+            if (dx > rangeX / 2) dx -= rangeX; else if (dx < -rangeX / 2) dx += rangeX;
+            if (dy > rangeY / 2) dy -= rangeY; else if (dy < -rangeY / 2) dy += rangeY;
+            return Math.sqrt(dx * dx + dy * dy) > CONFIG.SNAP_THRESHOLD;
+        },
+        
+        /**
+         * Hermite interpolation using position and velocity at both endpoints
+         */
+        hermite(state, t, timeDiff) {
+            const result = { ...state.current };
+            const dt = timeDiff / 1000; // interval in seconds
+            
+            // Hermite basis functions
+            const t2 = t * t;
+            const t3 = t2 * t;
+            const h00 = 2 * t3 - 3 * t2 + 1;
+            const h10 = t3 - 2 * t2 + t;
+            const h01 = -2 * t3 + 3 * t2;
+            const h11 = t3 - t2;
+            
+            // Position interpolation with tangents from velocity (scaled by interval)
+            // velocityX/Y are in reference-dimension per second; positions are in normalized [0,1]
+            // Convert velocity to normalized-position-per-second for correct tangents
+            const refDim = getReferenceDimension();
+            const velScaleX = refDim / getGameWidth();
+            const velScaleY = refDim / getGameHeight();
+            const r = this.getBoundingRadius(state.current);
+            const rangeX = 1 + 2 * wrapMarginX(r);
+            const rangeY = 1 + 2 * wrapMarginY(r);
+            if (state.previous.x !== undefined && state.current.x !== undefined) {
+                let dx = state.current.x - state.previous.x;
+                if (dx > rangeX / 2) dx -= rangeX; else if (dx < -rangeX / 2) dx += rangeX;
+                const p0 = state.previous.x;
+                const p1 = p0 + dx;
+                const m0 = (state.previousVelocity.x || 0) * velScaleX * dt;
+                const m1 = (state.velocity.x || 0) * velScaleX * dt;
+                result.x = wrapNormalized(h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1, wrapMarginX(r));
+            }
+            if (state.previous.y !== undefined && state.current.y !== undefined) {
+                let dy = state.current.y - state.previous.y;
+                if (dy > rangeY / 2) dy -= rangeY; else if (dy < -rangeY / 2) dy += rangeY;
+                const p0 = state.previous.y;
+                const p1 = p0 + dy;
+                const m0 = (state.previousVelocity.y || 0) * velScaleY * dt;
+                const m1 = (state.velocity.y || 0) * velScaleY * dt;
+                result.y = wrapNormalized(h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1, wrapMarginY(r));
+            }
+            
+            // Angle interpolation with Hermite using rotationSpeed as tangents
+            // rotationSpeed is in radians-per-frame (at 60fps), convert to per-second for tangent
+            if (state.previous.angle !== undefined && state.current.angle !== undefined) {
+                let dAngle = state.current.angle - state.previous.angle;
+                while (dAngle > Math.PI) dAngle -= Math.PI * 2;
+                while (dAngle < -Math.PI) dAngle += Math.PI * 2;
+                const a0 = state.previous.angle;
+                const a1 = a0 + dAngle;
+                const rpsToPerSec = CONFIG.TARGET_FPS;
+                const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
+                const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
+                result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+            }
+            
+            return result;
+        },
+        
+        /**
+         * Interpolate angles handling wraparound
+         */
+        lerpAngle(a, b, t) {
+            let diff = b - a;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            return a + diff * t;
+        },
+        
+        /**
+         * Get bounding radius from sync state data for wrap margin calculation
+         */
+        getBoundingRadius(data) {
+            if (!data || !data.type) return 0;
+            if (data.type === OBJECT_TYPES.ASTEROID) return data.radius || 0;
+            if (data.type === OBJECT_TYPES.SHIP) return CONFIG.SHIP_SIZE;
+            if (data.type === OBJECT_TYPES.BULLET) return CONFIG.BULLET_RADIUS;
+            return 0;
+        },
+
+        /**
+         * Remove object from tracking
+         */
+        remove(objectId) {
+            this.states.delete(objectId);
+            this.lastVersions.delete(objectId);
+        },
+        
+        /**
+         * Clear all tracked objects
+         */
+        clear() {
+            this.states.clear();
+            this.lastVersions.clear();
+            this.adaptiveDelay.packetIntervals = [];
+            this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
+        }
     };
 
     // ============================================
@@ -764,79 +1225,252 @@
     // ============================================
 
     /**
-     * Resize the canvas to fill the window while maintaining game state
-     * Scales all game entity positions proportionally
+     * Get the reference dimension for size normalization (shorter of width/height)
+     * This ensures circles remain circular regardless of aspect ratio
+     * @returns {number} Reference dimension in pixels
      */
-    function resizeCanvas() {
+    function getReferenceDimension() {
+        return Math.min(getGameWidth(), getGameHeight());
+    }
+
+    /**
+     * Convert normalized X position (0-1) to pixel X within gameplay area
+     * @param {number} normX - Normalized X (0 = left, 1 = right)
+     * @returns {number} Pixel X coordinate
+     */
+    function fromNormalizedX(normX) {
+        return normX * getGameWidth();
+    }
+
+    /**
+     * Convert pixel X to normalized X position (0-1)
+     * @param {number} pixelX - Pixel X coordinate
+     * @returns {number} Normalized X (0-1)
+     */
+    function toNormalizedX(pixelX) {
+        return pixelX / getGameWidth();
+    }
+
+    /**
+     * Convert normalized Y position (0-1) to pixel Y within gameplay area
+     * @param {number} normY - Normalized Y (0 = top, 1 = bottom)
+     * @returns {number} Pixel Y coordinate
+     */
+    function fromNormalizedY(normY) {
+        return normY * getGameHeight();
+    }
+
+    /**
+     * Convert pixel Y to normalized Y position (0-1)
+     * @param {number} pixelY - Pixel Y coordinate
+     * @returns {number} Normalized Y (0-1)
+     */
+    function toNormalizedY(pixelY) {
+        return pixelY / getGameHeight();
+    }
+
+    /**
+     * Convert normalized size to pixel size
+     * Uses shorter dimension as reference to preserve aspect ratio of shapes
+     * @param {number} normSize - Normalized size (fraction of reference dimension)
+     * @returns {number} Pixel size
+     */
+    function fromNormalizedSize(normSize) {
+        return normSize * getReferenceDimension();
+    }
+
+    /**
+     * Convert pixel size to normalized size
+     * @param {number} pixelSize - Pixel size
+     * @returns {number} Normalized size
+     */
+    function toNormalizedSize(pixelSize) {
+        return pixelSize / getReferenceDimension();
+    }
+
+    /**
+     * Convert normalized velocity to pixel velocity for X axis
+     * Velocity is stored as "fraction of dimension per second"
+     * @param {number} normVelX - Normalized velocity (per second)
+     * @returns {number} Pixel velocity per frame (at 60fps)
+     */
+    function fromNormalizedVelocityX(normVelX) {
+        return normVelX * getGameWidth() / CONFIG.TARGET_FPS;
+    }
+
+    /**
+     * Convert normalized velocity to pixel velocity for Y axis
+     * @param {number} normVelY - Normalized velocity (per second)
+     * @returns {number} Pixel velocity per frame (at 60fps)
+     */
+    function fromNormalizedVelocityY(normVelY) {
+        return normVelY * getGameHeight() / CONFIG.TARGET_FPS;
+    }
+
+    /**
+     * Convert normalized velocity (reference-dimension per second) to position delta for X axis
+     * This accounts for aspect ratio to ensure consistent visual speed in all directions
+     * @param {number} normVel - Normalized velocity (reference dimension per second)
+     * @returns {number} Position delta in normalized X coordinates (per frame at 60fps)
+     */
+    function velocityToNormalizedDeltaX(normVel) {
+        const refDim = getReferenceDimension();
+        return normVel * refDim / getGameWidth() / CONFIG.TARGET_FPS;
+    }
+
+    /**
+     * Convert normalized velocity (reference-dimension per second) to position delta for Y axis
+     * This accounts for aspect ratio to ensure consistent visual speed in all directions
+     * @param {number} normVel - Normalized velocity (reference dimension per second)
+     * @returns {number} Position delta in normalized Y coordinates (per frame at 60fps)
+     */
+    function velocityToNormalizedDeltaY(normVel) {
+        const refDim = getReferenceDimension();
+        return normVel * refDim / getGameHeight() / CONFIG.TARGET_FPS;
+    }
+
+    /**
+     * Convert a normalized size to normalized X coordinate offset
+     * Used when adding size-based offsets to positions (e.g., nose position relative to ship center)
+     * @param {number} normSize - Size normalized to reference dimension
+     * @returns {number} Equivalent offset in normalized X coordinates
+     */
+    function sizeToNormalizedX(normSize) {
+        const refDim = getReferenceDimension();
+        return normSize * refDim / getGameWidth();
+    }
+
+    /**
+     * Convert a normalized size to normalized Y coordinate offset
+     * @param {number} normSize - Size normalized to reference dimension
+     * @returns {number} Equivalent offset in normalized Y coordinates
+     */
+    function sizeToNormalizedY(normSize) {
+        const refDim = getReferenceDimension();
+        return normSize * refDim / getGameHeight();
+    }
+
+    /**
+     * Resize the canvas to fill the window while maintaining game state
+     * With normalized coordinates, positions don't need scaling on resize
+     */
+    function resizeCanvas(forceViewportRecalc = false) {
         const container = document.getElementById('game-container');
         const newWidth = container.clientWidth;
         const newHeight = container.clientHeight;
         
-        // Store old dimensions for scaling
-        const oldWidth = canvas.width || CONFIG.BASE_WIDTH;
-        const oldHeight = canvas.height || CONFIG.BASE_HEIGHT;
+        // Only resize if dimensions changed, unless forcing viewport recalculation
+        const dimensionsChanged = newWidth !== canvas.width || newHeight !== canvas.height;
+        if (!dimensionsChanged && !forceViewportRecalc) return;
         
-        // Only resize if dimensions actually changed
-        if (newWidth === oldWidth && newHeight === oldHeight) return;
-        
-        // Calculate scale factors
-        const scaleX = newWidth / oldWidth;
-        const scaleY = newHeight / oldHeight;
-        
-        // Update canvas dimensions
+        // Update canvas dimensions to fill container
         canvas.width = newWidth;
         canvas.height = newHeight;
         
-        // Scale all game entity positions if game is initialized
-        if (game.ship) {
-            game.ship.x *= scaleX;
-            game.ship.y *= scaleY;
+        // Calculate viewport (gameplay area) based on mode
+        if (isSessionMode() && game.sessionInfo && game.sessionInfo.aspectRatio) {
+            // Session mode: constrain to locked aspect ratio
+            const lockedAspectRatio = game.sessionInfo.aspectRatio;
+            const windowAspectRatio = newWidth / newHeight;
+            
+            let viewportWidth, viewportHeight;
+            if (windowAspectRatio > lockedAspectRatio) {
+                // Window is wider than locked ratio - pillarbox (black bars on sides)
+                viewportHeight = newHeight;
+                viewportWidth = newHeight * lockedAspectRatio;
+            } else {
+                // Window is taller than locked ratio - letterbox (black bars top/bottom)
+                viewportWidth = newWidth;
+                viewportHeight = newWidth / lockedAspectRatio;
+            }
+            
+            game.viewport.width = viewportWidth;
+            game.viewport.height = viewportHeight;
+            game.viewport.x = (newWidth - viewportWidth) / 2;
+            game.viewport.y = (newHeight - viewportHeight) / 2;
+        } else {
+            // Solo mode: gameplay area is the entire canvas
+            game.viewport.x = 0;
+            game.viewport.y = 0;
+            game.viewport.width = newWidth;
+            game.viewport.height = newHeight;
         }
         
-        if (game.astervoids) {
-            game.astervoids.forEach(asteroid => {
-                asteroid.x *= scaleX;
-                asteroid.y *= scaleY;
-            });
-        }
-        
-        if (game.bullets) {
-            game.bullets.forEach(bullet => {
-                bullet.x *= scaleX;
-                bullet.y *= scaleY;
-            });
-        }
+        // No need to scale entity positions - they use normalized coordinates (0-1)
+        // The conversion functions (fromNormalizedX, etc.) handle the mapping to pixels
     }
 
     /**
-     * Get the scale factor relative to base design dimensions
-     * Used for scaling visual elements like ship size
-     * @returns {number} Scale factor
+     * Get the gameplay area width (viewport width in session mode, canvas width in solo)
+     * @returns {number} Gameplay width in pixels
      */
-    function getScaleFactor() {
-        const scaleX = canvas.width / CONFIG.BASE_WIDTH;
-        const scaleY = canvas.height / CONFIG.BASE_HEIGHT;
-        return Math.min(scaleX, scaleY);
+    function getGameWidth() {
+        return game.viewport.width || canvas.width;
     }
 
     /**
-     * Wraps a position to the opposite side of the canvas
-     * Creates the classic "wrap-around" effect
-     * @param {number} value - Current position
-     * @param {number} max - Canvas dimension
-     * @returns {number} Wrapped position
+     * Get the gameplay area height (viewport height in session mode, canvas height in solo)
+     * @returns {number} Gameplay height in pixels
      */
-    function wrapValue(value, max) {
-        if (value < 0) return max + value;
-        if (value > max) return value - max;
+    function getGameHeight() {
+        return game.viewport.height || canvas.height;
+    }
+
+    /**
+     * Wraps a normalized position to stay within bounds, extended by a margin
+     * so the object is fully off-screen before reappearing on the other side.
+     * @param {number} value - Current normalized position
+     * @param {number} margin - Extra margin beyond 0-1 before wrapping (default: 0)
+     * @returns {number} Wrapped normalized position
+     */
+    function wrapNormalized(value, margin = 0) {
+        const lo = -margin;
+        const hi = 1 + margin;
+        const range = hi - lo;
+        if (value < lo) return value + range;
+        if (value > hi) return value - range;
         return value;
     }
 
     /**
-     * Calculates distance between two points
+     * Convert a reference-dimension radius to X-normalized margin for wrapping
+     * @param {number} radius - Radius in reference-dimension-normalized space
+     * @returns {number} Margin in X-normalized space
+     */
+    function wrapMarginX(radius) {
+        return radius * getReferenceDimension() / getGameWidth();
+    }
+
+    /**
+     * Convert a reference-dimension radius to Y-normalized margin for wrapping
+     * @param {number} radius - Radius in reference-dimension-normalized space
+     * @returns {number} Margin in Y-normalized space
+     */
+    function wrapMarginY(radius) {
+        return radius * getReferenceDimension() / getGameHeight();
+    }
+
+    /**
+     * Calculates distance between two normalized points
+     * @param {number} x1, y1 - First point (normalized)
+     * @param {number} x2, y2 - Second point (normalized)
+     * @returns {number} Distance in normalized units (relative to reference dimension)
+     */
+    function normalizedDistance(x1, y1, x2, y2) {
+        // Convert to pixel space for proper distance calculation with aspect ratio
+        const px1 = fromNormalizedX(x1);
+        const py1 = fromNormalizedY(y1);
+        const px2 = fromNormalizedX(x2);
+        const py2 = fromNormalizedY(y2);
+        const pixelDist = Math.sqrt((px2 - px1) ** 2 + (py2 - py1) ** 2);
+        return pixelDist / getReferenceDimension();
+    }
+
+    /**
+     * Calculates distance between two points (pixel coordinates)
      * @param {number} x1, y1 - First point
      * @param {number} x2, y2 - Second point
-     * @returns {number} Distance
+     * @returns {number} Distance in pixels
      */
     function distance(x1, y1, x2, y2) {
         return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
@@ -929,55 +1563,96 @@
     // ============================================
     // SECTION 3: GAME ENTITY CLASSES
     // Ship, Asteroid, and Bullet definitions
+    // All positions/velocities stored in normalized coordinates (0-1)
     // ============================================
 
     /**
      * Ship Class
      * The player-controlled spacecraft
+     * All positions and velocities are normalized (0-1 range)
      */
     class Ship {
-        constructor(x, y) {
-            this.x = x;                    // X position
-            this.y = y;                    // Y position
+        constructor(x, y, colorIndex = 0) {
+            this.x = x;                    // Normalized X position (0-1)
+            this.y = y;                    // Normalized Y position (0-1)
             this.angle = -Math.PI / 2;     // Facing up initially
-            this.velocityX = 0;            // Horizontal velocity
-            this.velocityY = 0;            // Vertical velocity
+            this.velocityX = 0;            // Normalized horizontal velocity (per second)
+            this.velocityY = 0;            // Normalized vertical velocity (per second)
             this.thrusting = false;        // Is thrust active?
             this.invulnerable = 0;         // Invulnerability frames remaining
             this.shootCooldown = 0;        // Frames until can shoot again
+            this.colorIndex = colorIndex;  // Player color index (0-3)
+            this.syncObjectId = null;      // ObjectSync ID when in session
+            this.memberId = null;          // Session member ID who owns this ship
+        }
+
+        /**
+         * Serialize ship state for ObjectSync
+         * @returns {object} Ship data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.SHIP,
+                x: this.x,
+                y: this.y,
+                angle: this.angle,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                thrusting: this.thrusting,
+                invulnerable: this.invulnerable,
+                colorIndex: this.colorIndex,
+                memberId: this.memberId
+            };
+        }
+
+        /**
+         * Update ship from sync data (for remote ships)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.angle !== undefined) this.angle = data.angle;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.thrusting !== undefined) this.thrusting = data.thrusting;
+            if (data.invulnerable !== undefined) this.invulnerable = data.invulnerable;
+            if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
+            if (data.memberId !== undefined) this.memberId = data.memberId;
         }
 
         /**
          * Update ship state based on physics and input
-         * @param {object} canvas - Canvas element for wrapping
+         * Velocity is in reference-dimension per second, converted with aspect ratio
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
-        update(canvas, dt = 1) {
+        update(dt = 1) {
             // Apply friction to slow down gradually (adjust for delta time)
             const friction = Math.pow(CONFIG.SHIP_FRICTION, dt);
             this.velocityX *= friction;
             this.velocityY *= friction;
             
-            // Apply thrust in facing direction
+            // Apply thrust in facing direction (normalized acceleration)
             if (this.thrusting) {
                 this.velocityX += Math.cos(this.angle) * CONFIG.SHIP_THRUST * dt;
                 this.velocityY += Math.sin(this.angle) * CONFIG.SHIP_THRUST * dt;
             }
             
-            // Limit to max speed
+            // Limit to max speed (in reference-dimension per second)
             const speed = Math.sqrt(this.velocityX ** 2 + this.velocityY ** 2);
             if (speed > CONFIG.SHIP_MAX_SPEED) {
                 this.velocityX = (this.velocityX / speed) * CONFIG.SHIP_MAX_SPEED;
                 this.velocityY = (this.velocityY / speed) * CONFIG.SHIP_MAX_SPEED;
             }
             
-            // Update position
-            this.x += this.velocityX * dt;
-            this.y += this.velocityY * dt;
+            // Update position using aspect-ratio-aware conversion
+            // This ensures consistent visual speed regardless of viewport dimensions
+            this.x += velocityToNormalizedDeltaX(this.velocityX) * dt;
+            this.y += velocityToNormalizedDeltaY(this.velocityY) * dt;
             
-            // Wrap around screen edges
-            this.x = wrapValue(this.x, canvas.width);
-            this.y = wrapValue(this.y, canvas.height);
+            // Wrap with margin so ship is fully off-screen before reappearing
+            this.x = wrapNormalized(this.x, wrapMarginX(CONFIG.SHIP_SIZE));
+            this.y = wrapNormalized(this.y, wrapMarginY(CONFIG.SHIP_SIZE));
             
             // Decrement timers (adjusted for delta time)
             if (this.invulnerable > 0) this.invulnerable -= dt;
@@ -985,27 +1660,29 @@
         }
 
         /**
-         * Get the ship's triangle vertices in world coordinates
-         * Used for both rendering and collision detection
-         * @returns {array} Array of {x, y} vertices
+         * Get the ship's triangle vertices in pixel coordinates for rendering
+         * Converts from normalized position to pixels
+         * @returns {array} Array of {x, y} vertices in pixels
          */
         getVertices() {
-            const size = CONFIG.SHIP_SIZE;
+            const pixelX = fromNormalizedX(this.x);
+            const pixelY = fromNormalizedY(this.y);
+            const size = fromNormalizedSize(CONFIG.SHIP_SIZE);
             return [
                 // Nose (front point)
                 {
-                    x: this.x + Math.cos(this.angle) * size,
-                    y: this.y + Math.sin(this.angle) * size
+                    x: pixelX + Math.cos(this.angle) * size,
+                    y: pixelY + Math.sin(this.angle) * size
                 },
                 // Left wing
                 {
-                    x: this.x + Math.cos(this.angle + Math.PI * 0.8) * size * 0.7,
-                    y: this.y + Math.sin(this.angle + Math.PI * 0.8) * size * 0.7
+                    x: pixelX + Math.cos(this.angle + Math.PI * 0.8) * size * 0.7,
+                    y: pixelY + Math.sin(this.angle + Math.PI * 0.8) * size * 0.7
                 },
                 // Right wing
                 {
-                    x: this.x + Math.cos(this.angle - Math.PI * 0.8) * size * 0.7,
-                    y: this.y + Math.sin(this.angle - Math.PI * 0.8) * size * 0.7
+                    x: pixelX + Math.cos(this.angle - Math.PI * 0.8) * size * 0.7,
+                    y: pixelY + Math.sin(this.angle - Math.PI * 0.8) * size * 0.7
                 }
             ];
         }
@@ -1022,9 +1699,15 @@
             }
             
             const vertices = this.getVertices();
+            const pixelX = fromNormalizedX(this.x);
+            const pixelY = fromNormalizedY(this.y);
+            const size = fromNormalizedSize(CONFIG.SHIP_SIZE);
+            
+            // Use ship color (multiplayer) or default white (solo)
+            const shipColor = SHIP_COLORS[this.colorIndex] || CONFIG.STROKE_COLOR;
             
             // Draw ship triangle
-            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            ctx.strokeStyle = shipColor;
             ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.moveTo(vertices[0].x, vertices[0].y);
@@ -1040,19 +1723,19 @@
                 
                 // Flame base points (between wings)
                 const flameBase1 = {
-                    x: this.x + Math.cos(this.angle + Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4,
-                    y: this.y + Math.sin(this.angle + Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4
+                    x: pixelX + Math.cos(this.angle + Math.PI * 0.9) * size * 0.4,
+                    y: pixelY + Math.sin(this.angle + Math.PI * 0.9) * size * 0.4
                 };
                 const flameBase2 = {
-                    x: this.x + Math.cos(this.angle - Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4,
-                    y: this.y + Math.sin(this.angle - Math.PI * 0.9) * CONFIG.SHIP_SIZE * 0.4
+                    x: pixelX + Math.cos(this.angle - Math.PI * 0.9) * size * 0.4,
+                    y: pixelY + Math.sin(this.angle - Math.PI * 0.9) * size * 0.4
                 };
                 
                 // Flame tip (flickers randomly)
-                const flameLength = CONFIG.SHIP_SIZE * (0.8 + Math.random() * 0.4);
+                const flameLength = size * (0.8 + Math.random() * 0.4);
                 const flameTip = {
-                    x: this.x + Math.cos(this.angle + Math.PI) * flameLength,
-                    y: this.y + Math.sin(this.angle + Math.PI) * flameLength
+                    x: pixelX + Math.cos(this.angle + Math.PI) * flameLength,
+                    y: pixelY + Math.sin(this.angle + Math.PI) * flameLength
                 };
                 
                 ctx.moveTo(flameBase1.x, flameBase1.y);
@@ -1074,23 +1757,27 @@
             // Play fire sound
             AudioSystem.playFire();
             
-            // Spawn bullet at ship's nose
-            const nose = this.getVertices()[0];
+            // Get nose position in normalized coords
+            // Use aspect-ratio-aware conversion for the offset
+            const noseX = this.x + Math.cos(this.angle) * sizeToNormalizedX(CONFIG.SHIP_SIZE);
+            const noseY = this.y + Math.sin(this.angle) * sizeToNormalizedY(CONFIG.SHIP_SIZE);
+            
             return new Bullet(
-                nose.x,
-                nose.y,
+                noseX,
+                noseY,
                 Math.cos(this.angle) * CONFIG.BULLET_SPEED,
-                Math.sin(this.angle) * CONFIG.BULLET_SPEED
+                Math.sin(this.angle) * CONFIG.BULLET_SPEED,
+                this.colorIndex,    // Inherit ship's color
+                this.memberId       // Track owner for scoring
             );
         }
 
         /**
-         * Reset ship to center of screen
-         * @param {object} canvas - Canvas element
+         * Reset ship to center of gameplay area (normalized: 0.5, 0.5)
          */
-        reset(canvas) {
-            this.x = canvas.width / 2;
-            this.y = canvas.height / 2;
+        reset() {
+            this.x = 0.5;
+            this.y = 0.5;
             this.angle = -Math.PI / 2;
             this.velocityX = 0;
             this.velocityY = 0;
@@ -1101,36 +1788,97 @@
     /**
      * Asteroid Class
      * Space rocks that the player must destroy
+     * Position is normalized (0-1), radius/velocity are in reference-dimension units
      */
     class Asteroid {
-        constructor(x, y, radius, velocityX, velocityY) {
-            this.x = x;                    // X position
-            this.y = y;                    // Y position
-            this.radius = radius;          // Size (collision radius)
-            this.velocityX = velocityX;    // Horizontal velocity
-            this.velocityY = velocityY;    // Vertical velocity
+        constructor(x, y, radius, velocityX, velocityY, seed = null) {
+            this.x = x;                    // Normalized X position (0-1)
+            this.y = y;                    // Normalized Y position (0-1)
+            this.radius = radius;          // Normalized size (relative to ref dimension)
+            this.velocityX = velocityX;    // Velocity in reference-dimension per second
+            this.velocityY = velocityY;    // Velocity in reference-dimension per second
             this.angle = Math.random() * Math.PI * 2;  // Random rotation
             this.rotationSpeed = randomRange(-0.02, 0.02);  // Spin rate
-            this.vertices = this.generateShape();  // Irregular polygon
+            this.seed = seed || Math.random();  // Seed for deterministic shape generation
+            this.vertices = this.generateShape();  // Irregular polygon (normalized)
+            this.syncObjectId = null;      // ObjectSync ID when in session
+        }
+
+        /**
+         * Serialize asteroid state for ObjectSync
+         * @returns {object} Asteroid data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.ASTEROID,
+                x: this.x,
+                y: this.y,
+                radius: this.radius,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                angle: this.angle,
+                rotationSpeed: this.rotationSpeed,
+                seed: this.seed
+            };
+        }
+
+        /**
+         * Update asteroid from sync data (for remote astervoids)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.angle !== undefined) this.angle = data.angle;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.rotationSpeed !== undefined) this.rotationSpeed = data.rotationSpeed;
+        }
+
+        /**
+         * Create an asteroid from sync data
+         * @param {object} data - Sync data from ObjectSync
+         * @returns {Asteroid} New asteroid instance
+         */
+        static fromSyncData(data) {
+            const asteroid = new Asteroid(
+                data.x, 
+                data.y, 
+                data.radius, 
+                data.velocityX, 
+                data.velocityY,
+                data.seed
+            );
+            asteroid.angle = data.angle || 0;
+            asteroid.rotationSpeed = data.rotationSpeed || 0;
+            return asteroid;
         }
 
         /**
          * Generate an irregular polygon shape
          * Creates the classic jagged asteroid look
-         * @returns {array} Array of {x, y} vertices (relative to center)
+         * Uses seed for deterministic generation across clients
+         * @returns {array} Array of vertices with angle and distance (normalized)
          */
         generateShape() {
             const vertices = [];
             const vertexCount = CONFIG.ASTEROID_VERTICES;
             
+            // Use seeded random for deterministic shape across clients
+            let seedValue = this.seed;
+            const seededRandom = () => {
+                seedValue = (seedValue * 9301 + 49297) % 233280;
+                return seedValue / 233280;
+            };
+            
             for (let i = 0; i < vertexCount; i++) {
                 const angle = (i / vertexCount) * Math.PI * 2;
                 // Vary radius for jagged appearance
                 const variance = 1 - CONFIG.ASTEROID_JAGGEDNESS + 
-                                 Math.random() * CONFIG.ASTEROID_JAGGEDNESS * 2;
+                                 seededRandom() * CONFIG.ASTEROID_JAGGEDNESS * 2;
                 vertices.push({
                     angle: angle,
-                    distance: this.radius * variance
+                    distance: this.radius * variance  // Normalized distance
                 });
             }
             
@@ -1138,47 +1886,52 @@
         }
 
         /**
-         * Get vertices in world coordinates (accounting for position and rotation)
-         * Uses caching to avoid recalculation when position/rotation unchanged
-         * @returns {array} Array of {x, y} world-space vertices
+         * Get vertices in pixel coordinates for rendering and collision
+         * @returns {array} Array of {x, y} pixel coordinates
          */
         getWorldVertices() {
+            const pixelX = fromNormalizedX(this.x);
+            const pixelY = fromNormalizedY(this.y);
+            const ref = getReferenceDimension();
+            
             // Check if cached result is still valid
             if (this._cachedVerts && 
-                this._cacheX === this.x && 
-                this._cacheY === this.y && 
-                this._cacheAngle === this.angle) {
+                this._cacheX === pixelX && 
+                this._cacheY === pixelY && 
+                this._cacheAngle === this.angle &&
+                this._cacheRef === ref) {
                 return this._cachedVerts;
             }
             
-            // Calculate and cache
+            // Calculate and cache - convert normalized distances to pixels
             this._cachedVerts = this.vertices.map(v => ({
-                x: this.x + Math.cos(v.angle + this.angle) * v.distance,
-                y: this.y + Math.sin(v.angle + this.angle) * v.distance
+                x: pixelX + Math.cos(v.angle + this.angle) * v.distance * ref,
+                y: pixelY + Math.sin(v.angle + this.angle) * v.distance * ref
             }));
-            this._cacheX = this.x;
-            this._cacheY = this.y;
+            this._cacheX = pixelX;
+            this._cacheY = pixelY;
             this._cacheAngle = this.angle;
+            this._cacheRef = ref;
             
             return this._cachedVerts;
         }
 
         /**
          * Update asteroid position and rotation
-         * @param {object} canvas - Canvas element for wrapping
+         * Velocity is in reference-dimension per second, converted with aspect ratio
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
-        update(canvas, dt = 1) {
-            // Move asteroid
-            this.x += this.velocityX * dt;
-            this.y += this.velocityY * dt;
+        update(dt = 1) {
+            // Move asteroid using aspect-ratio-aware conversion
+            this.x += velocityToNormalizedDeltaX(this.velocityX) * dt;
+            this.y += velocityToNormalizedDeltaY(this.velocityY) * dt;
             
             // Rotate
             this.angle += this.rotationSpeed * dt;
             
-            // Wrap around screen edges
-            this.x = wrapValue(this.x, canvas.width);
-            this.y = wrapValue(this.y, canvas.height);
+            // Wrap with margin so asteroid is fully off-screen before reappearing
+            this.x = wrapNormalized(this.x, wrapMarginX(this.radius));
+            this.y = wrapNormalized(this.y, wrapMarginY(this.radius));
         }
 
         /**
@@ -1203,12 +1956,12 @@
 
         /**
          * Get points awarded for destroying this asteroid
-         * Smaller astervoids = more points
+         * Smaller astervoids = more points (using normalized thresholds)
          * @returns {number} Point value
          */
         getPoints() {
-            if (this.radius >= 40) return CONFIG.POINTS_LARGE;
-            if (this.radius >= 25) return CONFIG.POINTS_MEDIUM;
+            if (this.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD) return CONFIG.POINTS_LARGE;
+            if (this.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD) return CONFIG.POINTS_MEDIUM;
             return CONFIG.POINTS_SMALL;
         }
     }
@@ -1216,28 +1969,83 @@
     /**
      * Bullet Class
      * Projectiles fired by the ship
+     * Position is normalized (0-1), velocity is in reference-dimension per second
      */
     class Bullet {
-        constructor(x, y, velocityX, velocityY) {
-            this.x = x;                    // X position
-            this.y = y;                    // Y position
-            this.velocityX = velocityX;    // Horizontal velocity
-            this.velocityY = velocityY;    // Vertical velocity
+        constructor(x, y, velocityX, velocityY, colorIndex = 0, ownerMemberId = null) {
+            this.x = x;                    // Normalized X position (0-1)
+            this.y = y;                    // Normalized Y position (0-1)
+            this.velocityX = velocityX;    // Velocity in reference-dimension per second
+            this.velocityY = velocityY;    // Velocity in reference-dimension per second
             this.lifetime = CONFIG.BULLET_LIFETIME;  // Frames until expiry
+            this.colorIndex = colorIndex;  // Owner's color index for multiplayer
+            this.ownerMemberId = ownerMemberId;  // Member ID who fired this bullet
+            this.syncObjectId = null;      // ObjectSync ID when in session
+            this.pendingHit = false;       // True when awaiting hit confirmation from asteroid owner
+        }
+
+        /**
+         * Serialize bullet state for ObjectSync
+         * @returns {object} Bullet data for syncing
+         */
+        toSyncData() {
+            return {
+                type: OBJECT_TYPES.BULLET,
+                x: this.x,
+                y: this.y,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                lifetime: this.lifetime,
+                colorIndex: this.colorIndex,
+                ownerMemberId: this.ownerMemberId,
+                pendingHit: this.pendingHit
+            };
+        }
+
+        /**
+         * Update bullet from sync data (for remote bullets)
+         * @param {object} data - Sync data from ObjectSync
+         */
+        fromSyncData(data) {
+            if (data.x !== undefined) this.x = data.x;
+            if (data.y !== undefined) this.y = data.y;
+            if (data.velocityX !== undefined) this.velocityX = data.velocityX;
+            if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.lifetime !== undefined) this.lifetime = data.lifetime;
+            if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
+            if (data.pendingHit !== undefined) this.pendingHit = data.pendingHit;
+        }
+
+        /**
+         * Create a bullet from sync data
+         * @param {object} data - Sync data from ObjectSync
+         * @returns {Bullet} New bullet instance
+         */
+        static fromSyncData(data) {
+            const bullet = new Bullet(
+                data.x, 
+                data.y, 
+                data.velocityX, 
+                data.velocityY,
+                data.colorIndex || 0,
+                data.ownerMemberId
+            );
+            bullet.lifetime = data.lifetime || CONFIG.BULLET_LIFETIME;
+            return bullet;
         }
 
         /**
          * Update bullet position and lifetime
-         * @param {object} canvas - Canvas element for wrapping
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
-        update(canvas, dt = 1) {
-            this.x += this.velocityX * dt;
-            this.y += this.velocityY * dt;
+        update(dt = 1) {
+            // Move bullet using aspect-ratio-aware conversion
+            this.x += velocityToNormalizedDeltaX(this.velocityX) * dt;
+            this.y += velocityToNormalizedDeltaY(this.velocityY) * dt;
             
-            // Wrap around screen edges
-            this.x = wrapValue(this.x, canvas.width);
-            this.y = wrapValue(this.y, canvas.height);
+            // Wrap with margin so bullet is fully off-screen before reappearing
+            this.x = wrapNormalized(this.x, wrapMarginX(CONFIG.BULLET_RADIUS));
+            this.y = wrapNormalized(this.y, wrapMarginY(CONFIG.BULLET_RADIUS));
             
             // Decrement lifetime (adjusted for delta time)
             this.lifetime -= dt;
@@ -1248,10 +2056,20 @@
          * @param {CanvasRenderingContext2D} ctx - Canvas context
          */
         draw(ctx) {
-            ctx.strokeStyle = CONFIG.STROKE_COLOR;
+            // Skip rendering if awaiting hit confirmation (optimistic hide)
+            if (this.pendingHit) return;
+            
+            const pixelX = fromNormalizedX(this.x);
+            const pixelY = fromNormalizedY(this.y);
+            const pixelRadius = fromNormalizedSize(CONFIG.BULLET_RADIUS);
+            
+            // Use owner's color in multiplayer
+            const bulletColor = SHIP_COLORS[this.colorIndex] || CONFIG.STROKE_COLOR;
+            
+            ctx.strokeStyle = bulletColor;
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(this.x, this.y, CONFIG.BULLET_RADIUS, 0, Math.PI * 2);
+            ctx.arc(pixelX, pixelY, pixelRadius, 0, Math.PI * 2);
             ctx.stroke();
         }
 
@@ -1280,18 +2098,53 @@
 
     // Game state object
     const game = {
-        ship: null,           // Player ship instance
+        ship: null,           // Player ship instance (local player's ship)
         astervoids: [],        // Active astervoids
         bullets: [],          // Active bullets
         score: 0,             // Current score
         lives: 0,             // Remaining lives
         wave: 0,              // Current wave number
-        state: 'start',       // 'start', 'playing', 'respawning', 'gameover', 'waveDelay', 'paused'
+        state: 'start',       // 'start', 'playing', 'respawning', 'gameover', 'waveDelay', 'paused', 'lobby'
         waveDelayTimer: 0,    // Countdown for wave transition
         speedMultiplier: 1,   // Current speed scaling
         previousState: null,  // State before pausing (to resume correctly)
-        lastFrameTime: 0      // Timestamp of last frame for delta time
+        lastFrameTime: 0,     // Timestamp of last frame for delta time
+        mode: 'solo',         // 'solo' or 'session'
+        sessionInfo: null,    // Current session details when in session mode
+        // Viewport for constrained aspect ratio in session mode
+        viewport: {
+            x: 0,             // X offset of gameplay area within canvas
+            y: 0,             // Y offset of gameplay area within canvas
+            width: 0,         // Width of gameplay area (set in resizeCanvas)
+            height: 0         // Height of gameplay area (set in resizeCanvas)
+        },
+        // Multiplayer state
+        multiplayer: {
+            myShipObjectId: null,     // ObjectSync ID for local player's ship
+            myColorIndex: 0,          // Local player's color index
+            remoteShips: new Map(),   // objectId -> Ship instance for remote players
+            gameStateObjectId: null,  // ObjectSync ID for shared game state
+            isAuthority: false        // True if this client is the Server (authority)
+        },
+        // Cosmetic astervoids for start screen (separate from game astervoids)
+        cosmeticAstervoids: []
     };
+    
+    // Helper to check if in session mode
+    function isSessionMode() {
+        return game.mode === 'session';
+    }
+    
+    // Helper to check if this client has authority (is Server)
+    function isAuthority() {
+        return isSessionMode() && game.multiplayer.isAuthority;
+    }
+
+    // Helper to check if game is over (lives depleted during active play)
+    function isGameOver() {
+        return game.state === 'gameover' ||
+            (game.lives <= 0 && (game.state === 'playing' || game.state === 'waveDelay'));
+    }
 
     // Pause menu element reference
     const pauseMenu = document.getElementById('pause-menu');
@@ -1319,20 +2172,553 @@
     };
 
     // ============================================
+    // SECTION 4B: MULTIPLAYER SYNC FUNCTIONS
+    // Functions for synchronizing game state in multiplayer sessions
+    // ============================================
+
+    /**
+     * Create a ship object in ObjectSync for the local player
+     * Called when entering a multiplayer game
+     * @param {number} colorIndex - The color index for this player's ship
+     */
+    async function createSyncedShip(colorIndex) {
+        if (!isSessionMode() || !SessionClient.isInSession()) return;
+        
+        const memberId = SessionClient.getCurrentMember()?.id;
+        if (!memberId) return;
+        
+        // Create ship at center with invulnerability
+        game.ship = new Ship(0.5, 0.5, colorIndex);
+        game.ship.memberId = memberId;
+        game.ship.invulnerable = CONFIG.INVULNERABILITY_TIME;
+        game.multiplayer.myColorIndex = colorIndex;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(game.ship.toSyncData(), 'Member');
+            game.ship.syncObjectId = objectInfo.id;
+            game.multiplayer.myShipObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create ship:', err);
+        }
+    }
+
+    /**
+     * Sync local ship state to ObjectSync
+     * Called every frame for the local player's ship
+     */
+    function syncLocalShip() {
+        if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
+        ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toSyncData());
+    }
+    
+    /**
+     * Delete the local player's ship from ObjectSync
+     * Called when leaving a session or returning to spectating
+     */
+    async function deleteSyncedShip() {
+        if (!game.multiplayer.myShipObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(game.multiplayer.myShipObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete ship:', err);
+        }
+        
+        game.multiplayer.myShipObjectId = null;
+        game.ship = null;
+    }
+
+    /**
+     * Update remote ships from ObjectSync data
+     * Called every frame to sync remote player ships
+     */
+    function updateRemoteShips() {
+        if (!isSessionMode()) return;
+        
+        const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        const currentRemoteIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of shipObjects) {
+            // Skip our own ship
+            if (obj.data.memberId === myMemberId) continue;
+            
+            currentRemoteIds.add(obj.id);
+            
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
+            
+            // Get or create remote ship instance
+            let remoteShip = game.multiplayer.remoteShips.get(obj.id);
+            if (!remoteShip) {
+                remoteShip = new Ship(obj.data.x, obj.data.y, obj.data.colorIndex || 0);
+                game.multiplayer.remoteShips.set(obj.id, remoteShip);
+            }
+            
+            // Apply interpolated state for smooth rendering (position/angle)
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                remoteShip.fromSyncData(interpolated);
+            } else {
+                remoteShip.fromSyncData(obj.data);
+            }
+            
+            // Apply invulnerable and thrusting directly from sync
+            if (obj.data.invulnerable !== undefined) remoteShip.invulnerable = obj.data.invulnerable;
+            if (obj.data.thrusting !== undefined) remoteShip.thrusting = obj.data.thrusting;
+        }
+        
+        // Remove ships that no longer exist
+        for (const [objectId, ship] of game.multiplayer.remoteShips) {
+            if (!currentRemoteIds.has(objectId)) {
+                game.multiplayer.remoteShips.delete(objectId);
+                RemoteObjects.remove(objectId);
+            }
+        }
+    }
+
+    /**
+     * Draw all remote ships
+     * Called during render phase
+     * @param {CanvasRenderingContext2D} ctx - Canvas context
+     */
+    function drawRemoteShips(ctx) {
+        for (const [objectId, ship] of game.multiplayer.remoteShips) {
+            ship.draw(ctx);
+        }
+    }
+
+    /**
+     * Get the next available color index for a new player
+     * @returns {number} Color index (0-3)
+     */
+    function getNextColorIndex() {
+        const usedColors = new Set();
+        const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+        
+        for (const obj of shipObjects) {
+            if (obj.data.colorIndex !== undefined) {
+                usedColors.add(obj.data.colorIndex);
+            }
+        }
+        
+        // Find first unused color
+        for (let i = 0; i < SHIP_COLORS.length; i++) {
+            if (!usedColors.has(i)) {
+                return i;
+            }
+        }
+        
+        // All colors used, wrap around
+        return shipObjects.length % SHIP_COLORS.length;
+    }
+
+    /**
+     * Reset multiplayer state
+     * Called when leaving a session
+     */
+    function resetMultiplayerState() {
+        game.multiplayer.myShipObjectId = null;
+        game.multiplayer.myColorIndex = 0;
+        game.multiplayer.remoteShips.clear();
+        game.multiplayer.gameStateObjectId = null;
+        game.multiplayer.isAuthority = false;
+        game.astervoids = [];
+        game.bullets = [];
+        RemoteObjects.clear();
+        ObjectSync.clear();
+        // Clear background sync interval if running (tab hidden during session)
+        if (typeof backgroundInterval !== 'undefined' && backgroundInterval) {
+            clearInterval(backgroundInterval);
+            backgroundInterval = null;
+        }
+    }
+
+    /**
+     * Create a synced asteroid object (authority only)
+     * @param {Asteroid} asteroid - The asteroid to sync
+     */
+    async function createSyncedAsteroid(asteroid) {
+        if (!isSessionMode()) return;
+        if (!isAuthority()) return;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session');
+            asteroid.syncObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create asteroid:', err);
+        }
+    }
+
+    /**
+     * Sync local astervoids to ObjectSync (authority only)
+     * Called every frame by the authority
+     */
+    function syncLocalAstervoids() {
+        if (!isSessionMode()) return;
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (!myMemberId) return;
+        
+        for (const asteroid of game.astervoids) {
+            if (asteroid.syncObjectId) {
+                const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
+                if (syncObj && syncObj.ownerMemberId === myMemberId) {
+                    ObjectSync.updateObject(asteroid.syncObjectId, asteroid.toSyncData());
+                }
+            }
+        }
+    }
+
+    /**
+     * Delete a synced asteroid (authority only)
+     * @param {Asteroid} asteroid - The asteroid to delete
+     */
+    async function deleteSyncedAsteroid(asteroid) {
+        if (!asteroid.syncObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(asteroid.syncObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete asteroid:', err);
+        }
+    }
+
+    /**
+     * Update local astervoids from ObjectSync (non-authority clients)
+     * Called every frame by non-owners to sync remote asteroid state
+     */
+    function updateAstervoidsFromSync() {
+        if (!isSessionMode()) return;
+        
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        const asteroidObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID);
+        const currentSyncIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of asteroidObjects) {
+            // Skip astervoids we own — we update those locally
+            if (obj.ownerMemberId === myMemberId) continue;
+            
+            currentSyncIds.add(obj.id);
+            
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
+            
+            // Find existing asteroid by sync ID
+            let asteroid = game.astervoids.find(a => a.syncObjectId === obj.id);
+            
+            if (!asteroid) {
+                // Create new asteroid from sync data
+                asteroid = Asteroid.fromSyncData(obj.data);
+                asteroid.syncObjectId = obj.id;
+                game.astervoids.push(asteroid);
+            }
+            
+            // Apply interpolated state for smooth movement
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                asteroid.fromSyncData(interpolated);
+            } else {
+                asteroid.fromSyncData(obj.data);
+            }
+        }
+        
+        // Remove remote astervoids that no longer exist in sync (skip locally-owned)
+        game.astervoids = game.astervoids.filter(a => {
+            if (!a.syncObjectId) return true; // Keep unsynced local astervoids
+            const syncObj = ObjectSync.getObject(a.syncObjectId);
+            if (syncObj && syncObj.ownerMemberId === myMemberId) return true; // Keep our own
+            if (!currentSyncIds.has(a.syncObjectId)) {
+                RemoteObjects.remove(a.syncObjectId);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Create a synced bullet object
+     * @param {Bullet} bullet - The bullet to sync
+     */
+    async function createSyncedBullet(bullet) {
+        if (!isSessionMode()) return;
+        
+        try {
+            const objectInfo = await ObjectSync.createObject(bullet.toSyncData(), 'Member');
+            bullet.syncObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create bullet:', err);
+        }
+    }
+
+    /**
+     * Sync local bullets to ObjectSync
+     * Called every frame for bullets owned by this player
+     */
+    function syncLocalBullets() {
+        if (!isSessionMode()) return;
+        
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        
+        for (const bullet of game.bullets) {
+            // Only sync our own bullets
+            if (bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData());
+            }
+        }
+    }
+
+    /**
+     * Delete a synced bullet
+     * @param {Bullet} bullet - The bullet to delete
+     */
+    async function deleteSyncedBullet(bullet) {
+        if (!bullet.syncObjectId) return;
+        
+        try {
+            await ObjectSync.deleteObject(bullet.syncObjectId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to delete bullet:', err);
+        }
+    }
+
+    /**
+     * Update bullets from ObjectSync (for remote players' bullets)
+     * Called every frame to sync bullets from other players
+     */
+    function updateBulletsFromSync() {
+        if (!isSessionMode()) return;
+        
+        const bulletObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.BULLET);
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        const currentSyncIds = new Set();
+        const renderTime = performance.now();
+        
+        for (const obj of bulletObjects) {
+            // Skip our own bullets (we already manage them locally)
+            if (obj.data.ownerMemberId === myMemberId) continue;
+            
+            currentSyncIds.add(obj.id);
+            
+            // Only feed new sync data to interpolation when version changes
+            if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
+                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
+            }
+            
+            // Find existing bullet by sync ID
+            let bullet = game.bullets.find(b => b.syncObjectId === obj.id);
+            
+            if (!bullet) {
+                // Create new bullet from sync data
+                bullet = Bullet.fromSyncData(obj.data);
+                bullet.syncObjectId = obj.id;
+                game.bullets.push(bullet);
+            }
+            
+            // Apply interpolated state for smooth movement
+            const interpolated = RemoteObjects.getInterpolated(obj.id, renderTime);
+            if (interpolated) {
+                bullet.fromSyncData(interpolated);
+            } else {
+                bullet.fromSyncData(obj.data);
+            }
+        }
+        
+        // Remove remote bullets that no longer exist in sync
+        game.bullets = game.bullets.filter(b => {
+            // Keep local bullets (they expire normally)
+            if (b.ownerMemberId === myMemberId) return true;
+            
+            // Remove remote bullets that are gone from sync
+            if (b.syncObjectId && !currentSyncIds.has(b.syncObjectId)) {
+                RemoteObjects.remove(b.syncObjectId);
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Create a GameState object in ObjectSync (authority only)
+     * Called when starting a multiplayer game
+     */
+    async function createSyncedGameState() {
+        if (!isSessionMode() || !isAuthority()) return;
+        
+        try {
+            const gameStateData = {
+                type: OBJECT_TYPES.GAME_STATE,
+                wave: game.wave,
+                state: game.state,
+                lives: game.lives,
+                score: game.score,
+                speedMultiplier: game.speedMultiplier,
+                waveDelayTimer: game.waveDelayTimer
+            };
+            
+            const objectInfo = await ObjectSync.createObject(gameStateData, 'Session');
+            game.multiplayer.gameStateObjectId = objectInfo.id;
+        } catch (err) {
+            console.error('[Multiplayer] Failed to create GameState:', err);
+        }
+    }
+
+    /**
+     * Sync GameState to ObjectSync (authority only)
+     * Called when game state changes
+     */
+    function syncGameState(immediate = false) {
+        if (!isSessionMode() || !isAuthority() || !game.multiplayer.gameStateObjectId) return;
+        
+        const gameStateData = {
+            type: OBJECT_TYPES.GAME_STATE,
+            wave: game.wave,
+            state: game.state,
+            lives: game.lives,
+            score: game.score,
+            speedMultiplier: game.speedMultiplier,
+            waveDelayTimer: game.waveDelayTimer
+        };
+        
+        ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
+    }
+
+    /**
+     * Update local game state from ObjectSync (non-authority clients)
+     * Called every frame by clients
+     */
+    function updateGameStateFromSync() {
+        if (!isSessionMode() || isAuthority()) return;
+        
+        const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+        if (!gameStateObj || !gameStateObj.data) return;
+        
+        const data = gameStateObj.data;
+        
+        // Update game state from sync (but NOT the state field if we're in lobby - that's spectating)
+        if (data.wave !== undefined) game.wave = data.wave;
+        const oldLives = game.lives;
+        if (data.lives !== undefined) game.lives = data.lives;
+        if (data.score !== undefined) game.score = data.score;
+        if (data.speedMultiplier !== undefined) game.speedMultiplier = data.speedMultiplier;
+        if (data.waveDelayTimer !== undefined) game.waveDelayTimer = data.waveDelayTimer;
+        
+        // Handle lives reaching zero — stop audio
+        if (game.lives <= 0 && oldLives > 0) {
+            AudioSystem.beat.stop();
+            AudioSystem.thrustSound.stop();
+        }
+        
+        // Handle state transitions from server - but only if we've actually entered the game
+        // (not if we're in lobby spectating)
+        if (game.state !== 'lobby' && data.state && data.state !== game.state) {
+            const oldState = game.state;
+            game.state = data.state;
+            
+            // Handle state change effects
+            if (data.state === 'playing' && oldState === 'waveDelay') {
+                AudioSystem.playNewWave();
+            }
+        }
+        
+        // Store the gameStateObjectId if we don't have it
+        if (!game.multiplayer.gameStateObjectId) {
+            game.multiplayer.gameStateObjectId = gameStateObj.id;
+        }
+    }
+
+    /**
+     * Handle server promotion - take over authority
+     * Called when this client is promoted to Server role
+     */
+    function handleServerPromotion() {
+        console.log('[Multiplayer] This client promoted to Server - taking over authority');
+        game.multiplayer.isAuthority = true;
+        
+        // Take over GameState syncing
+        const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+        if (gameStateObj) {
+            game.multiplayer.gameStateObjectId = gameStateObj.id;
+        }
+        
+        // Take over asteroid simulation - rebuild from ObjectSync (if game is active)
+        if (game.state === 'playing' || game.state === 'waveDelay') {
+            const asteroidObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID);
+            game.astervoids = [];
+            for (const obj of asteroidObjects) {
+                const asteroid = Asteroid.fromSyncData(obj.data);
+                asteroid.syncObjectId = obj.id;
+                game.astervoids.push(asteroid);
+            }
+            console.log('[Multiplayer] Server promotion: took over', asteroidObjects.length, 'astervoids');
+        }
+    }
+
+    // ============================================
     // SECTION 5: GAME FUNCTIONS
     // Core game logic and mechanics
     // ============================================
 
     /**
      * Initialize or reset the game to starting state
+     * Ship starts at center (normalized 0.5, 0.5)
      */
-    function init() {
-        game.ship = new Ship(canvas.width / 2, canvas.height / 2);
-        game.astervoids = [];
-        game.bullets = [];
-        game.score = 0;
-        game.lives = CONFIG.STARTING_LIVES;
-        game.wave = 0;
+    async function init() {
+        // Determine if we're the authority (Server role in session mode)
+        if (isSessionMode()) {
+            const member = SessionClient.getCurrentMember();
+            game.multiplayer.isAuthority = member?.role === 'Server';
+            
+            // Get a color for this player
+            const colorIndex = getNextColorIndex();
+            
+            // Create synced ship for multiplayer
+            await createSyncedShip(colorIndex);
+            
+            // Fallback: if ship creation failed, create local ship
+            if (!game.ship) {
+                console.warn('[Game] Ship creation failed, creating local fallback');
+                game.ship = new Ship(0.5, 0.5, colorIndex);
+                game.ship.memberId = member?.id;
+                game.ship.invulnerable = CONFIG.INVULNERABILITY_TIME;
+                game.multiplayer.myColorIndex = colorIndex;
+            }
+            
+            // Use shared lives pool for multiplayer
+            game.lives = CONFIG.MULTIPLAYER_LIVES;
+            
+            if (isAuthority()) {
+                // Authority: start fresh game
+                game.astervoids = [];
+                game.bullets = [];
+                game.score = 0;
+                game.wave = 0;
+            } else {
+                // Non-authority: sync existing state from server
+                game.astervoids = [];
+                game.bullets = [];
+                updateAstervoidsFromSync();
+                updateBulletsFromSync();
+                updateGameStateFromSync();
+            }
+        } else {
+            // Solo mode - create local ship
+            game.ship = new Ship(0.5, 0.5, 0);
+            game.lives = CONFIG.STARTING_LIVES;
+            game.astervoids = [];
+            game.bullets = [];
+            game.score = 0;
+            game.wave = 0;
+        }
+        
         game.state = 'playing';
         game.speedMultiplier = 1;
         
@@ -1347,8 +2733,15 @@
         AudioSystem.beat.stop();
         AudioSystem.beat.start();
         
-        // Start first wave
-        spawnWave();
+        // Start first wave (only authority spawns astervoids in multiplayer)
+        if (!isSessionMode() || isAuthority()) {
+            await spawnWave();
+            
+            // Create synced GameState (authority only)
+            if (isSessionMode()) {
+                await createSyncedGameState();
+            }
+        }
         
         updateHUD();
     }
@@ -1366,7 +2759,7 @@
      * Spawn a new wave of astervoids
      * Astervoids spawn away from the ship
      */
-    function spawnWave() {
+    async function spawnWave() {
         game.wave++;
         
         // Calculate number of astervoids for this wave
@@ -1381,7 +2774,7 @@
         
         // Spawn astervoids at random positions away from ship
         for (let i = 0; i < asteroidCount; i++) {
-            spawnAsteroidAwayFromShip();
+            await spawnAsteroidAwayFromShip();
         }
         
         updateHUD();
@@ -1389,15 +2782,21 @@
 
     /**
      * Spawn a single asteroid at a safe distance from the ship
+     * Uses normalized coordinates (0-1 range)
+     * @returns {Asteroid} The spawned asteroid
      */
-    function spawnAsteroidAwayFromShip() {
+    async function spawnAsteroidAwayFromShip() {
         let x, y;
         
-        // Keep trying until we find a safe spawn point
+        // Get reference position (local ship or center if no ship)
+        const refX = game.ship ? game.ship.x : 0.5;
+        const refY = game.ship ? game.ship.y : 0.5;
+        
+        // Keep trying until we find a safe spawn point (all in normalized coords)
         do {
-            x = Math.random() * canvas.width;
-            y = Math.random() * canvas.height;
-        } while (distance(x, y, game.ship.x, game.ship.y) < CONFIG.SPAWN_MIN_DISTANCE);
+            x = Math.random();  // 0-1
+            y = Math.random();  // 0-1
+        } while (normalizedDistance(x, y, refX, refY) < CONFIG.SPAWN_MIN_DISTANCE);
         
         // Random velocity direction
         const angle = Math.random() * Math.PI * 2;
@@ -1405,25 +2804,37 @@
                        Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE) * 
                       game.speedMultiplier;
         
-        game.astervoids.push(new Asteroid(
+        const asteroid = new Asteroid(
             x, y,
             CONFIG.INITIAL_ASTEROID_RADIUS,
             Math.cos(angle) * speed,
             Math.sin(angle) * speed
-        ));
+        );
+        
+        game.astervoids.push(asteroid);
+        
+        // Create synced asteroid in multiplayer (authority only)
+        if (isSessionMode() && isAuthority()) {
+            await createSyncedAsteroid(asteroid);
+        }
+        
+        return asteroid;
     }
 
     /**
      * Split an asteroid into two smaller pieces
      * Implements conservation of area (mass) and energy
+     * All values are in normalized coordinates
+     * Called by the asteroid owner to process a hit.
      * @param {Asteroid} asteroid - The asteroid to split
      */
     function splitAsteroid(asteroid) {
         // Add points
         game.score += asteroid.getPoints();
         
-        // Play explosion sound based on asteroid size
-        const size = asteroid.radius >= 40 ? 'large' : asteroid.radius >= 25 ? 'medium' : 'small';
+        // Play explosion sound based on asteroid size (using normalized thresholds)
+        const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
+                     asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
         AudioSystem.playExplosion(size);
         
         // Don't split if too small
@@ -1458,38 +2869,47 @@
         // Calculate total mass of surviving children for energy distribution
         const totalChildMass = children.reduce((sum, r) => sum + r ** 2, 0);
         
-        // Spawn child astervoids with energy conservation
-        children.forEach((childRadius, index) => {
+        // Spawn all child astervoids synchronously
+        for (let index = 0; index < children.length; index++) {
+            const childRadius = children[index];
+            
             // Perpendicular direction to original velocity (spreads children apart)
             const spreadAngle = Math.atan2(asteroid.velocityY, asteroid.velocityX) + 
                                (index === 0 ? Math.PI / 2 : -Math.PI / 2);
             
             // Energy conservation: each piece gets energy proportional to its mass
-            // E_child = E_parent * (r_child² / totalChildMass)
-            // Since E = m * v² and m ∝ r², we have: r² * v² = E_child
-            // Therefore: v = sqrt(E_child / r²)
             const childMass = childRadius ** 2;
             const childEnergy = parentEnergy * (childMass / totalChildMass);
             const childSpeed = Math.sqrt(childEnergy / childMass);
             
             const angle = spreadAngle + randomRange(-0.5, 0.5);
             
-            game.astervoids.push(new Asteroid(
+            const childAsteroid = new Asteroid(
                 asteroid.x,
                 asteroid.y,
                 childRadius,
                 Math.cos(angle) * childSpeed,
                 Math.sin(angle) * childSpeed
-            ));
-        });
+            );
+            
+            game.astervoids.push(childAsteroid);
+            
+            // Fire-and-forget sync creation for children (owner creates, so owner owns)
+            if (isSessionMode()) {
+                createSyncedAsteroid(childAsteroid);
+            }
+        }
         
         updateHUD();
     }
 
     /**
-     * Toggle pause state
+     * Toggle pause state (disabled in session mode)
      */
     function togglePause() {
+        // Pause is disabled in session mode
+        if (isSessionMode()) return;
+
         if (game.state === 'paused') {
             // Resume game
             game.state = game.previousState || 'playing';
@@ -1513,41 +2933,48 @@
 
     /**
      * Handle player input each frame
+     * @param {number} dt - Delta time multiplier (1.0 = 60fps)
      */
-    function handleInput() {
+    function handleInput(dt = 1) {
         if (game.state === 'start') {
-            // Check for start
-            if (keys['Enter']) {
-                startGame();
-            }
+            // Session picker handles start - don't process Enter here
             return;
         }
         
-        if (game.state === 'gameover') {
-            // Check for restart
+        if (isGameOver()) {
+            // Check for restart/return to menu
             if (keys['Enter']) {
-                init();
+                if (isSessionMode()) {
+                    // Return to start screen for session mode
+                    returnToStartScreen();
+                } else {
+                    // Restart for solo mode
+                    init();
+                }
             }
             return;
         }
 
         if (game.state === 'paused') {
-            // Allow restart from pause menu
+            // Allow restart from pause menu (solo only, session can't pause)
             if (keys['Enter']) {
                 pauseMenu.classList.remove('visible');
-                init();
+                returnToStartScreen();
             }
             return;
         }
         
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
         
-        // Rotation
+        // Need a ship to control
+        if (!game.ship) return;
+        
+        // Rotation (adjusted for delta time)
         if (input.left()) {
-            game.ship.angle -= CONFIG.SHIP_TURN_SPEED;
+            game.ship.angle -= CONFIG.SHIP_TURN_SPEED * dt;
         }
         if (input.right()) {
-            game.ship.angle += CONFIG.SHIP_TURN_SPEED;
+            game.ship.angle += CONFIG.SHIP_TURN_SPEED * dt;
         }
         
         // Thrust
@@ -1566,87 +2993,156 @@
             const bullet = game.ship.shoot();
             if (bullet) {
                 game.bullets.push(bullet);
+                
+                // Create synced bullet in multiplayer
+                if (isSessionMode()) {
+                    createSyncedBullet(bullet);
+                }
             }
         }
     }
 
     /**
      * Check all collisions between game entities
+     * All collision checks work in pixel coordinates
+     * Each player checks their OWN bullets and ship against all astervoids.
+     * Collision effects on astervoids are processed by the asteroid's owner.
      */
     function checkCollisions() {
-        // Bullet vs Asteroid collisions
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        
+        // Bullet vs Asteroid collisions — only check local player's bullets
         for (let i = game.bullets.length - 1; i >= 0; i--) {
             const bullet = game.bullets[i];
+            
+            // Only check our own bullets; skip bullets with pending hit
+            if (isSessionMode() && (bullet.ownerMemberId !== myMemberId || bullet.pendingHit)) {
+                continue;
+            }
             
             for (let j = game.astervoids.length - 1; j >= 0; j--) {
                 const asteroid = game.astervoids[j];
                 
-                // Circle-to-polygon collision for bullet vs asteroid
                 const bulletCircle = {
-                    x: bullet.x,
-                    y: bullet.y,
-                    radius: CONFIG.BULLET_RADIUS
+                    x: fromNormalizedX(bullet.x),
+                    y: fromNormalizedY(bullet.y),
+                    radius: fromNormalizedSize(CONFIG.BULLET_RADIUS)
                 };
                 
                 if (circlePolygonCollision(bulletCircle, asteroid.getWorldVertices())) {
-                    // Remove bullet
-                    game.bullets.splice(i, 1);
-                    
-                    // Remove asteroid and potentially spawn children
-                    game.astervoids.splice(j, 1);
-                    splitAsteroid(asteroid);
+                    if (isSessionMode()) {
+                        // Check if we own this asteroid
+                        const asteroidSyncObj = asteroid.syncObjectId ? ObjectSync.getObject(asteroid.syncObjectId) : null;
+                        const asteroidOwner = asteroidSyncObj?.ownerMemberId;
+                        
+                        if (asteroidOwner === myMemberId) {
+                            // We own both bullet and asteroid — process locally
+                            const removedBullet = game.bullets.splice(i, 1)[0];
+                            if (removedBullet.syncObjectId) {
+                                deleteSyncedBullet(removedBullet);
+                            }
+                            game.astervoids.splice(j, 1);
+                            if (asteroid.syncObjectId) {
+                                deleteSyncedAsteroid(asteroid);
+                            }
+                            splitAsteroid(asteroid);
+                            syncGameState();
+                        } else {
+                            // Asteroid owned by someone else — report collision, hide bullet
+                            bullet.pendingHit = true;
+                            if (bullet.syncObjectId) {
+                                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData(), true);
+                            }
+                            if (asteroid.syncObjectId && bullet.syncObjectId) {
+                                SessionClient.reportBulletHit(asteroid.syncObjectId, bullet.syncObjectId);
+                            }
+                        }
+                    } else {
+                        // Solo mode — process locally
+                        const removedBullet = game.bullets.splice(i, 1)[0];
+                        game.astervoids.splice(j, 1);
+                        splitAsteroid(asteroid);
+                    }
                     
                     break;  // Bullet can only hit one asteroid
                 }
             }
         }
         
-        // Ship vs Asteroid collisions (only if not invulnerable)
-        if (game.ship.invulnerable <= 0 && game.state === 'playing') {
-            const shipVertices = game.ship.getVertices();
-            
-            for (const asteroid of game.astervoids) {
-                const asteroidVerts = asteroid.getWorldVertices();
-                
-                // Check if any ship vertex is inside asteroid
-                for (const vertex of shipVertices) {
-                    if (pointInPolygon(vertex, asteroidVerts)) {
-                        handleShipHit();
-                        return;
-                    }
-                }
-                
-                // Check if any asteroid vertex is inside ship triangle
-                for (const vertex of asteroidVerts) {
-                    if (pointInPolygon(vertex, shipVertices)) {
-                        handleShipHit();
-                        return;
-                    }
-                }
+        // Ship vs Asteroid collisions — only check local player's ship
+        if (game.ship && game.ship.invulnerable <= 0 && game.state === 'playing') {
+            if (checkShipAsteroidCollision(game.ship)) {
+                handleShipHit(game.ship);
             }
         }
     }
 
     /**
-     * Handle ship being hit by asteroid
+     * Check collision for a specific ship against all astervoids
+     * @param {Ship} ship - The ship to check
+     * @returns {boolean} True if collision detected
      */
-    function handleShipHit() {
-        game.lives--;
-        updateHUD();
+    function checkShipAsteroidCollision(ship) {
+        const shipVertices = ship.getVertices();
         
-        // Play ship explosion sound
+        for (const asteroid of game.astervoids) {
+            const asteroidVerts = asteroid.getWorldVertices();
+            
+            // Check if any ship vertex is inside asteroid
+            for (const vertex of shipVertices) {
+                if (pointInPolygon(vertex, asteroidVerts)) {
+                    return true;
+                }
+            }
+            
+            // Check if any asteroid vertex is inside ship triangle
+            for (const vertex of asteroidVerts) {
+                if (pointInPolygon(vertex, shipVertices)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Handle ship being hit by asteroid (local ship only)
+     * Ship owner handles reset locally; notifies GameState owner for lives in multiplayer.
+     * @param {Ship} ship - The ship that was hit
+     */
+    function handleShipHit(ship) {
         AudioSystem.playShipExplosion();
-        
-        // Stop thrust sound if playing
         AudioSystem.thrustSound.stop();
         
-        if (game.lives <= 0) {
-            game.state = 'gameover';
-            // Stop background beat on game over
-            AudioSystem.beat.stop();
+        if (isSessionMode()) {
+            // Reset ship locally
+            ship.reset();
+            if (game.multiplayer.myShipObjectId) {
+                ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toSyncData(), true);
+            }
+            
+            if (isAuthority()) {
+                // Authority is GameState owner — decrement lives directly
+                game.lives--;
+                updateHUD();
+                if (game.lives <= 0) {
+                    AudioSystem.beat.stop();
+                }
+                syncGameState(true);
+            } else {
+                // Notify GameState owner to decrement lives
+                SessionClient.reportShipHit();
+            }
         } else {
-            // Respawn ship at center with invulnerability
-            game.ship.reset(canvas);
+            // Solo mode — handle everything locally
+            game.lives--;
+            updateHUD();
+            if (game.lives <= 0) {
+                game.state = 'gameover';
+                AudioSystem.beat.stop();
+            } else {
+                ship.reset();
+            }
         }
     }
 
@@ -1657,19 +3153,38 @@
         scoreDisplay.textContent = `Score: ${game.score}`;
         waveDisplay.textContent = `Wave: ${game.wave}`;
         livesDisplay.textContent = `Lives: ${game.lives}`;
+        
+        // Show player count in multiplayer
+        if (isSessionMode()) {
+            const playerCount = 1 + game.multiplayer.remoteShips.size;
+            livesDisplay.textContent = `Lives: ${game.lives} | Players: ${playerCount}`;
+        }
+        
+        // Update session indicator
+        const sessionIndicator = document.getElementById('session-indicator');
+        if (sessionIndicator) {
+            if (isSessionMode() && game.sessionInfo) {
+                sessionIndicator.textContent = `🎮 ${game.sessionInfo.name}`;
+                sessionIndicator.style.display = '';
+            } else {
+                sessionIndicator.textContent = '';
+                sessionIndicator.style.display = 'none';
+            }
+        }
     }
 
     /**
      * Draw centered text message on screen
+     * Uses gameplay width for centering (works with viewport transform)
      * @param {string} text - Message to display
-     * @param {number} y - Y position
+     * @param {number} y - Y position (in gameplay coordinates)
      * @param {number} size - Font size
      */
     function drawCenteredText(text, y, size = 32) {
         ctx.fillStyle = CONFIG.STROKE_COLOR;
         ctx.font = `${size}px 'Courier New', monospace`;
         ctx.textAlign = 'center';
-        ctx.fillText(text, canvas.width / 2, y);
+        ctx.fillText(text, getGameWidth() / 2, y);
     }
 
     // ============================================
@@ -1694,77 +3209,200 @@
         // --- UPDATE PHASE ---
         
         // Handle player input
-        handleInput();
+        handleInput(dt);
         
-        // Update astervoids during start screen for visual effect
-        if (game.state === 'start') {
-            game.astervoids.forEach(asteroid => asteroid.update(canvas, dt));
+        // Update cosmetic astervoids only on start screen (not in session)
+        if (game.state === 'start' && !isSessionMode()) {
+            game.cosmeticAstervoids.forEach(asteroid => asteroid.update(dt));
         }
         
         // Update game state based on current state
         if (game.state === 'playing' || game.state === 'waveDelay') {
-            // Update ship
-            game.ship.update(canvas, dt);
-            
-            // Update astervoids
-            game.astervoids.forEach(asteroid => asteroid.update(canvas, dt));
-            
-            // Update bullets and remove expired ones
-            game.bullets = game.bullets.filter(bullet => {
-                bullet.update(canvas, dt);
-                return !bullet.isExpired();
-            });
-            
-            // Check collisions
-            checkCollisions();
-            
-            // Check for wave completion
-            if (game.astervoids.length === 0 && game.state === 'playing') {
-                game.state = 'waveDelay';
-                game.waveDelayTimer = CONFIG.WAVE_DELAY;
-            }
-            
-            // Handle wave delay countdown (adjusted for delta time)
-            if (game.state === 'waveDelay') {
-                game.waveDelayTimer -= dt;
-                if (game.waveDelayTimer <= 0) {
-                    spawnWave();
-                    game.state = 'playing';
-                    AudioSystem.playNewWave();
+            // --- GAMEPLAY (only when lives > 0) ---
+            if (game.lives > 0) {
+                // Update local ship
+                if (game.ship) {
+                    game.ship.update(dt);
+                    
+                    // Sync local ship to ObjectSync in multiplayer
+                    if (isSessionMode()) {
+                        syncLocalShip();
+                    }
                 }
+                
+                // Update remote ships from ObjectSync
+                if (isSessionMode()) {
+                    updateRemoteShips();
+                }
+                
+                // Update astervoids: owner updates locally, non-owners sync from server
+                if (isSessionMode()) {
+                    const myMemberId = SessionClient.getCurrentMember()?.id;
+                    // Update locally-owned astervoids
+                    game.astervoids.forEach(asteroid => {
+                        if (!asteroid.syncObjectId) {
+                            asteroid.update(dt); // Unsynced local asteroid
+                        } else {
+                            const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
+                            if (syncObj && syncObj.ownerMemberId === myMemberId) {
+                                asteroid.update(dt); // We own this asteroid
+                            }
+                        }
+                    });
+                    // Sync owned astervoids to server
+                    syncLocalAstervoids();
+                    // Update non-owned astervoids from ObjectSync
+                    updateAstervoidsFromSync();
+                } else {
+                    // Solo mode: update all astervoids locally
+                    game.astervoids.forEach(asteroid => asteroid.update(dt));
+                }
+                
+                // Update bullets and remove expired ones
+                const myMemberId = SessionClient.getCurrentMember()?.id;
+                game.bullets = game.bullets.filter(bullet => {
+                    bullet.update(dt);
+                    
+                    // Check if expired
+                    if (bullet.isExpired()) {
+                        // Delete synced bullet if it's ours
+                        if (isSessionMode() && bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                            deleteSyncedBullet(bullet);
+                        }
+                        return false;
+                    }
+                    return true;
+                });
+                
+                // Sync local bullets to ObjectSync
+                if (isSessionMode()) {
+                    syncLocalBullets();
+                    updateBulletsFromSync();
+                }
+                
+                // Check collisions
+                checkCollisions();
+                
+                // Check for wave completion (only authority checks in multiplayer)
+                if (game.astervoids.length === 0 && game.state === 'playing') {
+                    if (!isSessionMode() || isAuthority()) {
+                        game.state = 'waveDelay';
+                        game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                        if (isSessionMode()) syncGameState();
+                    }
+                }
+                
+                // Handle wave delay countdown (adjusted for delta time)
+                if (game.state === 'waveDelay') {
+                    game.waveDelayTimer -= dt;
+                    if (game.waveDelayTimer <= 0) {
+                        // Only authority spawns waves in multiplayer
+                        if (!isSessionMode() || isAuthority()) {
+                            spawnWave();
+                            if (isSessionMode()) syncGameState();
+                        }
+                        game.state = 'playing';
+                        AudioSystem.playNewWave();
+                    }
+                }
+                
+                // Update background beat tempo based on asteroid count
+                const maxAstervoids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
+                const totalAsteroidArea = game.astervoids.reduce((sum, a) => sum + a.radius * a.radius, 0);
+                const maxArea = maxAstervoids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
+                AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
             }
             
-            // Update background beat tempo based on asteroid count
-            const maxAstervoids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
-            const totalAsteroidArea = game.astervoids.reduce((sum, a) => sum + a.radius * a.radius, 0);
-            const maxArea = maxAstervoids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
-            AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
+            // --- SYNC (always runs while state is playing/waveDelay) ---
+            // Game state sync continues even when lives <= 0, ensuring all
+            // clients receive the final lives count and transition together.
+            if (isSessionMode() && isAuthority()) {
+                syncGameState();
+            }
+            if (isSessionMode() && !isAuthority()) {
+                updateGameStateFromSync();
+            }
+            
+            updateHUD();
+        }
+        
+        // Update remote objects in lobby (for live preview)
+        if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
+            updateRemoteShips();
+            updateAstervoidsFromSync();
+            updateBulletsFromSync();
+            updateGameStateFromSync();
+            updateHUD();
         }
         
         // --- RENDER PHASE ---
         
-        // Clear canvas
+        // Clear entire canvas with black
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         
-        // Draw game entities
+        // In session mode with constrained viewport, apply transform and clipping
+        const hasViewportOffset = game.viewport.x > 0 || game.viewport.y > 0;
+        if (hasViewportOffset) {
+            ctx.save();
+            
+            // Clip to viewport area
+            ctx.beginPath();
+            ctx.rect(game.viewport.x, game.viewport.y, game.viewport.width, game.viewport.height);
+            ctx.clip();
+            
+            // Translate so gameplay coordinates (0,0) start at viewport origin
+            ctx.translate(game.viewport.x, game.viewport.y);
+        }
+        
+        // Draw cosmetic astervoids only on start screen when not in session
+        if (game.state === 'start' && !isSessionMode()) {
+            game.cosmeticAstervoids.forEach(asteroid => asteroid.draw(ctx));
+        }
+        
+        // Draw game entities (now in gameplay coordinates)
         game.astervoids.forEach(asteroid => asteroid.draw(ctx));
         game.bullets.forEach(bullet => bullet.draw(ctx));
+        
+        // Draw ships
         if (game.state !== 'start') {
-            game.ship.draw(ctx);
-        }
-        
-        // Draw state-specific overlays
-        if (game.state === 'waveDelay') {
-            drawCenteredText(`WAVE ${game.wave + 1}`, canvas.height / 2, 48);
-        }
-        
-        if (game.state === 'gameover') {
-            drawCenteredText('GAME OVER', canvas.height / 2 - 40, 48);
-            drawCenteredText(`Final Score: ${game.score}`, canvas.height / 2 + 10, 24);
-            if (!touchControlsEnabled) {
-                drawCenteredText('Press ENTER to restart', canvas.height / 2 + 50, 20);
+            // Draw remote ships in multiplayer (including during lobby live preview)
+            if (isSessionMode()) {
+                drawRemoteShips(ctx);
             }
+            
+            // Draw local ship (only when playing, not in lobby)
+            if (game.state !== 'lobby' && game.ship) {
+                game.ship.draw(ctx);
+            }
+        }
+        
+        // Draw state-specific overlays (in gameplay coordinates)
+        if (game.state === 'waveDelay') {
+            drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 48);
+        }
+        
+        if (isGameOver()) {
+            drawCenteredText('GAME OVER', getGameHeight() / 2 - 40, 48);
+            drawCenteredText(`Final Score: ${game.score}`, getGameHeight() / 2 + 10, 24);
+            if (!touchControlsEnabled) {
+                // Show different message based on mode
+                if (isSessionMode()) {
+                    drawCenteredText('Press ENTER for menu', getGameHeight() / 2 + 50, 20);
+                } else {
+                    drawCenteredText('Press ENTER to restart', getGameHeight() / 2 + 50, 20);
+                }
+            }
+        }
+        
+        // Restore context if we applied viewport transform
+        if (hasViewportOffset) {
+            ctx.restore();
+            
+            // Draw white border around viewport (outside the clipping region)
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(game.viewport.x, game.viewport.y, game.viewport.width, game.viewport.height);
         }
         
         // Request next frame
@@ -1789,8 +3427,25 @@
             e.preventDefault();
         }
 
-        // Toggle pause with Escape or P (only handle once per press)
-        if ((e.code === 'Escape' || e.code === 'KeyP') && game.state !== 'gameover') {
+        // Escape key handling
+        if (e.code === 'Escape') {
+            e.preventDefault();
+            
+            // In session mode (lobby or playing): exit session and return to menu
+            if (isSessionMode() || sessionPicker.currentSessionId) {
+                returnToStartScreen();
+                return;
+            }
+            
+            // In solo mode: toggle pause (if not game over)
+            if (!isGameOver() && game.state !== 'start') {
+                togglePause();
+            }
+            return;
+        }
+
+        // Toggle pause with P key (solo mode only, not game over)
+        if (e.code === 'KeyP' && !isGameOver() && !isSessionMode()) {
             togglePause();
             e.preventDefault();
         }
@@ -1878,7 +3533,7 @@
     if (touchButtons.pause) {
         touchButtons.pause.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            if (game.state !== 'gameover') {
+            if (!isGameOver()) {
                 togglePause();
             }
         }, { passive: false });
@@ -1888,10 +3543,15 @@
     if (touchButtons.restart) {
         touchButtons.restart.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            if (game.state === 'gameover' || game.state === 'paused') {
+            if (isGameOver() || game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
                 touchButtons.restart.classList.remove('visible');
-                init();
+                // Return to menu for session mode, restart for solo
+                if (isSessionMode()) {
+                    returnToStartScreen();
+                } else {
+                    init();
+                }
             }
         }, { passive: false });
     }
@@ -1903,25 +3563,36 @@
             e.preventDefault();
             if (game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
-                init();
+                returnToStartScreen();
             }
         }, { passive: false });
     }
 
-    // Fullscreen button handler
+    // Fullscreen toggle helper
+    function toggleFullscreen() {
+        const container = document.getElementById('game-container');
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else if (container.requestFullscreen) {
+            container.requestFullscreen();
+        } else if (container.webkitRequestFullscreen) {
+            container.webkitRequestFullscreen(); // Safari
+        }
+    }
+
+    // Touch fullscreen button (in-game)
     const fullscreenBtn = document.getElementById('touch-fullscreen');
     if (fullscreenBtn) {
         fullscreenBtn.addEventListener('touchstart', (e) => {
             e.preventDefault();
-            const container = document.getElementById('game-container');
-            if (document.fullscreenElement) {
-                document.exitFullscreen();
-            } else if (container.requestFullscreen) {
-                container.requestFullscreen();
-            } else if (container.webkitRequestFullscreen) {
-                container.webkitRequestFullscreen(); // Safari
-            }
+            toggleFullscreen();
         }, { passive: false });
+    }
+
+    // Main menu fullscreen button
+    const menuFullscreenBtn = document.getElementById('btn-fullscreen');
+    if (menuFullscreenBtn) {
+        menuFullscreenBtn.addEventListener('click', () => toggleFullscreen());
     }
 
     // Track fullscreen state
@@ -1939,11 +3610,8 @@
     // Also enable touch controls on first touch anywhere on game
     document.getElementById('game-container').addEventListener('touchstart', (e) => {
         enableTouchControls();
-        // Start game on touch if on start screen
-        if (game.state === 'start') {
-            startGame();
-        }
-        if (e.target.classList.contains('touch-btn')) return;
+        // Don't auto-start on touch - let session picker handle it
+        if (e.target.classList.contains('touch-btn') || e.target.closest('#session-picker')) return;
         e.preventDefault();
     }, { passive: false });
 
@@ -1980,16 +3648,17 @@
     resizeCanvas();
 
     // Initialize game objects for start screen display (but don't start playing)
-    game.ship = new Ship(canvas.width / 2, canvas.height / 2);
+    // Use normalized coordinates (0.5, 0.5 = center)
+    game.ship = null;  // No ship on start screen
     game.astervoids = [];
     game.bullets = [];
-    // Spawn some astervoids for visual effect on start screen
+    // Spawn some cosmetic astervoids for visual effect on start screen (normalized coords)
     for (let i = 0; i < CONFIG.START_SCREEN_ASTERVOIDS; i++) {
         const angle = Math.random() * Math.PI * 2;
         const speed = CONFIG.ASTEROID_BASE_SPEED + Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE;
-        game.astervoids.push(new Asteroid(
-            Math.random() * canvas.width,
-            Math.random() * canvas.height,
+        game.cosmeticAstervoids.push(new Asteroid(
+            Math.random(),  // 0-1 normalized X
+            Math.random(),  // 0-1 normalized Y
             CONFIG.INITIAL_ASTEROID_RADIUS,
             Math.cos(angle) * speed,
             Math.sin(angle) * speed
@@ -2000,7 +3669,11 @@
     function startMobileUILoop() {
         requestAnimationFrame(function mobileLoop() {
             if (touchButtons.restart) {
-                touchButtons.restart.classList.toggle('visible', game.state === 'gameover');
+                touchButtons.restart.classList.toggle('visible', isGameOver());
+            }
+            // Hide pause button in session mode
+            if (touchButtons.pause) {
+                touchButtons.pause.style.display = isSessionMode() ? 'none' : '';
             }
             requestAnimationFrame(mobileLoop);
         });
@@ -2013,6 +3686,707 @@
         startMobileUILoop();
         enableTouchControls = originalEnableTouchControls; // Only start loop once
     };
+
+    // ============================================
+    // SECTION 10: SESSION PICKER
+    // Multiplayer session management UI
+    // ============================================
+
+    const sessionPicker = {
+        statusEl: document.getElementById('picker-status'),
+        listEl: document.getElementById('session-list'),
+        btnLeaveCreate: document.getElementById('btn-leave-create'),
+        btnStartEnter: document.getElementById('btn-start-enter'),
+        btnSolo: document.getElementById('btn-solo'),
+        sessions: [],
+        selectedSessionId: null,    // Highlighted session (keyboard nav)
+        currentSessionId: null,     // Session player is actually IN
+        isServer: false,            // Whether current player is the server/host
+        gameStarted: false,         // Whether the game has been started in current session
+        maxSessions: 6,
+        canCreate: false,
+        connected: false
+    };
+
+    // Update status message
+    function setPickerStatus(message, type = '') {
+        sessionPicker.statusEl.textContent = message;
+        sessionPicker.statusEl.className = 'picker-status' + (type ? ' ' + type : '');
+    }
+
+    // Render session list
+    function renderSessionList() {
+        const { listEl, sessions, currentSessionId } = sessionPicker;
+        listEl.innerHTML = '';
+
+        if (sessions.length === 0) {
+            return; // CSS :empty will show "No sessions available"
+        }
+
+        sessions.forEach(session => {
+            const isFull = session.memberCount >= session.maxMembers;
+            const isCurrent = session.id === currentSessionId;
+            const isClickable = !isFull && !isCurrent;
+            
+            const item = document.createElement('div');
+            item.className = 'session-item' + 
+                (isCurrent ? ' current' : '') +
+                (isFull && !isCurrent ? ' disabled' : '') +
+                (isCurrent ? ' disabled' : ''); // Can't click own session
+            item.dataset.sessionId = session.id;
+            item.innerHTML = `
+                <span class="session-name">${session.name}</span>
+                <span class="session-players">${session.memberCount}/${session.maxMembers}${isFull && !isCurrent ? ' FULL' : ''}</span>
+            `;
+            if (isClickable) {
+                item.addEventListener('click', () => handleSelectSession(session.id));
+            }
+            listEl.appendChild(item);
+        });
+    }
+
+    // Select a session (keyboard navigation - no longer auto-joins)
+    function selectSession(sessionId) {
+        sessionPicker.selectedSessionId = sessionId;
+        renderSessionList();
+        updatePickerButtons();
+    }
+
+    // Update button states
+    function updatePickerButtons() {
+        const { btnLeaveCreate, btnStartEnter, currentSessionId, isServer, gameStarted, canCreate, connected } = sessionPicker;
+        
+        // Leave/Create button - context aware
+        if (currentSessionId) {
+            // In a session - show Leave
+            btnLeaveCreate.textContent = 'Leave';
+            btnLeaveCreate.disabled = false;
+            btnLeaveCreate.className = 'picker-btn action leave';
+            // Clone-replace to clear sticky :active/:hover pseudo-class from touch
+            const fresh = btnLeaveCreate.cloneNode(true);
+            btnLeaveCreate.replaceWith(fresh);
+            sessionPicker.btnLeaveCreate = fresh;
+            fresh.addEventListener('click', handleLeaveCreateButton);
+        } else {
+            // Not in a session - show Create
+            btnLeaveCreate.textContent = 'Create';
+            btnLeaveCreate.disabled = !connected || !canCreate;
+            btnLeaveCreate.className = 'picker-btn';
+            if (!canCreate && connected) {
+                btnLeaveCreate.title = 'Maximum sessions reached';
+            } else {
+                btnLeaveCreate.title = '';
+            }
+            // Clone-replace to clear sticky :active/:hover pseudo-class from touch
+            const fresh = btnLeaveCreate.cloneNode(true);
+            btnLeaveCreate.replaceWith(fresh);
+            sessionPicker.btnLeaveCreate = fresh;
+            fresh.addEventListener('click', handleLeaveCreateButton);
+        }
+
+        // Start/Enter button - only visible when in a session
+        if (currentSessionId) {
+            btnStartEnter.style.display = '';
+            if (isServer) {
+                btnStartEnter.textContent = 'Start';
+                btnStartEnter.className = 'picker-btn action';
+                btnStartEnter.disabled = gameStarted; // Disable if already started
+            } else {
+                btnStartEnter.textContent = 'Enter';
+                btnStartEnter.className = 'picker-btn action';
+                btnStartEnter.disabled = !gameStarted; // Disable until server starts
+            }
+        } else {
+            btnStartEnter.style.display = 'none';
+        }
+    }
+
+    // Refresh session list from server (or from pushed data)
+    function updateSessionList(result) {
+        sessionPicker.sessions = result.sessions || [];
+        sessionPicker.maxSessions = result.maxSessions;
+        sessionPicker.canCreate = result.canCreateSession;
+
+        // If in a session, check if it still exists and update gameStarted
+        if (sessionPicker.currentSessionId) {
+            const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
+            if (!currentSession) {
+                // Session was deleted - leave lobby state
+                handleLeaveLobby('Session ended');
+                return;
+            }
+            // Update gameStarted from session data
+            sessionPicker.gameStarted = currentSession.gameStarted;
+        }
+
+        renderSessionList();
+        updatePickerButtons();
+        
+        // Update status based on current state
+        if (sessionPicker.currentSessionId) {
+            const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
+            if (currentSession) {
+                const roleText = sessionPicker.isServer ? 'host' : 'member';
+                setPickerStatus(`In ${currentSession.name} (${roleText}) - ${currentSession.memberCount}/${currentSession.maxMembers}`);
+            }
+        } else {
+            setPickerStatus(`${sessionPicker.sessions.length}/${sessionPicker.maxSessions} sessions`);
+        }
+    }
+
+    // Fetch session list from server (initial load)
+    async function refreshSessionList() {
+        if (!SessionClient.isConnected()) return;
+
+        try {
+            const result = await SessionClient.getActiveSessions();
+            updateSessionList(result);
+        } catch (err) {
+            console.error('Failed to refresh sessions:', err);
+            setPickerStatus('Failed to load sessions', 'error');
+        }
+    }
+
+    // Connect to session hub
+    async function connectToSessionHub() {
+        setPickerStatus('Connecting...', 'connecting');
+
+        try {
+            const success = await SessionClient.connect();
+            if (success) {
+                // Initialize ObjectSync after connection
+                ObjectSync.init();
+                // Apply configured sync interval
+                ObjectSync.setSyncInterval(CONFIG.SYNC_INTERVAL);
+                
+                sessionPicker.connected = true;
+                await refreshSessionList();
+                // No polling - we rely on SignalR push notifications
+            } else {
+                throw new Error('Connection failed');
+            }
+        } catch (err) {
+            console.error('Session hub connection failed:', err);
+            setPickerStatus('Offline - Solo play only', 'error');
+            sessionPicker.connected = false;
+            updatePickerButtons();
+        }
+    }
+
+    // Handle selecting a session (clicking on it) - immediately joins
+    async function handleSelectSession(sessionId) {
+        if (sessionId === sessionPicker.currentSessionId) return; // Already in this session
+        
+        const session = sessionPicker.sessions.find(s => s.id === sessionId);
+        if (!session || session.memberCount >= session.maxMembers) return;
+
+        setPickerStatus('Joining...', 'connecting');
+        sessionPicker.btnLeaveCreate.disabled = true;
+
+        try {
+            // Leave current session if in one
+            if (sessionPicker.currentSessionId) {
+                await SessionClient.leaveSession();
+            }
+
+            const result = await SessionClient.joinSession(sessionId);
+            if (result) {
+                // Enter lobby state (not playing yet)
+                game.state = 'lobby';
+                game.mode = 'session';
+                game.sessionInfo = {
+                    id: result.session.id,
+                    name: result.session.name,
+                    memberId: result.member.id,
+                    role: result.member.role,
+                    aspectRatio: result.session.aspectRatio
+                };
+                sessionPicker.currentSessionId = result.session.id;
+                sessionPicker.isServer = result.member.role === 'Server';
+                sessionPicker.gameStarted = result.session.gameStarted;
+                
+                // Recalculate viewport for session aspect ratio
+                resizeCanvas(true);
+                
+                await refreshSessionList();
+            } else {
+                setPickerStatus('Could not join - session may be full', 'error');
+                await refreshSessionList();
+            }
+        } catch (err) {
+            console.error('Join session failed:', err);
+            setPickerStatus('Failed to join session', 'error');
+            await refreshSessionList();
+        }
+    }
+
+    // Handle create session - creates and enters lobby
+    async function handleCreateSession() {
+        setPickerStatus('Creating...', 'connecting');
+        sessionPicker.btnLeaveCreate.disabled = true;
+
+        try {
+            // Leave current session if in one
+            if (sessionPicker.currentSessionId) {
+                await SessionClient.leaveSession();
+                sessionPicker.currentSessionId = null;
+            }
+
+            // Capture the current aspect ratio at the moment of session creation
+            const currentAspectRatio = canvas.width / canvas.height;
+            const result = await SessionClient.createSession(currentAspectRatio);
+            if (result) {
+                // Enter lobby state as server
+                game.state = 'lobby';
+                game.mode = 'session';
+                game.sessionInfo = {
+                    id: result.session.id,
+                    name: result.session.name,
+                    memberId: result.member.id,
+                    role: result.member.role,
+                    aspectRatio: result.session.aspectRatio
+                };
+                sessionPicker.currentSessionId = result.session.id;
+                sessionPicker.isServer = true; // Creator is always server
+                sessionPicker.gameStarted = false; // New session, game not started
+                updatePickerButtons();
+                
+                // Recalculate viewport for session aspect ratio
+                resizeCanvas(true);
+                
+                await refreshSessionList();
+            } else {
+                setPickerStatus('Could not create - max sessions reached', 'error');
+                await refreshSessionList();
+            }
+        } catch (err) {
+            console.error('Create session failed:', err);
+            setPickerStatus('Failed to create session', 'error');
+            await refreshSessionList();
+        }
+    }
+
+    // Handle solo play - leave any session first
+    async function handleSoloPlay() {
+        // Leave current session if in one
+        if (sessionPicker.currentSessionId && SessionClient.isConnected()) {
+            try {
+                await SessionClient.leaveSession();
+            } catch (err) {
+                console.error('Failed to leave session before solo:', err);
+            }
+            sessionPicker.currentSessionId = null;
+            sessionPicker.isServer = false;
+            sessionPicker.gameStarted = false;
+        }
+        
+        game.mode = 'solo';
+        game.sessionInfo = null;
+        startGameFromPicker();
+    }
+
+    // Handle Leave/Create button
+    async function handleLeaveCreateButton() {
+        if (sessionPicker.currentSessionId) {
+            // In a session - leave it
+            await handleLeaveLobby();
+        } else {
+            // Not in a session - create one
+            await handleCreateSession();
+        }
+    }
+
+    // Handle Start/Enter button
+    async function handleStartEnterButton() {
+        if (!sessionPicker.currentSessionId) return;
+
+        if (sessionPicker.isServer) {
+            // Server clicks Start - signal game start and begin gameplay
+            try {
+                await SessionClient.startGame();
+                sessionPicker.gameStarted = true;
+                await startGameFromPicker();
+            } catch (err) {
+                console.error('Failed to start game:', err);
+                setPickerStatus('Failed to start game', 'error');
+            }
+        } else {
+            // Client clicks Enter - begin gameplay (game already started by server)
+            await startGameFromPicker();
+        }
+    }
+
+    // Leave lobby and return to start state
+    async function handleLeaveLobby(message = null) {
+        // Delete synced ship if we have one
+        if (game.multiplayer.myShipObjectId) {
+            await deleteSyncedShip();
+        }
+        
+        if (sessionPicker.currentSessionId && SessionClient.isConnected()) {
+            try {
+                await SessionClient.leaveSession();
+            } catch (err) {
+                console.error('Failed to leave session:', err);
+            }
+        }
+
+        // Reset multiplayer state
+        resetMultiplayerState();
+        
+        // Reset to start state
+        game.state = 'start';
+        game.mode = 'solo';
+        game.sessionInfo = null;
+        sessionPicker.currentSessionId = null;
+        sessionPicker.isServer = false;
+        sessionPicker.gameStarted = false;
+        
+        // Recalculate viewport for solo mode
+        resizeCanvas(true);
+        
+        await refreshSessionList();
+        if (message) {
+            setPickerStatus(message, 'error');
+        }
+    }
+
+    // Start game from picker (replaces old startGame for picker context)
+    async function startGameFromPicker() {
+        if (game.state === 'start' || game.state === 'lobby') {
+            // Recalculate viewport with new session aspect ratio before initializing (force recalc)
+            resizeCanvas(true);
+            try {
+                await init();
+            } catch (err) {
+                console.error('[Game] Failed to start game:', err);
+            }
+        }
+    }
+
+    // Return to start screen
+    async function returnToStartScreen(errorMessage = null) {
+        // Delete synced ship if we have one
+        if (game.multiplayer.myShipObjectId) {
+            await deleteSyncedShip();
+        }
+        
+        // Leave session if in one
+        if (isSessionMode() && SessionClient.isConnected()) {
+            SessionClient.leaveSession().catch(console.error);
+        }
+
+        // Reset multiplayer state
+        resetMultiplayerState();
+        
+        // Reset game mode
+        game.mode = 'solo';
+        game.sessionInfo = null;
+
+        // Reset session picker state
+        sessionPicker.currentSessionId = null;
+        sessionPicker.isServer = false;
+        sessionPicker.selectedSessionId = null;
+        sessionPicker.gameStarted = false;
+
+        // Reset game state
+        game.state = 'start';
+        game.score = 0;
+        game.lives = CONFIG.STARTING_LIVES;
+        game.wave = 0;
+        pauseMenu.classList.remove('visible');
+        startScreen.classList.remove('hidden');
+
+        // Stop audio
+        AudioSystem.beat.stop();
+        AudioSystem.thrustSound.stop();
+
+        // Recalculate viewport now that we're back in solo mode (force recalc even if window size unchanged)
+        resizeCanvas(true);
+
+        // Reinitialize start screen visuals (normalized coordinates)
+        game.ship = null;  // No ship on start screen
+        game.astervoids = [];
+        game.bullets = [];
+        // Respawn cosmetic astervoids
+        game.cosmeticAstervoids = [];
+        for (let i = 0; i < CONFIG.START_SCREEN_ASTERVOIDS; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = CONFIG.ASTEROID_BASE_SPEED + Math.random() * CONFIG.ASTEROID_SPEED_VARIANCE;
+            game.cosmeticAstervoids.push(new Asteroid(
+                Math.random(),  // 0-1 normalized X
+                Math.random(),  // 0-1 normalized Y
+                CONFIG.INITIAL_ASTEROID_RADIUS,
+                Math.cos(angle) * speed,
+                Math.sin(angle) * speed
+            ));
+        }
+
+        if (errorMessage) {
+            setPickerStatus(errorMessage, 'error');
+        }
+
+        // Reconnect and refresh if needed
+        if (!SessionClient.isConnected()) {
+            connectToSessionHub();
+        } else {
+            refreshSessionList();
+        }
+    }
+
+    // Setup picker button handlers
+    sessionPicker.btnLeaveCreate.addEventListener('click', handleLeaveCreateButton);
+    sessionPicker.btnStartEnter.addEventListener('click', handleStartEnterButton);
+    sessionPicker.btnSolo.addEventListener('click', handleSoloPlay);
+
+    // Keyboard navigation for session picker
+    document.addEventListener('keydown', (e) => {
+        if (game.state !== 'start' && game.state !== 'lobby') return;
+
+        const { sessions, currentSessionId } = sessionPicker;
+        
+        // Find joinable sessions (not full, not current)
+        const joinableSessions = sessions.filter(s => 
+            s.memberCount < s.maxMembers && s.id !== currentSessionId
+        );
+
+        if (e.code === 'ArrowDown' || e.code === 'ArrowUp') {
+            e.preventDefault();
+            // For simplicity, just select first joinable session on arrow keys
+            if (joinableSessions.length > 0) {
+                const targetSession = e.code === 'ArrowDown' 
+                    ? joinableSessions[0] 
+                    : joinableSessions[joinableSessions.length - 1];
+                handleSelectSession(targetSession.id);
+            }
+        } else if (e.code === 'Enter') {
+            e.preventDefault();
+            // If in a session, trigger Start/Enter button action
+            if (currentSessionId) {
+                handleStartEnterButton();
+            }
+        }
+        // Note: Escape is handled by the main keydown handler for session exit
+    });
+
+    // Session client event handlers
+    SessionClient.on('onDisconnected', (error) => {
+        sessionPicker.connected = false;
+        sessionPicker.currentSessionId = null;
+        sessionPicker.isServer = false;
+        sessionPicker.gameStarted = false;
+        
+        if (game.state !== 'start' && game.state !== 'lobby') {
+            // Mid-game disconnect - return to start screen
+            returnToStartScreen('Disconnected from server');
+        } else {
+            game.state = 'start';
+            game.mode = 'solo';
+            game.sessionInfo = null;
+            setPickerStatus('Disconnected - reconnecting...', 'error');
+            // Try to reconnect after a delay
+            setTimeout(connectToSessionHub, 2000);
+        }
+    });
+
+    // Handle role changes (e.g., promoted to server when server leaves)
+    SessionClient.on('onRoleChanged', (newRole, migratedObjectIds) => {
+        // Let ObjectSync migrate ownership for migrated objects
+        ObjectSync.handleRoleChanged(newRole, migratedObjectIds || []);
+        
+        if (game.sessionInfo) {
+            game.sessionInfo.role = newRole;
+        }
+        sessionPicker.isServer = newRole === 'Server';
+        
+        // If promoted to Server, take over authority
+        if (newRole === 'Server') {
+            handleServerPromotion();
+        }
+        
+        // Role data already provided in event - just update UI, no need to refetch
+        updatePickerButtons();
+    });
+
+    // Handle member leaving - clean up their objects
+    SessionClient.on('onMemberLeft', (info) => {
+        // Handle object cleanup from member departure
+        if (info.deletedObjectIds && info.deletedObjectIds.length > 0) {
+            ObjectSync.handleMemberDeparture(info.deletedObjectIds);
+            // Remove from local game state
+            for (const objectId of info.deletedObjectIds) {
+                // Clean up remote ship
+                if (game.multiplayer.remoteShips.has(objectId)) {
+                    game.multiplayer.remoteShips.delete(objectId);
+                    RemoteObjects.remove(objectId);
+                }
+                // Clean up bullets owned by departing member
+                game.bullets = game.bullets.filter(b => b.syncObjectId !== objectId);
+            }
+        }
+        if (info.migratedObjectIds && info.migratedObjectIds.length > 0 && info.promotedMemberId) {
+            ObjectSync.handleOwnershipMigration(info.migratedObjectIds, info.promotedMemberId);
+        }
+    });
+
+    // Handle bullet hit reported — asteroid owner processes the collision
+    SessionClient.on('onBulletHitReported', (report) => {
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (!myMemberId) return;
+        
+        // Check if we own the target asteroid
+        const asteroidSyncObj = ObjectSync.getObject(report.asteroidObjectId);
+        if (!asteroidSyncObj || asteroidSyncObj.ownerMemberId !== myMemberId) return;
+        
+        // Find the asteroid in our local game state
+        const asteroidIndex = game.astervoids.findIndex(a => a.syncObjectId === report.asteroidObjectId);
+        if (asteroidIndex === -1) {
+            // Asteroid already destroyed — reject
+            SessionClient.rejectBulletHit(report.bulletObjectId, report.reporterMemberId);
+            return;
+        }
+        
+        // Accept the hit — remove asteroid, split, and confirm
+        const asteroid = game.astervoids[asteroidIndex];
+        const points = asteroid.getPoints();
+        const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
+                     asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
+        
+        game.astervoids.splice(asteroidIndex, 1);
+        if (asteroid.syncObjectId) {
+            deleteSyncedAsteroid(asteroid);
+        }
+        splitAsteroid(asteroid);
+        syncGameState();
+        
+        // Confirm back to the bullet owner
+        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size);
+    });
+
+    // Handle bullet hit confirmed — bullet owner cleans up
+    SessionClient.on('onBulletHitConfirmed', (confirmation) => {
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (confirmation.bulletOwnerMemberId !== myMemberId) return;
+        
+        // Find and destroy the confirmed bullet
+        const bulletIndex = game.bullets.findIndex(b => b.syncObjectId === confirmation.bulletObjectId);
+        if (bulletIndex !== -1) {
+            const bullet = game.bullets.splice(bulletIndex, 1)[0];
+            if (bullet.syncObjectId) {
+                deleteSyncedBullet(bullet);
+            }
+        }
+        
+        // Play explosion sound based on asteroid size
+        AudioSystem.playExplosion(confirmation.asteroidSize || 'medium');
+    });
+
+    // Handle bullet hit rejected — bullet owner un-hides bullet
+    SessionClient.on('onBulletHitRejected', (rejection) => {
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (rejection.bulletOwnerMemberId !== myMemberId) return;
+        
+        // Find the bullet and un-mark it
+        const bullet = game.bullets.find(b => b.syncObjectId === rejection.bulletObjectId);
+        if (bullet) {
+            bullet.pendingHit = false;
+            if (bullet.syncObjectId) {
+                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData(), true);
+            }
+        }
+    });
+
+    // Handle ship hit reported — GameState owner decrements lives
+    SessionClient.on('onShipHitReported', (report) => {
+        // Only the GameState owner (authority) processes this
+        if (!isAuthority()) return;
+        
+        game.lives--;
+        updateHUD();
+        if (game.lives <= 0) {
+            AudioSystem.beat.stop();
+        }
+        syncGameState(true);
+    });
+
+    // Handle session list changes (signal from server - fetch fresh data with jitter)
+    let sessionRefreshTimeout = null;
+    SessionClient.on('onSessionsChanged', () => {
+        if (game.state === 'start' || game.state === 'lobby') {
+            // Debounce: cancel pending refresh if another signal arrives
+            if (sessionRefreshTimeout) {
+                clearTimeout(sessionRefreshTimeout);
+            }
+            // Random jitter 0-500ms to prevent thundering herd
+            sessionRefreshTimeout = setTimeout(() => {
+                sessionRefreshTimeout = null;
+                refreshSessionList();
+            }, Math.random() * 500);
+        }
+    });
+
+    // Handle game started notification (for clients)
+    SessionClient.on('onGameStarted', (sessionId) => {
+        if (sessionPicker.currentSessionId === sessionId) {
+            sessionPicker.gameStarted = true;
+            updatePickerButtons();
+        }
+    });
+
+    // Leave session on page unload
+    window.addEventListener('beforeunload', () => {
+        if ((isSessionMode() || sessionPicker.currentSessionId) && SessionClient.isConnected()) {
+            SessionClient.leaveSession();
+        }
+    });
+
+    // Handle visibility change - prevent pause in multiplayer
+    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing
+    let backgroundInterval = null;
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+            // Tab hidden during multiplayer - use setInterval as fallback
+            if (!backgroundInterval) {
+                const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
+                let lastTime = performance.now();
+                backgroundInterval = setInterval(() => {
+                    const now = performance.now();
+                    const elapsed = now - lastTime;
+                    lastTime = now;
+                    const dt = Math.min(elapsed / targetFrameTime, 3);
+                    
+                    // Update local ship
+                    if (game.ship) {
+                        game.ship.update(dt);
+                        syncLocalShip();
+                    }
+                    
+                    // Update astervoids (authority)
+                    if (isAuthority()) {
+                        game.astervoids.forEach(a => a.update(dt));
+                        syncLocalAstervoids();
+                    } else {
+                        updateAstervoidsFromSync();
+                    }
+                    
+                    // Update remote state
+                    updateRemoteShips();
+                    updateBulletsFromSync();
+                    if (!isAuthority()) updateGameStateFromSync();
+                    if (isAuthority()) syncGameState();
+                }, targetFrameTime);
+            }
+        } else {
+            // Tab visible or not in multiplayer - clear background interval
+            if (backgroundInterval) {
+                clearInterval(backgroundInterval);
+                backgroundInterval = null;
+            }
+        }
+    });
+
+    // Initialize session connection
+    connectToSessionHub();
     
     requestAnimationFrame(gameLoop);  // Use rAF to provide timestamp
 

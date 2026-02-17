@@ -12,34 +12,24 @@ public interface IObjectService
     /// </summary>
     /// <param name="sessionId">The session to create the object in.</param>
     /// <param name="creatorMemberId">The member creating the object.</param>
+    /// <param name="scope">The lifetime scope of the object (Member or Session).</param>
     /// <param name="data">Initial object data.</param>
     /// <returns>The created object, or null if session/member not found.</returns>
-    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, Dictionary<string, object?>? data = null);
+    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null);
 
     /// <summary>
     /// Updates an existing object.
     /// </summary>
-    /// <param name="sessionId">The session containing the object.</param>
-    /// <param name="objectId">The object to update.</param>
-    /// <param name="data">New data to merge into the object.</param>
-    /// <param name="expectedVersion">Expected version for optimistic concurrency (optional).</param>
-    /// <returns>The updated object, or null if not found or version mismatch.</returns>
     SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null);
 
     /// <summary>
     /// Batch updates multiple objects atomically.
     /// </summary>
-    /// <param name="sessionId">The session containing the objects.</param>
-    /// <param name="updates">List of updates to apply.</param>
-    /// <returns>List of successfully updated objects.</returns>
     IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates);
 
     /// <summary>
     /// Deletes an object from a session.
     /// </summary>
-    /// <param name="sessionId">The session containing the object.</param>
-    /// <param name="objectId">The object to delete.</param>
-    /// <returns>True if deleted, false if not found.</returns>
     bool DeleteObject(Guid sessionId, Guid objectId);
 
     /// <summary>
@@ -53,12 +43,15 @@ public interface IObjectService
     SessionObject? GetObject(Guid sessionId, Guid objectId);
 
     /// <summary>
-    /// Updates object affiliations when server role changes.
+    /// Handles cleanup when a member departs a session.
+    /// Deletes member-scoped objects owned by the departing member.
+    /// Transfers session-scoped objects to a new owner (if provided).
     /// </summary>
     /// <param name="sessionId">The session.</param>
-    /// <param name="oldServerId">The previous server member ID.</param>
-    /// <param name="newServerId">The new server member ID.</param>
-    void TransferServerAffiliation(Guid sessionId, Guid oldServerId, Guid newServerId);
+    /// <param name="departingMemberId">The member who is leaving.</param>
+    /// <param name="newOwnerId">The member to receive session-scoped objects (null if no migration needed).</param>
+    /// <returns>Result containing deleted and migrated object IDs.</returns>
+    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, Guid? newOwnerId);
 }
 
 /// <summary>
@@ -68,4 +61,12 @@ public record ObjectUpdate(
     Guid ObjectId,
     Dictionary<string, object?> Data,
     long? ExpectedVersion = null
+);
+
+/// <summary>
+/// Result of handling a member's departure from a session.
+/// </summary>
+public record MemberDepartureResult(
+    IEnumerable<Guid> DeletedObjectIds,
+    IEnumerable<Guid> MigratedObjectIds
 );

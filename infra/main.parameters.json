@@ -13,6 +13,9 @@
     },
     "customSubdomain": {
       "value": "${CUSTOM_SUBDOMAIN=}"
+    },
+    "useSharedInfra": {
+      "value": "${USE_SHARED_INFRA=false}"
     }
   }
 }

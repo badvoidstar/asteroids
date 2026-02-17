@@ -13,6 +13,9 @@ public class SessionHub : Hub
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
 
+    // Group name for all connected clients to receive session list updates
+    private const string AllClientsGroup = "AllClients";
+
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
@@ -24,11 +27,21 @@ public class SessionHub : Hub
     }
 
     /// <summary>
+    /// Called when a client connects - add them to the AllClients group for broadcasts.
+    /// </summary>
+    public override async Task OnConnectedAsync()
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, AllClientsGroup);
+        await base.OnConnectedAsync();
+    }
+
+    /// <summary>
     /// Creates a new session and joins as the server.
     /// </summary>
-    public async Task<CreateSessionResponse?> CreateSession()
+    /// <param name="aspectRatio">The aspect ratio (width/height) to lock for this session.</param>
+    public async Task<CreateSessionResponse?> CreateSession(double aspectRatio)
     {
-        var result = _sessionService.CreateSession(Context.ConnectionId);
+        var result = _sessionService.CreateSession(Context.ConnectionId, aspectRatio);
 
         if (!result.Success)
         {
@@ -45,11 +58,15 @@ public class SessionHub : Hub
             "Session {SessionName} ({SessionId}) created by member {MemberId}",
             session.Name, session.Id, creator.Id);
 
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
+
         return new CreateSessionResponse(
             session.Id,
             session.Name,
             creator.Id,
-            creator.Role.ToString()
+            creator.Role.ToString(),
+            session.AspectRatio
         );
     }
 
@@ -81,10 +98,13 @@ public class SessionHub : Hub
             "Member {MemberId} joined session {SessionName} ({SessionId})",
             member.Id, session.Name, session.Id);
 
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
+
         // Return session state including existing objects
         var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
         var objects = session.Objects.Values.Select(o => new ObjectInfo(
-            o.Id, o.CreatorMemberId, o.AffiliatedRole.ToString(), o.Data, o.Version));
+            o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version));
 
         return new JoinSessionResponse(
             session.Id,
@@ -92,7 +112,9 @@ public class SessionHub : Hub
             member.Id,
             member.Role.ToString(),
             members,
-            objects
+            objects,
+            session.AspectRatio,
+            session.GameStarted
         );
     }
 
@@ -108,23 +130,30 @@ public class SessionHub : Hub
             return;
         }
 
+        // Handle object cleanup based on scope
+        var departureResult = _objectService.HandleMemberDeparture(
+            result.SessionId, result.MemberId, result.PromotedMember?.Id);
+
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, result.SessionId.ToString());
 
         if (!result.SessionDestroyed)
         {
-            // Notify remaining members
+            // Notify remaining members with enriched departure info
             await Clients.Group(result.SessionId.ToString()).SendAsync("OnMemberLeft", new MemberLeftInfo(
                 result.MemberId,
                 result.PromotedMember?.Id,
                 result.PromotedMember?.Role.ToString(),
-                result.AffectedObjectIds
+                departureResult.DeletedObjectIds,
+                departureResult.MigratedObjectIds
             ));
 
             if (result.PromotedMember != null)
             {
                 _logger.LogInformation(
-                    "Member {PromotedMemberId} promoted to Server in session {SessionName}",
-                    result.PromotedMember.Id, result.SessionName);
+                    "Member {PromotedMemberId} promoted to Server in session {SessionName}. Migrated {MigratedCount} objects, deleted {DeletedCount} objects.",
+                    result.PromotedMember.Id, result.SessionName,
+                    departureResult.MigratedObjectIds.Count(),
+                    departureResult.DeletedObjectIds.Count());
             }
         }
         else
@@ -134,6 +163,9 @@ public class SessionHub : Hub
         }
 
         _logger.LogInformation("Member {MemberId} left session {SessionName}", result.MemberId, result.SessionName);
+
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
     }
 
     /// <summary>
@@ -143,16 +175,69 @@ public class SessionHub : Hub
     {
         var result = _sessionService.GetActiveSessions();
         return new ActiveSessionsResponse(
-            result.Sessions.Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.MaxMembers, s.CreatedAt)),
+            result.Sessions.Select(s => new SessionListItem(s.Id, s.Name, s.MemberCount, s.MaxMembers, s.CreatedAt, s.GameStarted)),
             result.MaxSessions,
             result.CanCreateSession
         );
     }
 
     /// <summary>
+    /// Starts the game in the current session. Only the server can call this.
+    /// </summary>
+    public async Task<bool> StartGame()
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("StartGame failed - member not found for connection {ConnectionId}", Context.ConnectionId);
+            return false;
+        }
+
+        if (member.Role != MemberRole.Server)
+        {
+            _logger.LogWarning("StartGame failed - member {MemberId} is not the server", member.Id);
+            return false;
+        }
+
+        var session = _sessionService.GetSession(member.SessionId);
+        if (session == null)
+        {
+            _logger.LogWarning("StartGame failed - session not found for member {MemberId}", member.Id);
+            return false;
+        }
+
+        if (session.GameStarted)
+        {
+            _logger.LogWarning("StartGame failed - game already started in session {SessionId}", session.Id);
+            return false;
+        }
+
+        session.GameStarted = true;
+        _logger.LogInformation("Game started in session {SessionName} ({SessionId}) by server {MemberId}",
+            session.Name, session.Id, member.Id);
+
+        // Notify all session members that the game has started
+        await Clients.Group(session.Id.ToString()).SendAsync("OnGameStarted", session.Id);
+
+        // Broadcast session list update to all connected clients
+        await BroadcastSessionsChanged();
+
+        return true;
+    }
+
+    /// <summary>
+    /// Broadcasts a signal to all connected clients that the session list has changed.
+    /// Clients should call GetActiveSessions() to fetch updated data.
+    /// </summary>
+    private async Task BroadcastSessionsChanged()
+    {
+        await Clients.Group(AllClientsGroup).SendAsync("OnSessionsChanged");
+    }
+
+    /// <summary>
     /// Creates a new synchronized object in the session.
     /// </summary>
-    public async Task<ObjectInfo?> CreateObject(Dictionary<string, object?>? data)
+    public async Task<ObjectInfo?> CreateObject(Dictionary<string, object?>? data, string scope = "Member")
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -161,19 +246,23 @@ public class SessionHub : Hub
             return null;
         }
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, data);
+        var objectScope = scope.Equals("Session", StringComparison.OrdinalIgnoreCase) 
+            ? ObjectScope.Session 
+            : ObjectScope.Member;
+
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
             return null;
         }
 
-        var objectInfo = new ObjectInfo(obj.Id, obj.CreatorMemberId, obj.AffiliatedRole.ToString(), obj.Data, obj.Version);
+        var objectInfo = new ObjectInfo(obj.Id, obj.CreatorMemberId, obj.OwnerMemberId, obj.Scope.ToString(), obj.Data, obj.Version);
 
         // Notify all members including sender
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated", objectInfo);
 
-        _logger.LogDebug("Object {ObjectId} created in session by member {MemberId}", obj.Id, member.Id);
+        _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
 
         return objectInfo;
     }
@@ -194,7 +283,7 @@ public class SessionHub : Hub
         var updatedObjects = _objectService.UpdateObjects(session.Id, objectUpdates);
 
         var objectInfos = updatedObjects.Select(o => new ObjectInfo(
-            o.Id, o.CreatorMemberId, o.AffiliatedRole.ToString(), o.Data, o.Version)).ToList();
+            o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
 
         if (objectInfos.Count > 0)
         {
@@ -237,26 +326,113 @@ public class SessionHub : Hub
             _logger.LogWarning(exception, "Client disconnected with exception: {ConnectionId}", Context.ConnectionId);
         }
 
-        // Clean up session membership
-        await LeaveSession();
+        // Clean up session membership - must not throw to prevent orphaned entries
+        try
+        {
+            await LeaveSession();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during disconnect cleanup for {ConnectionId}", Context.ConnectionId);
+        }
 
         await base.OnDisconnectedAsync(exception);
+    }
+
+    /// <summary>
+    /// Reports that a bullet hit an asteroid. Broadcasts to all session members
+    /// so the asteroid owner can process the collision.
+    /// </summary>
+    public async Task ReportBulletHit(Guid asteroidObjectId, Guid bulletObjectId)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReportBulletHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitReported",
+            new BulletHitReport(asteroidObjectId, bulletObjectId, member.Id));
+    }
+
+    /// <summary>
+    /// Confirms that a bullet hit was accepted by the asteroid owner.
+    /// Broadcasts to all session members so the bullet owner can handle cleanup.
+    /// </summary>
+    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ConfirmBulletHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
+            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize));
+    }
+
+    /// <summary>
+    /// Rejects a bullet hit because the asteroid was already destroyed.
+    /// Broadcasts to all session members so the bullet owner can un-hide the bullet.
+    /// </summary>
+    public async Task RejectBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("RejectBulletHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitRejected",
+            new BulletHitRejection(bulletObjectId, bulletOwnerMemberId));
+    }
+
+    /// <summary>
+    /// Reports that the caller's ship was hit by an asteroid.
+    /// Broadcasts to all session members so the GameState owner can decrement lives.
+    /// </summary>
+    public async Task ReportShipHit()
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReportShipHit failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnShipHitReported",
+            new ShipHitReport(member.Id));
     }
 }
 
 // Response DTOs
-public record CreateSessionResponse(Guid SessionId, string SessionName, Guid MemberId, string Role);
+public record CreateSessionResponse(Guid SessionId, string SessionName, Guid MemberId, string Role, double AspectRatio);
 public record JoinSessionResponse(
     Guid SessionId,
     string SessionName,
     Guid MemberId,
     string Role,
     IEnumerable<MemberInfo> Members,
-    IEnumerable<ObjectInfo> Objects
+    IEnumerable<ObjectInfo> Objects,
+    double AspectRatio,
+    bool GameStarted
 );
 public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
-public record MemberLeftInfo(Guid MemberId, Guid? PromotedMemberId, string? PromotedRole, IEnumerable<Guid> AffectedObjectIds);
-public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt);
+public record MemberLeftInfo(
+    Guid MemberId,
+    Guid? PromotedMemberId,
+    string? PromotedRole,
+    IEnumerable<Guid> DeletedObjectIds,
+    IEnumerable<Guid> MigratedObjectIds
+);
+public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt, bool GameStarted);
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
-public record ObjectInfo(Guid Id, Guid CreatorMemberId, string AffiliatedRole, Dictionary<string, object?> Data, long Version);
+public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
+public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
+public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);
+public record BulletHitRejection(Guid BulletObjectId, Guid BulletOwnerMemberId);
+public record ShipHitReport(Guid ReporterMemberId);

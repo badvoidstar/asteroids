@@ -572,7 +572,7 @@
             listEl.innerHTML = objectArray.map(o => `
                 <div class="object-item">
                     <span class="object-id">${o.id.substring(0, 8)}...</span>
-                    [${o.affiliatedRole}] v${o.version}
+                    [${o.scope}] owner:${(o.ownerMemberId || '').substring(0,8)} v${o.version}
                     <div class="object-data">${JSON.stringify(o.data)}</div>
                 </div>
             `).join('');
@@ -692,9 +692,9 @@
             refreshSessions();
         });
 
-        SessionClient.on('onRoleChanged', (newRole, affectedObjectIds) => {
+        SessionClient.on('onRoleChanged', (newRole, migratedObjectIds) => {
             log(`Your role changed to: ${newRole}`, 'event');
-            log(`Affected objects: ${affectedObjectIds.length}`, 'info');
+            log(`Migrated objects: ${migratedObjectIds.length}`, 'info');
             const session = SessionClient.getCurrentSession();
             const member = SessionClient.getCurrentMember();
             if (session && member) {

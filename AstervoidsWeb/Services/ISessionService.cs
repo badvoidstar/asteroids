@@ -11,8 +11,9 @@ public interface ISessionService
     /// Creates a new session with a randomly generated fruit name.
     /// </summary>
     /// <param name="creatorConnectionId">SignalR connection ID of the creator.</param>
+    /// <param name="aspectRatio">The aspect ratio (width/height) to lock for this session.</param>
     /// <returns>Result indicating success/failure with session and member if successful.</returns>
-    CreateSessionResult CreateSession(string creatorConnectionId);
+    CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio);
 
     /// <summary>
     /// Joins an existing session as a client.
@@ -69,8 +70,7 @@ public record LeaveSessionResult(
     string SessionName,
     Guid MemberId,
     bool SessionDestroyed,
-    Member? PromotedMember,
-    IEnumerable<Guid> AffectedObjectIds
+    Member? PromotedMember
 );
 
 /// <summary>
@@ -81,7 +81,8 @@ public record SessionInfo(
     string Name,
     int MemberCount,
     int MaxMembers,
-    DateTime CreatedAt
+    DateTime CreatedAt,
+    bool GameStarted
 );
 
 /// <summary>

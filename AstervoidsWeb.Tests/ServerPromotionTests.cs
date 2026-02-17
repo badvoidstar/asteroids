@@ -19,7 +19,7 @@ public class ServerPromotionTests
     public void ServerLeaves_WithMultipleClients_ShouldPromoteOneClient()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
         _sessionService.JoinSession(session.Id, "client1-conn");
         _sessionService.JoinSession(session.Id, "client2-conn");
         _sessionService.JoinSession(session.Id, "client3-conn");
@@ -39,37 +39,37 @@ public class ServerPromotionTests
     }
 
     [Fact]
-    public void ServerLeaves_ShouldReturnAffectedObjectIds()
+    public void ServerLeaves_MemberScopedObjectsDeleted_SessionScopedMigrated()
     {
         // Arrange
-        var result = _sessionService.CreateSession("server-conn");
+        var result = _sessionService.CreateSession("server-conn", 1.5);
         var session = result.Session!;
         var server = result.Creator!;
         var joinResult = _sessionService.JoinSession(session.Id, "client-conn");
         Assert.True(joinResult.Success);
         var client = joinResult.Member!;
 
-        // Create objects - some by server, some by client
-        var serverObj1 = _objectService.CreateObject(session.Id, server.Id);
-        var serverObj2 = _objectService.CreateObject(session.Id, server.Id);
-        var clientObj = _objectService.CreateObject(session.Id, client.Id);
+        // Create objects - member-scoped by server, session-scoped by server, member-scoped by client
+        var serverMemberObj = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Member);
+        var serverSessionObj = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session);
+        var clientObj = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member);
 
         // Act
         var leaveResult = _sessionService.LeaveSession("server-conn");
+        var departureResult = _objectService.HandleMemberDeparture(session.Id, server.Id, leaveResult!.PromotedMember?.Id);
 
         // Assert
-        leaveResult.Should().NotBeNull();
-        leaveResult!.AffectedObjectIds.Should().HaveCount(2);
-        leaveResult.AffectedObjectIds.Should().Contain(serverObj1!.Id);
-        leaveResult.AffectedObjectIds.Should().Contain(serverObj2!.Id);
-        leaveResult.AffectedObjectIds.Should().NotContain(clientObj!.Id);
+        departureResult.DeletedObjectIds.Should().Contain(serverMemberObj!.Id);
+        departureResult.MigratedObjectIds.Should().Contain(serverSessionObj!.Id);
+        departureResult.DeletedObjectIds.Should().NotContain(clientObj!.Id);
+        departureResult.MigratedObjectIds.Should().NotContain(clientObj.Id);
     }
 
     [Fact]
     public void ServerLeaves_SessionVersionShouldIncrement()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
         _sessionService.JoinSession(session.Id, "client-conn");
         var initialVersion = session.Version;
 
@@ -85,7 +85,7 @@ public class ServerPromotionTests
     public void ClientLeaves_ShouldNotAffectServerRole()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
         _sessionService.JoinSession(session.Id, "client-conn");
 
         // Act
@@ -103,7 +103,7 @@ public class ServerPromotionTests
     public void ServerLeaves_NoClients_ShouldDestroySession()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
 
         // Act
         var result = _sessionService.LeaveSession("server-conn");
@@ -119,7 +119,7 @@ public class ServerPromotionTests
     public void ConcurrentJoinsAndLeaves_ShouldMaintainSessionIntegrity()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
         var sessionId = session.Id;
 
         // Simulate rapid joins (only 3 since max is 4)
@@ -150,7 +150,7 @@ public class ServerPromotionTests
     public void RapidServerChanges_ShouldAlwaysHaveOneServer()
     {
         // Arrange
-        var session = _sessionService.CreateSession("server-conn").Session!;
+        var session = _sessionService.CreateSession("server-conn", 1.5).Session!;
         var sessionId = session.Id;
 
         // Add clients (max 3 since max members is 4)

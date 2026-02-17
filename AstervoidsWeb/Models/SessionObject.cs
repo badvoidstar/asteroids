@@ -2,7 +2,7 @@ namespace AstervoidsWeb.Models;
 
 /// <summary>
 /// Represents a synchronized object within a session.
-/// Objects are affiliated with the role of their creator.
+/// Each object has an owner (who simulates it) and a scope (lifetime policy).
 /// </summary>
 public class SessionObject
 {
@@ -17,15 +17,23 @@ public class SessionObject
     public Guid SessionId { get; init; }
 
     /// <summary>
-    /// The member who created this object.
+    /// The member who originally created this object (immutable).
     /// </summary>
     public Guid CreatorMemberId { get; init; }
 
     /// <summary>
-    /// The role affiliation of this object.
-    /// This tracks the creator's role and updates when server role transfers.
+    /// The member who currently owns this object (mutable).
+    /// The owner is responsible for simulation and state updates.
+    /// Initially set to the creator; may change via ownership migration.
     /// </summary>
-    public MemberRole AffiliatedRole { get; set; }
+    public Guid OwnerMemberId { get; set; }
+
+    /// <summary>
+    /// The lifetime scope of this object.
+    /// Member-scoped objects are deleted when their owner leaves.
+    /// Session-scoped objects have their ownership migrated when their owner leaves.
+    /// </summary>
+    public ObjectScope Scope { get; init; }
 
     /// <summary>
     /// Arbitrary data associated with this object.

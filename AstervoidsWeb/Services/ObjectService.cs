@@ -14,20 +14,21 @@ public class ObjectService : IObjectService
         _sessionService = sessionService;
     }
 
-    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, Dictionary<string, object?>? data = null)
+    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
             return null;
 
-        if (!session.Members.TryGetValue(creatorMemberId, out var creator))
+        if (!session.Members.TryGetValue(creatorMemberId, out _))
             return null;
 
         var obj = new SessionObject
         {
             SessionId = sessionId,
             CreatorMemberId = creatorMemberId,
-            AffiliatedRole = creator.Role,
+            OwnerMemberId = creatorMemberId,
+            Scope = scope,
             Data = data ?? new Dictionary<string, object?>()
         };
 
@@ -68,8 +69,6 @@ public class ObjectService : IObjectService
 
         var results = new List<SessionObject>();
 
-        // Process all updates - this is atomic from the caller's perspective
-        // since we process them all before returning
         foreach (var update in updates)
         {
             if (!session.Objects.TryGetValue(update.ObjectId, out var obj))
@@ -120,23 +119,38 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
-    public void TransferServerAffiliation(Guid sessionId, Guid oldServerId, Guid newServerId)
+    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, Guid? newOwnerId)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return;
+            return new MemberDepartureResult([], []);
 
-        // Update all objects that were affiliated with the server role
-        // The affiliation stays as Server role, but now points to the new server member
-        // Note: AffiliatedRole remains Server, we don't change the role itself
-        // The objects created by the old server remain "server objects"
-        foreach (var obj in session.Objects.Values)
+        var deletedIds = new List<Guid>();
+        var migratedIds = new List<Guid>();
+
+        foreach (var obj in session.Objects.Values.ToList())
         {
-            if (obj.CreatorMemberId == oldServerId && obj.AffiliatedRole == MemberRole.Server)
+            if (obj.OwnerMemberId != departingMemberId)
+                continue;
+
+            if (obj.Scope == ObjectScope.Member)
             {
-                obj.UpdatedAt = DateTime.UtcNow;
+                // Member-scoped: delete
+                if (session.Objects.TryRemove(obj.Id, out _))
+                {
+                    deletedIds.Add(obj.Id);
+                }
+            }
+            else if (obj.Scope == ObjectScope.Session && newOwnerId.HasValue)
+            {
+                // Session-scoped: migrate ownership
+                obj.OwnerMemberId = newOwnerId.Value;
                 obj.Version++;
+                obj.UpdatedAt = DateTime.UtcNow;
+                migratedIds.Add(obj.Id);
             }
         }
+
+        return new MemberDepartureResult(deletedIds, migratedIds);
     }
 }

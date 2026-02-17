@@ -24,6 +24,12 @@ const SessionClient = (function() {
         onObjectCreated: null,
         onObjectsUpdated: null,
         onObjectDeleted: null,
+        onSessionsChanged: null,
+        onGameStarted: null,
+        onBulletHitReported: null,
+        onBulletHitConfirmed: null,
+        onBulletHitRejected: null,
+        onShipHitReported: null,
         onError: null
     };
 
@@ -145,7 +151,7 @@ const SessionClient = (function() {
                     }
                 }
                 if (callbacks.onRoleChanged) {
-                    callbacks.onRoleChanged(info.promotedRole, info.affectedObjectIds);
+                    callbacks.onRoleChanged(info.promotedRole, info.migratedObjectIds || []);
                 }
             }
 
@@ -156,37 +162,79 @@ const SessionClient = (function() {
 
         // Object events
         connection.on('OnObjectCreated', (objectInfo) => {
-            console.log('[SessionClient] Object created:', objectInfo);
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo);
             }
         });
 
         connection.on('OnObjectsUpdated', (objects) => {
-            console.log('[SessionClient] Objects updated:', objects.length);
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects);
             }
         });
 
         connection.on('OnObjectDeleted', (objectId) => {
-            console.log('[SessionClient] Object deleted:', objectId);
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId);
+            }
+        });
+
+        // Session list changed (signal only - fetch data separately)
+        connection.on('OnSessionsChanged', () => {
+            console.log('[SessionClient] Sessions changed signal received');
+            if (callbacks.onSessionsChanged) {
+                callbacks.onSessionsChanged();
+            }
+        });
+
+        // Game started in current session
+        connection.on('OnGameStarted', (sessionId) => {
+            console.log('[SessionClient] Game started in session:', sessionId);
+            if (currentSession) {
+                currentSession.gameStarted = true;
+            }
+            if (callbacks.onGameStarted) {
+                callbacks.onGameStarted(sessionId);
+            }
+        });
+
+        // Collision events
+        connection.on('OnBulletHitReported', (report) => {
+            if (callbacks.onBulletHitReported) {
+                callbacks.onBulletHitReported(report);
+            }
+        });
+
+        connection.on('OnBulletHitConfirmed', (confirmation) => {
+            if (callbacks.onBulletHitConfirmed) {
+                callbacks.onBulletHitConfirmed(confirmation);
+            }
+        });
+
+        connection.on('OnBulletHitRejected', (rejection) => {
+            if (callbacks.onBulletHitRejected) {
+                callbacks.onBulletHitRejected(rejection);
+            }
+        });
+
+        connection.on('OnShipHitReported', (report) => {
+            if (callbacks.onShipHitReported) {
+                callbacks.onShipHitReported(report);
             }
         });
     }
 
     /**
      * Create a new session.
+     * @param {number} aspectRatio - The aspect ratio (width/height) to lock for this session.
      */
-    async function createSession() {
+    async function createSession(aspectRatio) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
 
         try {
-            const response = await connection.invoke('CreateSession');
+            const response = await connection.invoke('CreateSession', aspectRatio);
             if (!response) {
                 console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
@@ -201,10 +249,11 @@ const SessionClient = (function() {
                 id: response.sessionId,
                 name: response.sessionName,
                 members: [currentMember],
-                objects: []
+                objects: [],
+                aspectRatio: response.aspectRatio
             };
 
-            console.log('[SessionClient] Session created:', currentSession.name);
+            console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
 
             if (callbacks.onSessionCreated) {
                 callbacks.onSessionCreated(currentSession, currentMember);
@@ -239,14 +288,16 @@ const SessionClient = (function() {
                 id: response.sessionId,
                 name: response.sessionName,
                 members: response.members,
-                objects: response.objects
+                objects: response.objects,
+                aspectRatio: response.aspectRatio,
+                gameStarted: response.gameStarted
             };
             currentMember = {
                 id: response.memberId,
                 role: response.role
             };
 
-            console.log('[SessionClient] Joined session:', currentSession.name);
+            console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
 
             if (callbacks.onSessionJoined) {
                 callbacks.onSessionJoined(currentSession, currentMember);
@@ -287,6 +338,29 @@ const SessionClient = (function() {
     }
 
     /**
+     * Start the game in the current session. Only the server can call this.
+     */
+    async function startGame() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            throw new Error('Not connected to session hub');
+        }
+        if (!currentSession) {
+            throw new Error('Not in a session');
+        }
+
+        try {
+            const success = await connection.invoke('StartGame');
+            if (success && currentSession) {
+                currentSession.gameStarted = true;
+            }
+            return success;
+        } catch (err) {
+            console.error('[SessionClient] Start game failed:', err);
+            throw err;
+        }
+    }
+
+    /**
      * Get list of active sessions.
      */
     async function getActiveSessions() {
@@ -309,8 +383,10 @@ const SessionClient = (function() {
 
     /**
      * Create an object in the current session.
+     * @param {object} data - Object data
+     * @param {string} scope - 'Member' or 'Session'
      */
-    async function createObject(data) {
+    async function createObject(data, scope = 'Member') {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
@@ -319,7 +395,7 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('CreateObject', data);
+            return await connection.invoke('CreateObject', data, scope);
         } catch (err) {
             console.error('[SessionClient] Create object failed:', err);
             throw err;
@@ -361,6 +437,55 @@ const SessionClient = (function() {
         } catch (err) {
             console.error('[SessionClient] Delete object failed:', err);
             throw err;
+        }
+    }
+
+    /**
+     * Report that a bullet hit an asteroid. Asteroid owner will process the collision.
+     */
+    async function reportBulletHit(asteroidObjectId, bulletObjectId) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ReportBulletHit', asteroidObjectId, bulletObjectId);
+        } catch (err) {
+            console.error('[SessionClient] ReportBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Confirm that a bullet hit was accepted (called by asteroid owner).
+     */
+    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
+        } catch (err) {
+            console.error('[SessionClient] ConfirmBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Reject a bullet hit because the asteroid no longer exists (called by asteroid owner).
+     */
+    async function rejectBulletHit(bulletObjectId, bulletOwnerMemberId) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('RejectBulletHit', bulletObjectId, bulletOwnerMemberId);
+        } catch (err) {
+            console.error('[SessionClient] RejectBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Report that this player's ship was hit by an asteroid.
+     * GameState owner will decrement lives.
+     */
+    async function reportShipHit() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ReportShipHit');
+        } catch (err) {
+            console.error('[SessionClient] ReportShipHit failed:', err);
         }
     }
 
@@ -410,10 +535,15 @@ const SessionClient = (function() {
         createSession,
         joinSession,
         leaveSession,
+        startGame,
         getActiveSessions,
         createObject,
         updateObjects,
         deleteObject,
+        reportBulletHit,
+        confirmBulletHit,
+        rejectBulletHit,
+        reportShipHit,
         on,
         getCurrentSession,
         getCurrentMember,

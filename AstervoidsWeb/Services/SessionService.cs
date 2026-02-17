@@ -51,7 +51,7 @@ public class SessionService : ISessionService
         _logger = logger;
     }
 
-    public CreateSessionResult CreateSession(string creatorConnectionId)
+    public CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio)
     {
         lock (_sessionLock)
         {
@@ -70,9 +70,13 @@ public class SessionService : ISessionService
                 return new CreateSessionResult(false, null, null, $"Maximum number of sessions ({_maxSessions}) has been reached");
             }
 
+            // Validate aspect ratio (reasonable bounds: 0.25 to 4.0)
+            var clampedAspectRatio = Math.Clamp(aspectRatio, 0.25, 4.0);
+
             var session = new Session
             {
-                Name = GenerateUniqueFruitName()
+                Name = GenerateUniqueFruitName(),
+                AspectRatio = clampedAspectRatio
             };
 
             var creator = new Member
@@ -154,7 +158,6 @@ public class SessionService : ISessionService
             return null;
 
         Member? promotedMember = null;
-        var affectedObjectIds = new List<Guid>();
 
         // If the leaving member was the server, promote a client
         if (member.Role == MemberRole.Server && session.Members.Count > 0)
@@ -176,15 +179,6 @@ public class SessionService : ISessionService
                         _logger?.LogInformation("Member {MemberId} promoted to Server in session {SessionName}", 
                             promotedMember.Id, session.Name);
 
-                        // Update object affiliations
-                        foreach (var obj in session.Objects.Values)
-                        {
-                            if (obj.AffiliatedRole == MemberRole.Server)
-                            {
-                                affectedObjectIds.Add(obj.Id);
-                            }
-                        }
-
                         session.Version++;
                     }
                 }
@@ -203,8 +197,7 @@ public class SessionService : ISessionService
             session.Name,
             memberId,
             sessionDestroyed,
-            promotedMember,
-            affectedObjectIds
+            promotedMember
         );
     }
 
@@ -212,7 +205,7 @@ public class SessionService : ISessionService
     {
         var sessions = _sessions.Values
             .Where(s => !s.Members.IsEmpty)
-            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, _maxMembersPerSession, s.CreatedAt))
+            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, _maxMembersPerSession, s.CreatedAt, s.GameStarted))
             .OrderByDescending(s => s.CreatedAt)
             .ToList();
 
