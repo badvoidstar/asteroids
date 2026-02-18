@@ -1578,6 +1578,7 @@
             this.angle = -Math.PI / 2;     // Facing up initially
             this.velocityX = 0;            // Normalized horizontal velocity (per second)
             this.velocityY = 0;            // Normalized vertical velocity (per second)
+            this.rotationSpeed = 0;        // Current rotation speed (radians per frame at 60fps)
             this.thrusting = false;        // Is thrust active?
             this.invulnerable = 0;         // Invulnerability frames remaining
             this.shootCooldown = 0;        // Frames until can shoot again
@@ -1598,6 +1599,7 @@
                 angle: this.angle,
                 velocityX: this.velocityX,
                 velocityY: this.velocityY,
+                rotationSpeed: this.rotationSpeed,
                 thrusting: this.thrusting,
                 invulnerable: this.invulnerable,
                 colorIndex: this.colorIndex,
@@ -1615,6 +1617,7 @@
             if (data.angle !== undefined) this.angle = data.angle;
             if (data.velocityX !== undefined) this.velocityX = data.velocityX;
             if (data.velocityY !== undefined) this.velocityY = data.velocityY;
+            if (data.rotationSpeed !== undefined) this.rotationSpeed = data.rotationSpeed;
             if (data.thrusting !== undefined) this.thrusting = data.thrusting;
             if (data.invulnerable !== undefined) this.invulnerable = data.invulnerable;
             if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
@@ -2972,9 +2975,12 @@
         // Rotation (adjusted for delta time)
         if (input.left()) {
             game.ship.angle -= CONFIG.SHIP_TURN_SPEED * dt;
-        }
-        if (input.right()) {
+            game.ship.rotationSpeed = -CONFIG.SHIP_TURN_SPEED;
+        } else if (input.right()) {
             game.ship.angle += CONFIG.SHIP_TURN_SPEED * dt;
+            game.ship.rotationSpeed = CONFIG.SHIP_TURN_SPEED;
+        } else {
+            game.ship.rotationSpeed = 0;
         }
         
         // Thrust
