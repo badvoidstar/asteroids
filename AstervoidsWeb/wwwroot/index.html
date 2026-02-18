@@ -3290,15 +3290,9 @@
                 // Check for wave completion (only authority checks in multiplayer)
                 if (game.astervoids.length === 0 && game.state === 'playing') {
                     if (!isSessionMode() || isAuthority()) {
-                        // In multiplayer, use synced object store to avoid race with distributed ownership
-                        const hasAsteroids = isSessionMode()
-                            ? ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID).length > 0
-                            : false;
-                        if (!hasAsteroids) {
-                            game.state = 'waveDelay';
-                            game.waveDelayTimer = CONFIG.WAVE_DELAY;
-                            if (isSessionMode()) syncGameState();
-                        }
+                        game.state = 'waveDelay';
+                        game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                        if (isSessionMode()) syncGameState();
                     }
                 }
                 
@@ -4256,7 +4250,7 @@
             return;
         }
         
-        // Accept the hit — remove asteroid and confirm with asteroid data for bullet owner to split
+        // Accept the hit — remove parent, split (creating children atomically), confirm
         const asteroid = game.astervoids[asteroidIndex];
         const points = asteroid.getPoints();
         const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
@@ -4267,14 +4261,15 @@
         if (asteroid.syncObjectId) {
             deleteSyncedAsteroid(asteroid);
         }
+        splitAsteroid(asteroid);
         syncGameState();
         
-        // Confirm back to the bullet owner with asteroid data for splitting
+        // Confirm back to the bullet owner for cleanup and sound
         SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size,
             asteroid.x, asteroid.y, asteroid.velocityX, asteroid.velocityY, asteroid.radius);
     });
 
-    // Handle bullet hit confirmed — bullet owner cleans up and splits asteroid
+    // Handle bullet hit confirmed — bullet owner cleans up bullet and plays sound
     SessionClient.on('onBulletHitConfirmed', (confirmation) => {
         const myMemberId = SessionClient.getCurrentMember()?.id;
         if (confirmation.bulletOwnerMemberId !== myMemberId) return;
@@ -4288,16 +4283,8 @@
             }
         }
         
-        // Reconstruct asteroid from confirmation data and split it (creates children owned by us)
-        const asteroid = new Asteroid(
-            confirmation.asteroidX, confirmation.asteroidY,
-            confirmation.asteroidRadius,
-            confirmation.asteroidVelocityX, confirmation.asteroidVelocityY
-        );
-        splitAsteroid(asteroid);
-        
-        // Report score to authority
-        SessionClient.reportScore(confirmation.points);
+        // Play explosion sound (splitAsteroid runs on asteroid owner's side)
+        AudioSystem.playExplosion(confirmation.asteroidSize);
     });
 
     // Handle bullet hit rejected — bullet owner un-hides bullet
