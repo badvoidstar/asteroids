@@ -360,7 +360,7 @@ public class SessionHub : Hub
     /// Confirms that a bullet hit was accepted by the asteroid owner.
     /// Broadcasts to all session members so the bullet owner can handle cleanup.
     /// </summary>
-    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize)
+    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize, double asteroidX, double asteroidY, double asteroidVelocityX, double asteroidVelocityY, double asteroidRadius)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -370,7 +370,7 @@ public class SessionHub : Hub
         }
 
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
-            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize));
+            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius));
     }
 
     /// <summary>
@@ -388,6 +388,23 @@ public class SessionHub : Hub
 
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitRejected",
             new BulletHitRejection(bulletObjectId, bulletOwnerMemberId));
+    }
+
+    /// <summary>
+    /// Reports score points earned by a player. Broadcasts to all session members
+    /// so the authority can update the shared score.
+    /// </summary>
+    public async Task ReportScore(int points)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReportScore failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnScoreReported",
+            new ScoreReport(member.Id, points));
     }
 
     /// <summary>
@@ -433,6 +450,7 @@ public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int 
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
-public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);
+public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize, double AsteroidX, double AsteroidY, double AsteroidVelocityX, double AsteroidVelocityY, double AsteroidRadius);
 public record BulletHitRejection(Guid BulletObjectId, Guid BulletOwnerMemberId);
 public record ShipHitReport(Guid ReporterMemberId);
+public record ScoreReport(Guid ReporterMemberId, int Points);

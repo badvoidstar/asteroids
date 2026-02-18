@@ -30,6 +30,7 @@ const SessionClient = (function() {
         onBulletHitConfirmed: null,
         onBulletHitRejected: null,
         onShipHitReported: null,
+        onScoreReported: null,
         onError: null
     };
 
@@ -220,6 +221,12 @@ const SessionClient = (function() {
         connection.on('OnShipHitReported', (report) => {
             if (callbacks.onShipHitReported) {
                 callbacks.onShipHitReported(report);
+            }
+        });
+
+        connection.on('OnScoreReported', (report) => {
+            if (callbacks.onScoreReported) {
+                callbacks.onScoreReported(report);
             }
         });
     }
@@ -455,10 +462,10 @@ const SessionClient = (function() {
     /**
      * Confirm that a bullet hit was accepted (called by asteroid owner).
      */
-    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
+    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
         try {
-            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
+            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius);
         } catch (err) {
             console.error('[SessionClient] ConfirmBulletHit failed:', err);
         }
@@ -473,6 +480,19 @@ const SessionClient = (function() {
             await connection.invoke('RejectBulletHit', bulletObjectId, bulletOwnerMemberId);
         } catch (err) {
             console.error('[SessionClient] RejectBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Report score points earned by a player.
+     * Authority will update the shared score.
+     */
+    async function reportScore(points) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ReportScore', points);
+        } catch (err) {
+            console.error('[SessionClient] ReportScore failed:', err);
         }
     }
 
@@ -544,6 +564,7 @@ const SessionClient = (function() {
         confirmBulletHit,
         rejectBulletHit,
         reportShipHit,
+        reportScore,
         on,
         getCurrentSession,
         getCurrentMember,
