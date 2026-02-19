@@ -1,4 +1,6 @@
+using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Models;
+using Microsoft.Extensions.Options;
 
 namespace AstervoidsWeb.Services;
 
@@ -8,10 +10,18 @@ namespace AstervoidsWeb.Services;
 public class ObjectService : IObjectService
 {
     private readonly ISessionService _sessionService;
+    private readonly bool _distributeOrphanedObjects;
 
     public ObjectService(ISessionService sessionService)
     {
         _sessionService = sessionService;
+        _distributeOrphanedObjects = true;
+    }
+
+    public ObjectService(ISessionService sessionService, IOptions<SessionSettings> settings)
+    {
+        _sessionService = sessionService;
+        _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
     }
 
     public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null)
@@ -92,13 +102,13 @@ public class ObjectService : IObjectService
         return results;
     }
 
-    public bool DeleteObject(Guid sessionId, Guid objectId)
+    public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return false;
+            return null;
 
-        return session.Objects.TryRemove(objectId, out _);
+        return session.Objects.TryRemove(objectId, out var obj) ? obj : null;
     }
 
     public IEnumerable<SessionObject> GetSessionObjects(Guid sessionId)
@@ -119,19 +129,33 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
-    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, Guid? newOwnerId)
+    public int GetObjectCountByType(Guid sessionId, string type)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return new MemberDepartureResult([], []);
+            return 0;
+
+        return session.Objects.Values.Count(obj =>
+            obj.Data.TryGetValue("type", out var t) && string.Equals(t?.ToString(), type, StringComparison.Ordinal));
+    }
+
+    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
+    {
+        var session = _sessionService.GetSession(sessionId);
+        if (session == null)
+            return new MemberDepartureResult([], [], []);
 
         var deletedIds = new List<Guid>();
-        var migratedIds = new List<Guid>();
+        var migratedObjects = new List<ObjectMigration>();
+        var affectedTypes = new HashSet<string>();
+        var roundRobinIndex = 0;
 
         foreach (var obj in session.Objects.Values.ToList())
         {
             if (obj.OwnerMemberId != departingMemberId)
                 continue;
+
+            var objectType = obj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
 
             if (obj.Scope == ObjectScope.Member)
             {
@@ -139,18 +163,30 @@ public class ObjectService : IObjectService
                 if (session.Objects.TryRemove(obj.Id, out _))
                 {
                     deletedIds.Add(obj.Id);
+                    if (objectType != null) affectedTypes.Add(objectType);
                 }
             }
-            else if (obj.Scope == ObjectScope.Session && newOwnerId.HasValue)
+            else if (obj.Scope == ObjectScope.Session && remainingMemberIds.Count > 0)
             {
-                // Session-scoped: migrate ownership
-                obj.OwnerMemberId = newOwnerId.Value;
+                // Session-scoped: distribute across remaining members
+                Guid newOwnerId;
+                if (_distributeOrphanedObjects && remainingMemberIds.Count > 1)
+                {
+                    newOwnerId = remainingMemberIds[roundRobinIndex % remainingMemberIds.Count];
+                    roundRobinIndex++;
+                }
+                else
+                {
+                    newOwnerId = remainingMemberIds[0];
+                }
+
+                obj.OwnerMemberId = newOwnerId;
                 obj.Version++;
                 obj.UpdatedAt = DateTime.UtcNow;
-                migratedIds.Add(obj.Id);
+                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId));
             }
         }
 
-        return new MemberDepartureResult(deletedIds, migratedIds);
+        return new MemberDepartureResult(deletedIds, migratedObjects, affectedTypes);
     }
 }

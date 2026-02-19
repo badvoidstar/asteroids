@@ -2347,7 +2347,6 @@
      */
     async function createSyncedAsteroid(asteroid) {
         if (!isSessionMode()) return;
-        if (!isAuthority()) return;
         
         try {
             const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session');
@@ -2832,9 +2831,6 @@
      * @param {Asteroid} asteroid - The asteroid to split
      */
     function splitAsteroid(asteroid) {
-        // Add points
-        game.score += asteroid.getPoints();
-        
         // Play explosion sound based on asteroid size (using normalized thresholds)
         const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
                      asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
@@ -3043,6 +3039,7 @@
                         
                         if (asteroidOwner === myMemberId) {
                             // We own both bullet and asteroid — process locally
+                            const points = asteroid.getPoints();
                             const removedBullet = game.bullets.splice(i, 1)[0];
                             if (removedBullet.syncObjectId) {
                                 deleteSyncedBullet(removedBullet);
@@ -3052,7 +3049,8 @@
                                 deleteSyncedAsteroid(asteroid);
                             }
                             splitAsteroid(asteroid);
-                            syncGameState();
+                            // Report score to authority (uniform path for all players)
+                            SessionClient.reportScore(points);
                         } else {
                             // Asteroid owned by someone else — report collision, hide bullet
                             bullet.pendingHit = true;
@@ -3067,6 +3065,7 @@
                         // Solo mode — process locally
                         const removedBullet = game.bullets.splice(i, 1)[0];
                         game.astervoids.splice(j, 1);
+                        game.score += asteroid.getPoints();
                         splitAsteroid(asteroid);
                     }
                     
@@ -3113,7 +3112,7 @@
 
     /**
      * Handle ship being hit by asteroid (local ship only)
-     * Ship owner handles reset locally; notifies GameState owner for lives in multiplayer.
+     * Ship owner handles reset locally; reports to authority for lives decrement.
      * @param {Ship} ship - The ship that was hit
      */
     function handleShipHit(ship) {
@@ -3127,18 +3126,8 @@
                 ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toSyncData(), true);
             }
             
-            if (isAuthority()) {
-                // Authority is GameState owner — decrement lives directly
-                game.lives--;
-                updateHUD();
-                if (game.lives <= 0) {
-                    AudioSystem.beat.stop();
-                }
-                syncGameState(true);
-            } else {
-                // Notify GameState owner to decrement lives
-                SessionClient.reportShipHit();
-            }
+            // All players report ship hit — authority processes via onShipHitReported
+            SessionClient.reportShipHit();
         } else {
             // Solo mode — handle everything locally
             game.lives--;
@@ -3289,12 +3278,12 @@
                 // Check collisions
                 checkCollisions();
                 
-                // Check for wave completion (only authority checks in multiplayer)
+                // Check for wave completion
                 if (game.astervoids.length === 0 && game.state === 'playing') {
-                    if (!isSessionMode() || isAuthority()) {
+                    // Solo mode: detect locally; multiplayer: driven by OnObjectTypeEmpty event
+                    if (!isSessionMode()) {
                         game.state = 'waveDelay';
                         game.waveDelayTimer = CONFIG.WAVE_DELAY;
-                        if (isSessionMode()) syncGameState();
                     }
                 }
                 
@@ -4196,9 +4185,8 @@
     });
 
     // Handle role changes (e.g., promoted to server when server leaves)
-    SessionClient.on('onRoleChanged', (newRole, migratedObjectIds) => {
-        // Let ObjectSync migrate ownership for migrated objects
-        ObjectSync.handleRoleChanged(newRole, migratedObjectIds || []);
+    SessionClient.on('onRoleChanged', (newRole) => {
+        ObjectSync.handleRoleChanged(newRole);
         
         if (game.sessionInfo) {
             game.sessionInfo.role = newRole;
@@ -4230,8 +4218,8 @@
                 game.bullets = game.bullets.filter(b => b.syncObjectId !== objectId);
             }
         }
-        if (info.migratedObjectIds && info.migratedObjectIds.length > 0 && info.promotedMemberId) {
-            ObjectSync.handleOwnershipMigration(info.migratedObjectIds, info.promotedMemberId);
+        if (info.migratedObjects && info.migratedObjects.length > 0) {
+            ObjectSync.handleOwnershipMigration(info.migratedObjects);
         }
     });
 
@@ -4252,7 +4240,7 @@
             return;
         }
         
-        // Accept the hit — remove asteroid, split, and confirm
+        // Accept the hit — remove asteroid and confirm with asteroid data for bullet owner to split
         const asteroid = game.astervoids[asteroidIndex];
         const points = asteroid.getPoints();
         const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
@@ -4262,14 +4250,13 @@
         if (asteroid.syncObjectId) {
             deleteSyncedAsteroid(asteroid);
         }
-        splitAsteroid(asteroid);
-        syncGameState();
         
-        // Confirm back to the bullet owner
-        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size);
+        // Confirm back to the bullet owner with asteroid data for splitting
+        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size,
+            asteroid.x, asteroid.y, asteroid.velocityX, asteroid.velocityY, asteroid.radius);
     });
 
-    // Handle bullet hit confirmed — bullet owner cleans up
+    // Handle bullet hit confirmed — bullet owner cleans up and splits asteroid
     SessionClient.on('onBulletHitConfirmed', (confirmation) => {
         const myMemberId = SessionClient.getCurrentMember()?.id;
         if (confirmation.bulletOwnerMemberId !== myMemberId) return;
@@ -4283,8 +4270,16 @@
             }
         }
         
-        // Play explosion sound based on asteroid size
-        AudioSystem.playExplosion(confirmation.asteroidSize || 'medium');
+        // Reconstruct asteroid from confirmation data and split it (creates children owned by us)
+        const asteroid = new Asteroid(
+            confirmation.asteroidX, confirmation.asteroidY,
+            confirmation.asteroidRadius,
+            confirmation.asteroidVelocityX, confirmation.asteroidVelocityY
+        );
+        splitAsteroid(asteroid);
+        
+        // Report score to authority
+        SessionClient.reportScore(confirmation.points);
     });
 
     // Handle bullet hit rejected — bullet owner un-hides bullet
@@ -4313,6 +4308,31 @@
             AudioSystem.beat.stop();
         }
         syncGameState(true);
+    });
+
+    // Handle score reported — authority adds points to shared score
+    SessionClient.on('onScoreReported', (report) => {
+        if (!isAuthority()) return;
+        
+        game.score += report.points;
+        updateHUD();
+        syncGameState();
+    });
+
+    // Handle server-authoritative object type count events for wave detection
+    SessionClient.on('onObjectTypeEmpty', (objectType) => {
+        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'playing' && isAuthority()) {
+            game.state = 'waveDelay';
+            game.waveDelayTimer = CONFIG.WAVE_DELAY;
+            syncGameState();
+        }
+    });
+
+    SessionClient.on('onObjectTypeRestored', (objectType) => {
+        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'waveDelay' && isAuthority()) {
+            game.state = 'playing';
+            syncGameState();
+        }
     });
 
     // Handle session list changes (signal from server - fetch fresh data with jitter)
@@ -4367,13 +4387,20 @@
                         syncLocalShip();
                     }
                     
-                    // Update astervoids (authority)
-                    if (isAuthority()) {
-                        game.astervoids.forEach(a => a.update(dt));
-                        syncLocalAstervoids();
-                    } else {
-                        updateAstervoidsFromSync();
-                    }
+                    // Update astervoids (owned locally, others from sync)
+                    const bgMemberId = SessionClient.getCurrentMember()?.id;
+                    game.astervoids.forEach(a => {
+                        if (!a.syncObjectId) {
+                            a.update(dt);
+                        } else {
+                            const syncObj = ObjectSync.getObject(a.syncObjectId);
+                            if (syncObj && syncObj.ownerMemberId === bgMemberId) {
+                                a.update(dt);
+                            }
+                        }
+                    });
+                    syncLocalAstervoids();
+                    updateAstervoidsFromSync();
                     
                     // Update remote state
                     updateRemoteShips();

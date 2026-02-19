@@ -154,15 +154,8 @@ const ObjectSync = (function() {
     /**
      * Handle role changed - update ownership for migrated objects.
      */
-    function handleRoleChanged(newRole, migratedObjectIds) {
-        const myMemberId = SessionClient.getCurrentMember()?.id;
-        for (const objectId of migratedObjectIds) {
-            const obj = objects.get(objectId);
-            if (obj && myMemberId) {
-                obj.ownerMemberId = myMemberId;
-            }
-        }
-        console.log('[ObjectSync] Migrated ownership for', migratedObjectIds.length, 'objects');
+    function handleRoleChanged(newRole) {
+        console.log('[ObjectSync] Role changed to', newRole);
     }
 
     /**
@@ -448,14 +441,13 @@ const ObjectSync = (function() {
 
     /**
      * Handle ownership migration for objects (called when a member leaves and objects are migrated).
-     * @param {string[]} migratedObjectIds - IDs of objects whose ownership changed
-     * @param {string} newOwnerId - The new owner's member ID
+     * @param {Array<{objectId: string, newOwnerId: string}>} migratedObjects - Objects with their new owners
      */
-    function handleOwnershipMigration(migratedObjectIds, newOwnerId) {
-        for (const objectId of migratedObjectIds) {
-            const obj = objects.get(objectId);
+    function handleOwnershipMigration(migratedObjects) {
+        for (const migration of migratedObjects) {
+            const obj = objects.get(migration.objectId);
             if (obj) {
-                obj.ownerMemberId = newOwnerId;
+                obj.ownerMemberId = migration.newOwnerId;
                 obj.version++;
             }
         }

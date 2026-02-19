@@ -130,9 +130,18 @@ public class SessionHub : Hub
             return;
         }
 
-        // Handle object cleanup based on scope
+        // Handle object cleanup — gather remaining member IDs for round-robin distribution
+        var remainingMemberIds = new List<Guid>();
+        if (!result.SessionDestroyed)
+        {
+            var session = _sessionService.GetSession(result.SessionId);
+            if (session != null)
+            {
+                remainingMemberIds = session.Members.Keys.ToList();
+            }
+        }
         var departureResult = _objectService.HandleMemberDeparture(
-            result.SessionId, result.MemberId, result.PromotedMember?.Id);
+            result.SessionId, result.MemberId, remainingMemberIds);
 
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, result.SessionId.ToString());
 
@@ -144,7 +153,7 @@ public class SessionHub : Hub
                 result.PromotedMember?.Id,
                 result.PromotedMember?.Role.ToString(),
                 departureResult.DeletedObjectIds,
-                departureResult.MigratedObjectIds
+                departureResult.MigratedObjects
             ));
 
             if (result.PromotedMember != null)
@@ -152,8 +161,17 @@ public class SessionHub : Hub
                 _logger.LogInformation(
                     "Member {PromotedMemberId} promoted to Server in session {SessionName}. Migrated {MigratedCount} objects, deleted {DeletedCount} objects.",
                     result.PromotedMember.Id, result.SessionName,
-                    departureResult.MigratedObjectIds.Count(),
+                    departureResult.MigratedObjects.Count(),
                     departureResult.DeletedObjectIds.Count());
+            }
+
+            // Emit OnObjectTypeEmpty for any types that became empty after departure
+            foreach (var objectType in departureResult.AffectedTypes)
+            {
+                if (_objectService.GetObjectCountByType(result.SessionId, objectType) == 0)
+                {
+                    await Clients.Group(result.SessionId.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
+                }
             }
         }
         else
@@ -262,6 +280,13 @@ public class SessionHub : Hub
         // Notify all members including sender
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated", objectInfo);
 
+        // Check if this type was just restored (count went from 0 to 1)
+        var objectType = data?.TryGetValue("type", out var t) == true ? t?.ToString() : null;
+        if (objectType != null && _objectService.GetObjectCountByType(member.SessionId, objectType) == 1)
+        {
+            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectTypeRestored", objectType);
+        }
+
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
 
         return objectInfo;
@@ -306,14 +331,21 @@ public class SessionHub : Hub
             return false;
         }
 
-        var deleted = _objectService.DeleteObject(session.Id, objectId);
-        if (deleted)
+        var deletedObj = _objectService.DeleteObject(session.Id, objectId);
+        if (deletedObj != null)
         {
             await Clients.Group(session.Id.ToString()).SendAsync("OnObjectDeleted", objectId);
             _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, session.Id);
+
+            // Check if this type is now empty
+            var objectType = deletedObj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
+            if (objectType != null && _objectService.GetObjectCountByType(session.Id, objectType) == 0)
+            {
+                await Clients.Group(session.Id.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
+            }
         }
 
-        return deleted;
+        return deletedObj != null;
     }
 
     /// <summary>
@@ -360,7 +392,7 @@ public class SessionHub : Hub
     /// Confirms that a bullet hit was accepted by the asteroid owner.
     /// Broadcasts to all session members so the bullet owner can handle cleanup.
     /// </summary>
-    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize)
+    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize, double asteroidX, double asteroidY, double asteroidVelocityX, double asteroidVelocityY, double asteroidRadius)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -370,7 +402,7 @@ public class SessionHub : Hub
         }
 
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
-            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize));
+            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius));
     }
 
     /// <summary>
@@ -388,6 +420,23 @@ public class SessionHub : Hub
 
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitRejected",
             new BulletHitRejection(bulletObjectId, bulletOwnerMemberId));
+    }
+
+    /// <summary>
+    /// Reports score points earned by a player. Broadcasts to all session members
+    /// so the authority can update the shared score.
+    /// </summary>
+    public async Task ReportScore(int points)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReportScore failed - member not found");
+            return;
+        }
+
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnScoreReported",
+            new ScoreReport(member.Id, points));
     }
 
     /// <summary>
@@ -426,13 +475,14 @@ public record MemberLeftInfo(
     Guid? PromotedMemberId,
     string? PromotedRole,
     IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<Guid> MigratedObjectIds
+    IEnumerable<ObjectMigration> MigratedObjects
 );
 public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt, bool GameStarted);
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
-public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);
+public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize, double AsteroidX, double AsteroidY, double AsteroidVelocityX, double AsteroidVelocityY, double AsteroidRadius);
 public record BulletHitRejection(Guid BulletObjectId, Guid BulletOwnerMemberId);
 public record ShipHitReport(Guid ReporterMemberId);
+public record ScoreReport(Guid ReporterMemberId, int Points);

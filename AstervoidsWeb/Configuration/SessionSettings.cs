@@ -16,4 +16,10 @@ public class SessionSettings
     /// Maximum number of members per session. Default is 4.
     /// </summary>
     public int MaxMembersPerSession { get; set; } = 4;
+
+    /// <summary>
+    /// When true, distributes orphaned Session-scoped objects round-robin across remaining members
+    /// on member departure. When false, all objects go to a single member. Default is true.
+    /// </summary>
+    public bool DistributeOrphanedObjects { get; set; } = true;
 }

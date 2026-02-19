@@ -30,7 +30,8 @@ public interface IObjectService
     /// <summary>
     /// Deletes an object from a session.
     /// </summary>
-    bool DeleteObject(Guid sessionId, Guid objectId);
+    /// <returns>The deleted object, or null if not found.</returns>
+    SessionObject? DeleteObject(Guid sessionId, Guid objectId);
 
     /// <summary>
     /// Gets all objects in a session.
@@ -43,15 +44,20 @@ public interface IObjectService
     SessionObject? GetObject(Guid sessionId, Guid objectId);
 
     /// <summary>
+    /// Counts how many objects in a session have the given type in their Data["type"] field.
+    /// </summary>
+    int GetObjectCountByType(Guid sessionId, string type);
+
+    /// <summary>
     /// Handles cleanup when a member departs a session.
     /// Deletes member-scoped objects owned by the departing member.
-    /// Transfers session-scoped objects to a new owner (if provided).
+    /// Transfers session-scoped objects to remaining members (distributed round-robin or to a single member based on configuration).
     /// </summary>
     /// <param name="sessionId">The session.</param>
     /// <param name="departingMemberId">The member who is leaving.</param>
-    /// <param name="newOwnerId">The member to receive session-scoped objects (null if no migration needed).</param>
-    /// <returns>Result containing deleted and migrated object IDs.</returns>
-    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, Guid? newOwnerId);
+    /// <param name="remainingMemberIds">The remaining members eligible to receive session-scoped objects.</param>
+    /// <returns>Result containing deleted and migrated object info.</returns>
+    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds);
 }
 
 /// <summary>
@@ -64,9 +70,15 @@ public record ObjectUpdate(
 );
 
 /// <summary>
+/// Represents a single object migration (object reassigned to a new owner).
+/// </summary>
+public record ObjectMigration(Guid ObjectId, Guid NewOwnerId);
+
+/// <summary>
 /// Result of handling a member's departure from a session.
 /// </summary>
 public record MemberDepartureResult(
     IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<Guid> MigratedObjectIds
+    IEnumerable<ObjectMigration> MigratedObjects,
+    IEnumerable<string> AffectedTypes
 );

@@ -24,12 +24,15 @@ const SessionClient = (function() {
         onObjectCreated: null,
         onObjectsUpdated: null,
         onObjectDeleted: null,
+        onObjectTypeEmpty: null,
+        onObjectTypeRestored: null,
         onSessionsChanged: null,
         onGameStarted: null,
         onBulletHitReported: null,
         onBulletHitConfirmed: null,
         onBulletHitRejected: null,
         onShipHitReported: null,
+        onScoreReported: null,
         onError: null
     };
 
@@ -139,7 +142,12 @@ const SessionClient = (function() {
                 currentSession.members = currentSession.members.filter(m => m.id !== info.memberId);
             }
 
-            // Check if we were promoted
+            // Handle object cleanup/migration FIRST (before role change, so promoted member sees correct ownership)
+            if (callbacks.onMemberLeft) {
+                callbacks.onMemberLeft(info);
+            }
+
+            // Check if we were promoted (after migration so ownership is correct for handleServerPromotion)
             if (info.promotedMemberId && currentMember && 
                 info.promotedMemberId === currentMember.id) {
                 currentMember.role = info.promotedRole;
@@ -151,12 +159,8 @@ const SessionClient = (function() {
                     }
                 }
                 if (callbacks.onRoleChanged) {
-                    callbacks.onRoleChanged(info.promotedRole, info.migratedObjectIds || []);
+                    callbacks.onRoleChanged(info.promotedRole);
                 }
-            }
-
-            if (callbacks.onMemberLeft) {
-                callbacks.onMemberLeft(info);
             }
         });
 
@@ -176,6 +180,18 @@ const SessionClient = (function() {
         connection.on('OnObjectDeleted', (objectId) => {
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId);
+            }
+        });
+
+        connection.on('OnObjectTypeEmpty', (objectType) => {
+            if (callbacks.onObjectTypeEmpty) {
+                callbacks.onObjectTypeEmpty(objectType);
+            }
+        });
+
+        connection.on('OnObjectTypeRestored', (objectType) => {
+            if (callbacks.onObjectTypeRestored) {
+                callbacks.onObjectTypeRestored(objectType);
             }
         });
 
@@ -220,6 +236,12 @@ const SessionClient = (function() {
         connection.on('OnShipHitReported', (report) => {
             if (callbacks.onShipHitReported) {
                 callbacks.onShipHitReported(report);
+            }
+        });
+
+        connection.on('OnScoreReported', (report) => {
+            if (callbacks.onScoreReported) {
+                callbacks.onScoreReported(report);
             }
         });
     }
@@ -455,10 +477,10 @@ const SessionClient = (function() {
     /**
      * Confirm that a bullet hit was accepted (called by asteroid owner).
      */
-    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
+    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
         try {
-            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
+            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius);
         } catch (err) {
             console.error('[SessionClient] ConfirmBulletHit failed:', err);
         }
@@ -473,6 +495,19 @@ const SessionClient = (function() {
             await connection.invoke('RejectBulletHit', bulletObjectId, bulletOwnerMemberId);
         } catch (err) {
             console.error('[SessionClient] RejectBulletHit failed:', err);
+        }
+    }
+
+    /**
+     * Report score points earned by a player.
+     * Authority will update the shared score.
+     */
+    async function reportScore(points) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
+        try {
+            await connection.invoke('ReportScore', points);
+        } catch (err) {
+            console.error('[SessionClient] ReportScore failed:', err);
         }
     }
 
@@ -544,6 +579,7 @@ const SessionClient = (function() {
         confirmBulletHit,
         rejectBulletHit,
         reportShipHit,
+        reportScore,
         on,
         getCurrentSession,
         getCurrentMember,

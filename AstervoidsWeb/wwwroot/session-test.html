@@ -692,9 +692,8 @@
             refreshSessions();
         });
 
-        SessionClient.on('onRoleChanged', (newRole, migratedObjectIds) => {
+        SessionClient.on('onRoleChanged', (newRole) => {
             log(`Your role changed to: ${newRole}`, 'event');
-            log(`Migrated objects: ${migratedObjectIds.length}`, 'info');
             const session = SessionClient.getCurrentSession();
             const member = SessionClient.getCurrentMember();
             if (session && member) {

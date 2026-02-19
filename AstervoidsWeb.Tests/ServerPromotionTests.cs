@@ -56,13 +56,16 @@ public class ServerPromotionTests
 
         // Act
         var leaveResult = _sessionService.LeaveSession("server-conn");
-        var departureResult = _objectService.HandleMemberDeparture(session.Id, server.Id, leaveResult!.PromotedMember?.Id);
+        var remainingIds = leaveResult!.PromotedMember != null 
+            ? new List<Guid> { leaveResult.PromotedMember.Id } 
+            : new List<Guid>();
+        var departureResult = _objectService.HandleMemberDeparture(session.Id, server.Id, remainingIds);
 
         // Assert
         departureResult.DeletedObjectIds.Should().Contain(serverMemberObj!.Id);
-        departureResult.MigratedObjectIds.Should().Contain(serverSessionObj!.Id);
+        departureResult.MigratedObjects.Select(m => m.ObjectId).Should().Contain(serverSessionObj!.Id);
         departureResult.DeletedObjectIds.Should().NotContain(clientObj!.Id);
-        departureResult.MigratedObjectIds.Should().NotContain(clientObj.Id);
+        departureResult.MigratedObjects.Select(m => m.ObjectId).Should().NotContain(clientObj.Id);
     }
 
     [Fact]
