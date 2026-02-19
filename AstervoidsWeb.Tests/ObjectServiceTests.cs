@@ -183,12 +183,12 @@ public class ObjectServiceTests
         var deleted = _objectService.DeleteObject(session.Id, obj!.Id);
 
         // Assert
-        deleted.Should().BeTrue();
+        deleted.Should().NotBeNull();
         _objectService.GetObject(session.Id, obj.Id).Should().BeNull();
     }
 
     [Fact]
-    public void DeleteObject_NonExistent_ShouldReturnFalse()
+    public void DeleteObject_NonExistent_ShouldReturnNull()
     {
         // Arrange
         var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
@@ -197,7 +197,7 @@ public class ObjectServiceTests
         var deleted = _objectService.DeleteObject(session.Id, Guid.NewGuid());
 
         // Assert
-        deleted.Should().BeFalse();
+        deleted.Should().BeNull();
     }
 
     [Fact]
@@ -238,8 +238,8 @@ public class ObjectServiceTests
         var secondDelete = _objectService.DeleteObject(session.Id, asteroid.Id);
 
         // Assert - double-delete is safe, other objects unaffected
-        firstDelete.Should().BeTrue();
-        secondDelete.Should().BeFalse();
+        firstDelete.Should().NotBeNull();
+        secondDelete.Should().BeNull();
         _objectService.GetObject(session.Id, asteroid.Id).Should().BeNull();
         _objectService.GetObject(session.Id, otherObj!.Id).Should().NotBeNull();
         _objectService.GetSessionObjects(session.Id).Should().HaveCount(1);
@@ -320,11 +320,11 @@ public class ObjectServiceTests
         var asteroidLookup = _objectService.GetObject(session.Id, asteroid.Id);
 
         // Assert
-        asteroidDeleted.Should().BeTrue();
+        asteroidDeleted.Should().NotBeNull();
         child1.Should().NotBeNull();
         child2.Should().NotBeNull();
-        bullet1Deleted.Should().BeTrue();
-        secondAsteroidDelete.Should().BeFalse("asteroid was already destroyed by first bullet");
+        bullet1Deleted.Should().NotBeNull();
+        secondAsteroidDelete.Should().BeNull("asteroid was already destroyed by first bullet");
         asteroidLookup.Should().BeNull("asteroid should not reappear");
 
         // Session should contain: child1, child2, bullet2 (bullet1 was deleted)
@@ -333,5 +333,156 @@ public class ObjectServiceTests
         remaining.Should().Contain(o => o.Id == child1!.Id);
         remaining.Should().Contain(o => o.Id == child2!.Id);
         remaining.Should().Contain(o => o.Id == bullet2!.Id);
+    }
+
+    [Fact]
+    public void GetObjectCountByType_ShouldCountMatchingObjects()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+
+        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.1
+        });
+        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.2
+        });
+        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        {
+            ["type"] = "bullet"
+        });
+
+        // Act & Assert
+        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(2);
+        _objectService.GetObjectCountByType(session.Id, "bullet").Should().Be(1);
+        _objectService.GetObjectCountByType(session.Id, "ship").Should().Be(0);
+    }
+
+    [Fact]
+    public void GetObjectCountByType_AfterLastDelete_ShouldReturnZero()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+
+        var asteroid = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.5
+        });
+
+        // Act
+        _objectService.DeleteObject(session.Id, asteroid!.Id);
+
+        // Assert
+        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(0);
+    }
+
+    [Fact]
+    public void GetObjectCountByType_AfterNonLastDelete_ShouldReturnRemaining()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+
+        var a1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.1
+        });
+        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.2
+        });
+
+        // Act
+        _objectService.DeleteObject(session.Id, a1!.Id);
+
+        // Assert
+        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
+    }
+
+    [Fact]
+    public void GetObjectCountByType_FirstCreate_ShouldReturnOne()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+
+        // Act
+        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid"
+        });
+
+        // Assert
+        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
+    }
+
+    [Fact]
+    public void HandleMemberDeparture_AffectedTypes_ShouldIncludeDeletedTypes()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var server = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+        var client = joinResult.Member!;
+
+        // Client creates member-scoped objects (ship + bullet)
+        _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
+        {
+            ["type"] = "ship"
+        });
+        _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
+        {
+            ["type"] = "bullet"
+        });
+        // Server also has a bullet
+        _objectService.CreateObject(session.Id, server.Id, ObjectScope.Member, new Dictionary<string, object?>
+        {
+            ["type"] = "bullet"
+        });
+
+        // Act — client leaves, their member-scoped objects are deleted
+        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, server.Id);
+
+        // Assert — ship type becomes empty (only client had one), bullet does not (server still has one)
+        departure.AffectedTypes.Should().Contain("ship");
+        departure.AffectedTypes.Should().Contain("bullet");
+        _objectService.GetObjectCountByType(session.Id, "ship").Should().Be(0);
+        _objectService.GetObjectCountByType(session.Id, "bullet").Should().Be(1);
+    }
+
+    [Fact]
+    public void HandleMemberDeparture_ClientLeaves_SessionScopedObjectsMigrated()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var server = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+        var client = joinResult.Member!;
+
+        // Client owns session-scoped asteroids (from distributed ownership)
+        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.5
+        });
+
+        // Act — client leaves, session-scoped objects should migrate to server
+        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, server.Id);
+
+        // Assert
+        departure.MigratedObjectIds.Should().Contain(asteroid!.Id);
+        var migratedObj = _objectService.GetObject(session.Id, asteroid.Id);
+        migratedObj.Should().NotBeNull();
+        migratedObj!.OwnerMemberId.Should().Be(server.Id);
+        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
     }
 }

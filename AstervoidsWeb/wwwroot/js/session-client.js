@@ -24,6 +24,8 @@ const SessionClient = (function() {
         onObjectCreated: null,
         onObjectsUpdated: null,
         onObjectDeleted: null,
+        onObjectTypeEmpty: null,
+        onObjectTypeRestored: null,
         onSessionsChanged: null,
         onGameStarted: null,
         onBulletHitReported: null,
@@ -177,6 +179,18 @@ const SessionClient = (function() {
         connection.on('OnObjectDeleted', (objectId) => {
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId);
+            }
+        });
+
+        connection.on('OnObjectTypeEmpty', (objectType) => {
+            if (callbacks.onObjectTypeEmpty) {
+                callbacks.onObjectTypeEmpty(objectType);
+            }
+        });
+
+        connection.on('OnObjectTypeRestored', (objectType) => {
+            if (callbacks.onObjectTypeRestored) {
+                callbacks.onObjectTypeRestored(objectType);
             }
         });
 

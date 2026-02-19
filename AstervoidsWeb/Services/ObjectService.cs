@@ -92,13 +92,13 @@ public class ObjectService : IObjectService
         return results;
     }
 
-    public bool DeleteObject(Guid sessionId, Guid objectId)
+    public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return false;
+            return null;
 
-        return session.Objects.TryRemove(objectId, out _);
+        return session.Objects.TryRemove(objectId, out var obj) ? obj : null;
     }
 
     public IEnumerable<SessionObject> GetSessionObjects(Guid sessionId)
@@ -119,19 +119,32 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
+    public int GetObjectCountByType(Guid sessionId, string type)
+    {
+        var session = _sessionService.GetSession(sessionId);
+        if (session == null)
+            return 0;
+
+        return session.Objects.Values.Count(obj =>
+            obj.Data.TryGetValue("type", out var t) && string.Equals(t?.ToString(), type, StringComparison.Ordinal));
+    }
+
     public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, Guid? newOwnerId)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return new MemberDepartureResult([], []);
+            return new MemberDepartureResult([], [], []);
 
         var deletedIds = new List<Guid>();
         var migratedIds = new List<Guid>();
+        var affectedTypes = new HashSet<string>();
 
         foreach (var obj in session.Objects.Values.ToList())
         {
             if (obj.OwnerMemberId != departingMemberId)
                 continue;
+
+            var objectType = obj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
 
             if (obj.Scope == ObjectScope.Member)
             {
@@ -139,6 +152,7 @@ public class ObjectService : IObjectService
                 if (session.Objects.TryRemove(obj.Id, out _))
                 {
                     deletedIds.Add(obj.Id);
+                    if (objectType != null) affectedTypes.Add(objectType);
                 }
             }
             else if (obj.Scope == ObjectScope.Session && newOwnerId.HasValue)
@@ -151,6 +165,6 @@ public class ObjectService : IObjectService
             }
         }
 
-        return new MemberDepartureResult(deletedIds, migratedIds);
+        return new MemberDepartureResult(deletedIds, migratedIds, affectedTypes);
     }
 }

@@ -30,7 +30,8 @@ public interface IObjectService
     /// <summary>
     /// Deletes an object from a session.
     /// </summary>
-    bool DeleteObject(Guid sessionId, Guid objectId);
+    /// <returns>The deleted object, or null if not found.</returns>
+    SessionObject? DeleteObject(Guid sessionId, Guid objectId);
 
     /// <summary>
     /// Gets all objects in a session.
@@ -41,6 +42,11 @@ public interface IObjectService
     /// Gets a specific object.
     /// </summary>
     SessionObject? GetObject(Guid sessionId, Guid objectId);
+
+    /// <summary>
+    /// Counts how many objects in a session have the given type in their Data["type"] field.
+    /// </summary>
+    int GetObjectCountByType(Guid sessionId, string type);
 
     /// <summary>
     /// Handles cleanup when a member departs a session.
@@ -68,5 +74,6 @@ public record ObjectUpdate(
 /// </summary>
 public record MemberDepartureResult(
     IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<Guid> MigratedObjectIds
+    IEnumerable<Guid> MigratedObjectIds,
+    IEnumerable<string> AffectedTypes
 );

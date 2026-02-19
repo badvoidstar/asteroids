@@ -131,8 +131,16 @@ public class SessionHub : Hub
         }
 
         // Handle object cleanup based on scope
+        // Determine migration target: promoted member (Server left) or current Server (Client left)
+        Guid? migrationTarget = result.PromotedMember?.Id;
+        if (migrationTarget == null && !result.SessionDestroyed)
+        {
+            var session = _sessionService.GetSession(result.SessionId);
+            migrationTarget = session?.Members.Values
+                .FirstOrDefault(m => m.Role == MemberRole.Server)?.Id;
+        }
         var departureResult = _objectService.HandleMemberDeparture(
-            result.SessionId, result.MemberId, result.PromotedMember?.Id);
+            result.SessionId, result.MemberId, migrationTarget);
 
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, result.SessionId.ToString());
 
@@ -144,7 +152,8 @@ public class SessionHub : Hub
                 result.PromotedMember?.Id,
                 result.PromotedMember?.Role.ToString(),
                 departureResult.DeletedObjectIds,
-                departureResult.MigratedObjectIds
+                departureResult.MigratedObjectIds,
+                migrationTarget
             ));
 
             if (result.PromotedMember != null)
@@ -154,6 +163,15 @@ public class SessionHub : Hub
                     result.PromotedMember.Id, result.SessionName,
                     departureResult.MigratedObjectIds.Count(),
                     departureResult.DeletedObjectIds.Count());
+            }
+
+            // Emit OnObjectTypeEmpty for any types that became empty after departure
+            foreach (var objectType in departureResult.AffectedTypes)
+            {
+                if (_objectService.GetObjectCountByType(result.SessionId, objectType) == 0)
+                {
+                    await Clients.Group(result.SessionId.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
+                }
             }
         }
         else
@@ -262,6 +280,13 @@ public class SessionHub : Hub
         // Notify all members including sender
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated", objectInfo);
 
+        // Check if this type was just restored (count went from 0 to 1)
+        var objectType = data?.TryGetValue("type", out var t) == true ? t?.ToString() : null;
+        if (objectType != null && _objectService.GetObjectCountByType(member.SessionId, objectType) == 1)
+        {
+            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectTypeRestored", objectType);
+        }
+
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
 
         return objectInfo;
@@ -306,14 +331,21 @@ public class SessionHub : Hub
             return false;
         }
 
-        var deleted = _objectService.DeleteObject(session.Id, objectId);
-        if (deleted)
+        var deletedObj = _objectService.DeleteObject(session.Id, objectId);
+        if (deletedObj != null)
         {
             await Clients.Group(session.Id.ToString()).SendAsync("OnObjectDeleted", objectId);
             _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, session.Id);
+
+            // Check if this type is now empty
+            var objectType = deletedObj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
+            if (objectType != null && _objectService.GetObjectCountByType(session.Id, objectType) == 0)
+            {
+                await Clients.Group(session.Id.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
+            }
         }
 
-        return deleted;
+        return deletedObj != null;
     }
 
     /// <summary>
@@ -443,7 +475,8 @@ public record MemberLeftInfo(
     Guid? PromotedMemberId,
     string? PromotedRole,
     IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<Guid> MigratedObjectIds
+    IEnumerable<Guid> MigratedObjectIds,
+    Guid? MigrationTargetMemberId
 );
 public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt, bool GameStarted);
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);

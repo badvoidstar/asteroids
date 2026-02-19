@@ -3287,18 +3287,12 @@
                 // Check collisions
                 checkCollisions();
                 
-                // Check for wave completion (only authority checks in multiplayer)
+                // Check for wave completion
                 if (game.astervoids.length === 0 && game.state === 'playing') {
-                    if (!isSessionMode() || isAuthority()) {
-                        // In multiplayer, use synced object store to avoid race with distributed ownership
-                        const hasAsteroids = isSessionMode()
-                            ? ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID).length > 0
-                            : false;
-                        if (!hasAsteroids) {
-                            game.state = 'waveDelay';
-                            game.waveDelayTimer = CONFIG.WAVE_DELAY;
-                            if (isSessionMode()) syncGameState();
-                        }
+                    // Solo mode: detect locally; multiplayer: driven by OnObjectTypeEmpty event
+                    if (!isSessionMode()) {
+                        game.state = 'waveDelay';
+                        game.waveDelayTimer = CONFIG.WAVE_DELAY;
                     }
                 }
                 
@@ -4234,8 +4228,8 @@
                 game.bullets = game.bullets.filter(b => b.syncObjectId !== objectId);
             }
         }
-        if (info.migratedObjectIds && info.migratedObjectIds.length > 0 && info.promotedMemberId) {
-            ObjectSync.handleOwnershipMigration(info.migratedObjectIds, info.promotedMemberId);
+        if (info.migratedObjectIds && info.migratedObjectIds.length > 0 && info.migrationTargetMemberId) {
+            ObjectSync.handleOwnershipMigration(info.migratedObjectIds, info.migrationTargetMemberId);
         }
     });
 
@@ -4336,6 +4330,23 @@
         updateHUD();
         syncGameState();
     });
+
+    // Handle server-authoritative object type count events for wave detection
+    SessionClient.on('onObjectTypeEmpty', (objectType) => {
+        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'playing' && isAuthority()) {
+            game.state = 'waveDelay';
+            game.waveDelayTimer = CONFIG.WAVE_DELAY;
+            syncGameState();
+        }
+    });
+
+    SessionClient.on('onObjectTypeRestored', (objectType) => {
+        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'waveDelay' && isAuthority()) {
+            game.state = 'playing';
+            syncGameState();
+        }
+    });
+
     // Handle session list changes (signal from server - fetch fresh data with jitter)
     let sessionRefreshTimeout = null;
     SessionClient.on('onSessionsChanged', () => {
