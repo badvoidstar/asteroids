@@ -294,18 +294,31 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Updates multiple objects atomically.
+    /// Only allows updates to objects owned by the caller (Server role can update any object).
     /// </summary>
     public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates)
     {
-        var session = _sessionService.GetSessionByConnectionId(Context.ConnectionId);
-        if (session == null)
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
         {
-            _logger.LogWarning("UpdateObjects failed - session not found for connection {ConnectionId}", Context.ConnectionId);
+            _logger.LogWarning("UpdateObjects failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return Enumerable.Empty<ObjectInfo>();
         }
 
-        var objectUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data, u.ExpectedVersion));
-        var updatedObjects = _objectService.UpdateObjects(session.Id, objectUpdates);
+        var isServer = member.Role == MemberRole.Server;
+
+        // Filter to only objects owned by the caller (Server can update any object)
+        var authorizedUpdates = new List<ObjectUpdate>();
+        foreach (var u in updates)
+        {
+            var obj = _objectService.GetObject(member.SessionId, u.ObjectId);
+            if (obj != null && (obj.OwnerMemberId == member.Id || isServer))
+            {
+                authorizedUpdates.Add(new ObjectUpdate(u.ObjectId, u.Data, u.ExpectedVersion));
+            }
+        }
+
+        var updatedObjects = _objectService.UpdateObjects(member.SessionId, authorizedUpdates);
 
         var objectInfos = updatedObjects.Select(o => new ObjectInfo(
             o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
@@ -313,7 +326,7 @@ public class SessionHub : Hub
         if (objectInfos.Count > 0)
         {
             // Notify all members including sender
-            await Clients.Group(session.Id.ToString()).SendAsync("OnObjectsUpdated", objectInfos);
+            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos);
         }
 
         return objectInfos;
@@ -321,27 +334,39 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Deletes an object from the session.
+    /// Only allows deletion of objects owned by the caller (Server role can delete any object).
     /// </summary>
     public async Task<bool> DeleteObject(Guid objectId)
     {
-        var session = _sessionService.GetSessionByConnectionId(Context.ConnectionId);
-        if (session == null)
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
         {
-            _logger.LogWarning("DeleteObject failed - session not found for connection {ConnectionId}", Context.ConnectionId);
+            _logger.LogWarning("DeleteObject failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return false;
         }
 
-        var deletedObj = _objectService.DeleteObject(session.Id, objectId);
+        // Verify ownership before deleting (Server can delete any object)
+        var obj = _objectService.GetObject(member.SessionId, objectId);
+        if (obj == null)
+            return false;
+
+        if (obj.OwnerMemberId != member.Id && member.Role != MemberRole.Server)
+        {
+            _logger.LogWarning("DeleteObject rejected - member {MemberId} does not own object {ObjectId}", member.Id, objectId);
+            return false;
+        }
+
+        var deletedObj = _objectService.DeleteObject(member.SessionId, objectId);
         if (deletedObj != null)
         {
-            await Clients.Group(session.Id.ToString()).SendAsync("OnObjectDeleted", objectId);
-            _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, session.Id);
+            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectDeleted", objectId);
+            _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, member.SessionId);
 
             // Check if this type is now empty
             var objectType = deletedObj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
-            if (objectType != null && _objectService.GetObjectCountByType(session.Id, objectType) == 0)
+            if (objectType != null && _objectService.GetObjectCountByType(member.SessionId, objectType) == 0)
             {
-                await Clients.Group(session.Id.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectTypeEmpty", objectType);
             }
         }
 
@@ -384,6 +409,21 @@ public class SessionHub : Hub
             return;
         }
 
+        // Verify caller owns the bullet and asteroid exists
+        var bullet = _objectService.GetObject(member.SessionId, bulletObjectId);
+        if (bullet == null || bullet.OwnerMemberId != member.Id)
+        {
+            _logger.LogWarning("ReportBulletHit rejected - member {MemberId} does not own bullet {BulletId}", member.Id, bulletObjectId);
+            return;
+        }
+
+        var asteroid = _objectService.GetObject(member.SessionId, asteroidObjectId);
+        if (asteroid == null)
+        {
+            _logger.LogWarning("ReportBulletHit rejected - asteroid {AsteroidId} not found", asteroidObjectId);
+            return;
+        }
+
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitReported",
             new BulletHitReport(asteroidObjectId, bulletObjectId, member.Id));
     }
@@ -391,6 +431,7 @@ public class SessionHub : Hub
     /// <summary>
     /// Confirms that a bullet hit was accepted by the asteroid owner.
     /// Broadcasts to all session members so the bullet owner can handle cleanup.
+    /// Caller must not be the bullet owner (the asteroid owner confirms).
     /// </summary>
     public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize, double asteroidX, double asteroidY, double asteroidVelocityX, double asteroidVelocityY, double asteroidRadius)
     {
@@ -401,6 +442,13 @@ public class SessionHub : Hub
             return;
         }
 
+        // Caller should be the asteroid owner, not the bullet owner
+        if (member.Id == bulletOwnerMemberId)
+        {
+            _logger.LogWarning("ConfirmBulletHit rejected - caller {MemberId} is the bullet owner", member.Id);
+            return;
+        }
+
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
             new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius));
     }
@@ -408,6 +456,7 @@ public class SessionHub : Hub
     /// <summary>
     /// Rejects a bullet hit because the asteroid was already destroyed.
     /// Broadcasts to all session members so the bullet owner can un-hide the bullet.
+    /// Caller must not be the bullet owner (the asteroid owner rejects).
     /// </summary>
     public async Task RejectBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId)
     {
@@ -415,6 +464,13 @@ public class SessionHub : Hub
         if (member == null)
         {
             _logger.LogWarning("RejectBulletHit failed - member not found");
+            return;
+        }
+
+        // Caller should be the asteroid owner, not the bullet owner
+        if (member.Id == bulletOwnerMemberId)
+        {
+            _logger.LogWarning("RejectBulletHit rejected - caller {MemberId} is the bullet owner", member.Id);
             return;
         }
 

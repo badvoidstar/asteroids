@@ -2438,6 +2438,10 @@
             const syncObj = ObjectSync.getObject(a.syncObjectId);
             if (syncObj && syncObj.ownerMemberId === myMemberId) return true; // Keep our own
             if (!currentSyncIds.has(a.syncObjectId)) {
+                // Remote asteroid destroyed — play explosion sound based on size
+                const size = a.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
+                             a.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
+                AudioSystem.playExplosion(size);
                 RemoteObjects.remove(a.syncObjectId);
                 return false;
             }
@@ -2519,10 +2523,11 @@
             let bullet = game.bullets.find(b => b.syncObjectId === obj.id);
             
             if (!bullet) {
-                // Create new bullet from sync data
+                // Create new bullet from sync data — play fire sound for remote player
                 bullet = Bullet.fromSyncData(obj.data);
                 bullet.syncObjectId = obj.id;
                 game.bullets.push(bullet);
+                AudioSystem.playFire();
             }
             
             // Apply interpolated state for smooth movement
@@ -2831,11 +2836,6 @@
      * @param {Asteroid} asteroid - The asteroid to split
      */
     function splitAsteroid(asteroid) {
-        // Play explosion sound based on asteroid size (using normalized thresholds)
-        const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
-                     asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
-        AudioSystem.playExplosion(size);
-        
         // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
             return;  // Asteroid is destroyed, no children spawned
@@ -2990,8 +2990,9 @@
             AudioSystem.thrustSound.stop();
         }
         
-        // Shoot
-        if (input.fire() && game.bullets.length < CONFIG.MAX_BULLETS) {
+        // Shoot — only count local player's active (non-pending) bullets toward the cap
+        const myBulletCount = game.bullets.filter(b => b.ownerMemberId === game.ship.memberId && !b.pendingHit).length;
+        if (input.fire() && myBulletCount < CONFIG.MAX_BULLETS) {
             const bullet = game.ship.shoot();
             if (bullet) {
                 game.bullets.push(bullet);
@@ -3048,6 +3049,10 @@
                             if (asteroid.syncObjectId) {
                                 deleteSyncedAsteroid(asteroid);
                             }
+                            // Play explosion locally (remote members hear via updateAstervoidsFromSync)
+                            const explosionSize = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
+                                                  asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
+                            AudioSystem.playExplosion(explosionSize);
                             splitAsteroid(asteroid);
                             // Report score to authority (uniform path for all players)
                             SessionClient.reportScore(points);
@@ -3066,6 +3071,9 @@
                         const removedBullet = game.bullets.splice(i, 1)[0];
                         game.astervoids.splice(j, 1);
                         game.score += asteroid.getPoints();
+                        const explosionSize = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
+                                              asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
+                        AudioSystem.playExplosion(explosionSize);
                         splitAsteroid(asteroid);
                     }
                     
@@ -4251,6 +4259,9 @@
             deleteSyncedAsteroid(asteroid);
         }
         
+        // Play explosion sound (asteroid owner hears their asteroid being destroyed)
+        AudioSystem.playExplosion(size);
+        
         // Confirm back to the bullet owner with asteroid data for splitting
         SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size,
             asteroid.x, asteroid.y, asteroid.velocityX, asteroid.velocityY, asteroid.radius);
@@ -4297,9 +4308,15 @@
         }
     });
 
-    // Handle ship hit reported — GameState owner decrements lives
+    // Handle ship hit reported — all members play explosion sound, authority decrements lives
     SessionClient.on('onShipHitReported', (report) => {
-        // Only the GameState owner (authority) processes this
+        // All members hear the ship explosion
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (report.reporterMemberId !== myMemberId) {
+            AudioSystem.playShipExplosion();
+        }
+        
+        // Only the GameState owner (authority) decrements lives
         if (!isAuthority()) return;
         
         game.lives--;
