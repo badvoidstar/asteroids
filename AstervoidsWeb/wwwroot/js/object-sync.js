@@ -12,10 +12,12 @@ const ObjectSync = (function() {
     
     // Pending updates to be batched
     let pendingUpdates = [];
-    let updateTimer = null;
     
-    // Configurable sync interval (ms) - can be changed via setSyncInterval()
-    let batchInterval = 50; // default: 50ms (20 updates/sec max)
+    // Frame-count-based sync settings
+    let nominalFrameTime = 1 / 30;  // target send interval in seconds
+    let minFrameTime = 1 / 480;     // clamp to prevent extreme thresholds
+    let frameCounter = 0;
+    let sendThreshold = 2;          // recalculated each frame from actual frame time
 
     // Callbacks
     const callbacks = {
@@ -26,19 +28,24 @@ const ObjectSync = (function() {
     };
     
     /**
-     * Set the sync interval (batch interval for updates)
-     * @param {number} intervalMs - Interval in milliseconds (min: 16, max: 1000)
+     * Configure sync timing parameters.
+     * @param {object} config - { nominalFrameTime, minFrameTime }
      */
-    function setSyncInterval(intervalMs) {
-        batchInterval = Math.max(16, Math.min(1000, intervalMs));
+    function configure(config) {
+        if (config.nominalFrameTime !== undefined) {
+            nominalFrameTime = config.nominalFrameTime;
+        }
+        if (config.minFrameTime !== undefined) {
+            minFrameTime = config.minFrameTime;
+        }
     }
     
     /**
-     * Get the current sync interval
-     * @returns {number} Current batch interval in ms
+     * Get the current send threshold (for diagnostics).
+     * @returns {number} Current frame-count threshold
      */
-    function getSyncInterval() {
-        return batchInterval;
+    function getSendThreshold() {
+        return sendThreshold;
     }
     
     /**
@@ -117,6 +124,7 @@ const ObjectSync = (function() {
         objects.clear();
         typeIndex.clear();
         pendingUpdates = [];
+        frameCounter = 0;
 
         if (session.objects) {
             for (const obj of session.objects) {
@@ -144,10 +152,7 @@ const ObjectSync = (function() {
         objects.clear();
         typeIndex.clear();
         pendingUpdates = [];
-        if (updateTimer) {
-            clearTimeout(updateTimer);
-            updateTimer = null;
-        }
+        frameCounter = 0;
         console.log('[ObjectSync] Cleared all objects');
     }
 
@@ -295,23 +300,26 @@ const ObjectSync = (function() {
 
         if (immediate) {
             flushUpdates();
-        } else {
-            scheduleBatchUpdate();
         }
+        // Otherwise, tick() will flush when frame counter reaches threshold
 
         return true;
     }
 
     /**
-     * Schedule a batch update.
+     * Called once per frame to drive frame-count-based sync.
+     * Recalculates the send threshold from the current frame time,
+     * increments the frame counter, and flushes when threshold is reached.
+     * @param {number} frameTimeSec - Elapsed time for this frame in seconds
      */
-    function scheduleBatchUpdate() {
-        if (updateTimer) return;
-
-        updateTimer = setTimeout(() => {
-            updateTimer = null;
+    function tick(frameTimeSec) {
+        const clampedFrameTime = Math.max(frameTimeSec, minFrameTime);
+        sendThreshold = Math.max(1, Math.round(nominalFrameTime / clampedFrameTime));
+        frameCounter++;
+        if (frameCounter >= sendThreshold) {
+            frameCounter = 0;
             flushUpdates();
-        }, batchInterval);
+        }
     }
 
     /**
@@ -494,6 +502,7 @@ const ObjectSync = (function() {
         updateObject,
         deleteObject,
         flushUpdates,
+        tick,
         getObject,
         getAllObjects,
         getObjectsByOwner,
@@ -501,8 +510,8 @@ const ObjectSync = (function() {
         getObjectsByType,
         getObjectByType,
         getObjectCount,
-        setSyncInterval,
-        getSyncInterval,
+        configure,
+        getSendThreshold,
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,

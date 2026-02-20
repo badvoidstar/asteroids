@@ -953,7 +953,8 @@
         
         // Multiplayer settings
         MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
-        SYNC_INTERVAL: 24,          // Object sync interval in ms (default, can be changed)
+        SYNC_NOMINAL_FRAME_TIME: 1/30, // Target send interval in seconds (~33ms)
+        SYNC_MIN_FRAME_TIME: 1/480,  // Min frame time clamp for threshold calc
         INTERPOLATION_DELAY: 32,    // Render delay for smooth interpolation (ms)
         INTERPOLATION_ENABLED: true, // Enable/disable interpolation for remote objects
         ADAPTIVE_DELAY_ENABLED: false, // Auto-tune interpolation delay based on jitter
@@ -1027,7 +1028,7 @@
                     current: { ...data },
                     previous: { ...data },
                     currentTime: now,
-                    previousTime: now - CONFIG.SYNC_INTERVAL,
+                    previousTime: now - CONFIG.SYNC_NOMINAL_FRAME_TIME * 1000,
                     velocity: vel,
                     previousVelocity: vel,
                     rotationSpeed: rotSpd,
@@ -3209,6 +3210,11 @@
         const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
         const dt = Math.min(elapsed / targetFrameTime, 3); // Cap at 3x to prevent huge jumps
         
+        // Tick ObjectSync frame counter for frame-count-based network sends
+        if (isSessionMode()) {
+            ObjectSync.tick(elapsed / 1000);
+        }
+        
         // --- UPDATE PHASE ---
         
         // Handle player input
@@ -3859,8 +3865,11 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
-                // Apply configured sync interval
-                ObjectSync.setSyncInterval(CONFIG.SYNC_INTERVAL);
+                // Apply configured sync timing
+                ObjectSync.configure({
+                    nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
+                    minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME
+                });
                 
                 sessionPicker.connected = true;
                 await refreshSessionList();
@@ -4397,6 +4406,9 @@
                     const elapsed = now - lastTime;
                     lastTime = now;
                     const dt = Math.min(elapsed / targetFrameTime, 3);
+                    
+                    // Tick ObjectSync for frame-count-based sends
+                    ObjectSync.tick(elapsed / 1000);
                     
                     // Update local ship
                     if (game.ship) {
