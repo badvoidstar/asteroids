@@ -24,7 +24,7 @@ public class ObjectService : IObjectService
         _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
     }
 
-    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null)
+    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null)
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
@@ -33,11 +33,15 @@ public class ObjectService : IObjectService
         if (!session.Members.TryGetValue(creatorMemberId, out _))
             return null;
 
+        var effectiveOwner = ownerMemberId ?? creatorMemberId;
+        if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
+            return null;
+
         var obj = new SessionObject
         {
             SessionId = sessionId,
             CreatorMemberId = creatorMemberId,
-            OwnerMemberId = creatorMemberId,
+            OwnerMemberId = effectiveOwner,
             Scope = scope,
             Data = data ?? new Dictionary<string, object?>()
         };

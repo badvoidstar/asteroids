@@ -15,7 +15,7 @@ public interface IObjectService
     /// <param name="scope">The lifetime scope of the object (Member or Session).</param>
     /// <param name="data">Initial object data.</param>
     /// <returns>The created object, or null if session/member not found.</returns>
-    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null);
+    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null);
 
     /// <summary>
     /// Updates an existing object.

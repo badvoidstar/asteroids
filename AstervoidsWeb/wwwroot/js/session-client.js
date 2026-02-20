@@ -24,6 +24,7 @@ const SessionClient = (function() {
         onObjectCreated: null,
         onObjectsUpdated: null,
         onObjectDeleted: null,
+        onObjectReplaced: null,
         onObjectTypeEmpty: null,
         onObjectTypeRestored: null,
         onSessionsChanged: null,
@@ -180,6 +181,12 @@ const SessionClient = (function() {
         connection.on('OnObjectDeleted', (objectId) => {
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId);
+            }
+        });
+
+        connection.on('OnObjectReplaced', (event) => {
+            if (callbacks.onObjectReplaced) {
+                callbacks.onObjectReplaced(event);
             }
         });
 
@@ -408,7 +415,7 @@ const SessionClient = (function() {
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session'
      */
-    async function createObject(data, scope = 'Member') {
+    async function createObject(data, scope = 'Member', ownerMemberId = null) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
@@ -417,7 +424,7 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('CreateObject', data, scope);
+            return await connection.invoke('CreateObject', data, scope, ownerMemberId);
         } catch (err) {
             console.error('[SessionClient] Create object failed:', err);
             throw err;
@@ -439,6 +446,25 @@ const SessionClient = (function() {
             return await connection.invoke('UpdateObjects', updates);
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);
+            throw err;
+        }
+    }
+
+    /**
+     * Atomically delete an object and create replacements in a single broadcast.
+     */
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null) {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            throw new Error('Not connected to session hub');
+        }
+        if (!currentSession) {
+            throw new Error('Not in a session');
+        }
+
+        try {
+            return await connection.invoke('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId);
+        } catch (err) {
+            console.error('[SessionClient] Replace object failed:', err);
             throw err;
         }
     }
@@ -477,10 +503,10 @@ const SessionClient = (function() {
     /**
      * Confirm that a bullet hit was accepted (called by asteroid owner).
      */
-    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius) {
+    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
         try {
-            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius);
+            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
         } catch (err) {
             console.error('[SessionClient] ConfirmBulletHit failed:', err);
         }
@@ -574,6 +600,7 @@ const SessionClient = (function() {
         getActiveSessions,
         createObject,
         updateObjects,
+        replaceObject,
         deleteObject,
         reportBulletHit,
         confirmBulletHit,

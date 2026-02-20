@@ -111,6 +111,7 @@ const ObjectSync = (function() {
         SessionClient.on('onObjectCreated', handleRemoteObjectCreated);
         SessionClient.on('onObjectsUpdated', handleRemoteObjectsUpdated);
         SessionClient.on('onObjectDeleted', handleRemoteObjectDeleted);
+        SessionClient.on('onObjectReplaced', handleRemoteObjectReplaced);
         SessionClient.on('onSessionJoined', handleSessionJoined);
         SessionClient.on('onSessionLeft', handleSessionLeft);
 
@@ -243,23 +244,61 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Handle remote object replaced (atomic delete + create).
+     */
+    function handleRemoteObjectReplaced(event) {
+        // Delete the original object
+        handleRemoteObjectDeleted(event.deletedObjectId);
+
+        // Create all replacement objects
+        for (const objectInfo of event.createdObjects) {
+            handleRemoteObjectCreated(objectInfo);
+        }
+
+        if (callbacks.onObjectReplaced) {
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
+        }
+    }
+
+    /**
      * Create a new synchronized object.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session' (default: 'Member')
      */
-    async function createObject(data = {}, scope = 'Member') {
+    async function createObject(data = {}, scope = 'Member', ownerMemberId = null) {
         if (!SessionClient.isInSession()) {
             throw new Error('Not in a session');
         }
 
         try {
-            const objectInfo = await SessionClient.createObject(data, scope);
+            const objectInfo = await SessionClient.createObject(data, scope, ownerMemberId);
             // Object will be added via the onObjectCreated event
             return objectInfo;
         } catch (err) {
             console.error('[ObjectSync] Create object failed:', err);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('create', err);
+            }
+            throw err;
+        }
+    }
+
+    /**
+     * Atomically replace an object with new objects in a single broadcast.
+     */
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null) {
+        if (!SessionClient.isInSession()) {
+            throw new Error('Not in a session');
+        }
+
+        try {
+            const createdInfos = await SessionClient.replaceObject(deleteObjectId, replacements, scope, ownerMemberId);
+            // Objects will be added/removed via the onObjectReplaced event
+            return createdInfos;
+        } catch (err) {
+            console.error('[ObjectSync] Replace object failed:', err);
+            if (callbacks.onSyncError) {
+                callbacks.onSyncError('replace', err);
             }
             throw err;
         }
@@ -499,6 +538,7 @@ const ObjectSync = (function() {
     return {
         init,
         createObject,
+        replaceObject,
         updateObject,
         deleteObject,
         flushUpdates,

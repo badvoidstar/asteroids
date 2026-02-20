@@ -2346,11 +2346,11 @@
      * Create a synced asteroid object (authority only)
      * @param {Asteroid} asteroid - The asteroid to sync
      */
-    async function createSyncedAsteroid(asteroid) {
+    async function createSyncedAsteroid(asteroid, ownerMemberId = null) {
         if (!isSessionMode()) return;
         
         try {
-            const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session');
+            const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session', ownerMemberId);
             asteroid.syncObjectId = objectInfo.id;
         } catch (err) {
             console.error('[Multiplayer] Failed to create asteroid:', err);
@@ -2404,7 +2404,16 @@
         
         for (const obj of asteroidObjects) {
             // Skip astervoids we own — we update those locally
-            if (obj.ownerMemberId === myMemberId) continue;
+            if (obj.ownerMemberId === myMemberId) {
+                // Adopt if we own it but don't have it locally (created remotely on our behalf)
+                const existing = game.astervoids.find(a => a.syncObjectId === obj.id);
+                if (!existing) {
+                    const asteroid = Asteroid.fromSyncData(obj.data);
+                    asteroid.syncObjectId = obj.id;
+                    game.astervoids.push(asteroid);
+                }
+                continue;
+            }
             
             currentSyncIds.add(obj.id);
             
@@ -2819,11 +2828,12 @@
             Math.sin(angle) * speed
         );
         
-        game.astervoids.push(asteroid);
-        
-        // Create synced asteroid in multiplayer (authority only)
+        // In session mode, let OnObjectCreated → updateAstervoidsFromSync handle local state
+        // In solo mode, push directly to game state
         if (isSessionMode() && isAuthority()) {
             await createSyncedAsteroid(asteroid);
+        } else {
+            game.astervoids.push(asteroid);
         }
         
         return asteroid;
@@ -2834,11 +2844,16 @@
      * Implements conservation of area (mass) and energy
      * All values are in normalized coordinates
      * Called by the asteroid owner to process a hit.
+     * In session mode, computes split and sends to server — all local state changes
+     * come back through OnObjectReplaced for atomic processing on all clients.
      * @param {Asteroid} asteroid - The asteroid to split
      */
-    function splitAsteroid(asteroid) {
+    function splitAsteroid(asteroid, childOwnerMemberId = null) {
         // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
+            if (isSessionMode() && asteroid.syncObjectId) {
+                deleteSyncedAsteroid(asteroid);
+            }
             return;  // Asteroid is destroyed, no children spawned
         }
         
@@ -2869,7 +2884,8 @@
         // Calculate total mass of surviving children for energy distribution
         const totalChildMass = children.reduce((sum, r) => sum + r ** 2, 0);
         
-        // Spawn all child astervoids synchronously
+        // Build child asteroid data
+        const childAsteroids = [];
         for (let index = 0; index < children.length; index++) {
             const childRadius = children[index];
             
@@ -2892,15 +2908,40 @@
                 Math.sin(angle) * childSpeed
             );
             
-            game.astervoids.push(childAsteroid);
-            
-            // Fire-and-forget sync creation for children (owner creates, so owner owns)
-            if (isSessionMode()) {
-                createSyncedAsteroid(childAsteroid);
+            childAsteroids.push(childAsteroid);
+        }
+        
+        if (isSessionMode() && asteroid.syncObjectId) {
+            // Send to server — all clients (including us) will process via OnObjectReplaced
+            if (childAsteroids.length > 0) {
+                replaceSyncedAsteroid(asteroid, childAsteroids, childOwnerMemberId);
+            } else {
+                deleteSyncedAsteroid(asteroid);
+            }
+        } else {
+            // Solo mode — apply locally
+            for (const child of childAsteroids) {
+                game.astervoids.push(child);
             }
         }
         
         updateHUD();
+    }
+
+    /**
+     * Atomically replace a synced asteroid with child asteroids.
+     * Deletes parent and creates children in a single broadcast to all members.
+     */
+    async function replaceSyncedAsteroid(parentAsteroid, childAsteroids, ownerMemberId = null) {
+        if (!isSessionMode() || !parentAsteroid.syncObjectId) return;
+        
+        try {
+            const replacements = childAsteroids.map(child => child.toSyncData());
+            await ObjectSync.replaceObject(
+                parentAsteroid.syncObjectId, replacements, 'Session', ownerMemberId);
+        } catch (err) {
+            console.error('[Multiplayer] Failed to replace asteroid:', err);
+        }
     }
 
     /**
@@ -2942,15 +2983,9 @@
         }
         
         if (isGameOver()) {
-            // Check for restart/return to menu
+            // Return to main menu on Enter
             if (keys['Enter']) {
-                if (isSessionMode()) {
-                    // Return to start screen for session mode
-                    returnToStartScreen();
-                } else {
-                    // Restart for solo mode
-                    init();
-                }
+                returnToStartScreen();
             }
             return;
         }
@@ -3046,14 +3081,8 @@
                             if (removedBullet.syncObjectId) {
                                 deleteSyncedBullet(removedBullet);
                             }
-                            game.astervoids.splice(j, 1);
-                            if (asteroid.syncObjectId) {
-                                deleteSyncedAsteroid(asteroid);
-                            }
-                            // Play explosion locally (remote members hear via updateAstervoidsFromSync)
-                            const explosionSize = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
-                                                  asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
-                            AudioSystem.playExplosion(explosionSize);
+                            // Split sends to server — OnObjectReplaced handles asteroid state for all clients
+                            // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
                             splitAsteroid(asteroid);
                             // Report score to authority (uniform path for all players)
                             SessionClient.reportScore(points);
@@ -3395,12 +3424,7 @@
             drawCenteredText('GAME OVER', getGameHeight() / 2 - 40, 48);
             drawCenteredText(`Final Score: ${game.score}`, getGameHeight() / 2 + 10, 24);
             if (!touchControlsEnabled) {
-                // Show different message based on mode
-                if (isSessionMode()) {
-                    drawCenteredText('Press ENTER for menu', getGameHeight() / 2 + 50, 20);
-                } else {
-                    drawCenteredText('Press ENTER to restart', getGameHeight() / 2 + 50, 20);
-                }
+                drawCenteredText('Press ENTER for menu', getGameHeight() / 2 + 50, 20);
             }
         }
         
@@ -3555,12 +3579,7 @@
             if (isGameOver() || game.state === 'paused') {
                 pauseMenu.classList.remove('visible');
                 touchButtons.restart.classList.remove('visible');
-                // Return to menu for session mode, restart for solo
-                if (isSessionMode()) {
-                    returnToStartScreen();
-                } else {
-                    init();
-                }
+                returnToStartScreen();
             }
         }, { passive: false });
     }
@@ -4250,33 +4269,26 @@
         if (!asteroidSyncObj || asteroidSyncObj.ownerMemberId !== myMemberId) return;
         
         // Find the asteroid in our local game state
-        const asteroidIndex = game.astervoids.findIndex(a => a.syncObjectId === report.asteroidObjectId);
-        if (asteroidIndex === -1) {
+        const asteroid = game.astervoids.find(a => a.syncObjectId === report.asteroidObjectId);
+        if (!asteroid) {
             // Asteroid already destroyed — reject
             SessionClient.rejectBulletHit(report.bulletObjectId, report.reporterMemberId);
             return;
         }
         
-        // Accept the hit — remove asteroid and confirm with asteroid data for bullet owner to split
-        const asteroid = game.astervoids[asteroidIndex];
         const points = asteroid.getPoints();
         const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
                      asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
         
-        game.astervoids.splice(asteroidIndex, 1);
-        if (asteroid.syncObjectId) {
-            deleteSyncedAsteroid(asteroid);
-        }
+        // Split asteroid — sends to server, all clients process via OnObjectReplaced
+        // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
+        splitAsteroid(asteroid, report.reporterMemberId);
         
-        // Play explosion sound (asteroid owner hears their asteroid being destroyed)
-        AudioSystem.playExplosion(size);
-        
-        // Confirm back to the bullet owner with asteroid data for splitting
-        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size,
-            asteroid.x, asteroid.y, asteroid.velocityX, asteroid.velocityY, asteroid.radius);
+        // Confirm back to the bullet owner
+        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size);
     });
 
-    // Handle bullet hit confirmed — bullet owner cleans up and splits asteroid
+    // Handle bullet hit confirmed — bullet owner cleans up bullet and reports score
     SessionClient.on('onBulletHitConfirmed', (confirmation) => {
         const myMemberId = SessionClient.getCurrentMember()?.id;
         if (confirmation.bulletOwnerMemberId !== myMemberId) return;
@@ -4290,13 +4302,7 @@
             }
         }
         
-        // Reconstruct asteroid from confirmation data and split it (creates children owned by us)
-        const asteroid = new Asteroid(
-            confirmation.asteroidX, confirmation.asteroidY,
-            confirmation.asteroidRadius,
-            confirmation.asteroidVelocityX, confirmation.asteroidVelocityY
-        );
-        splitAsteroid(asteroid);
+        // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
         
         // Report score to authority
         SessionClient.reportScore(confirmation.points);

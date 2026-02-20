@@ -255,7 +255,7 @@ public class SessionHub : Hub
     /// <summary>
     /// Creates a new synchronized object in the session.
     /// </summary>
-    public async Task<ObjectInfo?> CreateObject(Dictionary<string, object?>? data, string scope = "Member")
+    public async Task<ObjectInfo?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -268,7 +268,13 @@ public class SessionHub : Hub
             ? ObjectScope.Session 
             : ObjectScope.Member;
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data);
+        Guid? ownerGuid = null;
+        if (ownerMemberId != null && Guid.TryParse(ownerMemberId, out var parsed))
+        {
+            ownerGuid = parsed;
+        }
+
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data, ownerGuid);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
@@ -374,6 +380,99 @@ public class SessionHub : Hub
     }
 
     /// <summary>
+    /// Atomically deletes an object and creates replacement objects in a single broadcast.
+    /// Used for splitting objects where all members need to see the deletion and creation together.
+    /// </summary>
+    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null)
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null)
+        {
+            _logger.LogWarning("ReplaceObject failed - member not found");
+            return null;
+        }
+
+        // Verify ownership of the object being replaced (Server can replace any object)
+        var existingObj = _objectService.GetObject(member.SessionId, deleteObjectId);
+        if (existingObj == null)
+            return null;
+
+        if (existingObj.OwnerMemberId != member.Id && member.Role != MemberRole.Server)
+        {
+            _logger.LogWarning("ReplaceObject rejected - member {MemberId} does not own object {ObjectId}", member.Id, deleteObjectId);
+            return null;
+        }
+
+        var objectScope = scope.Equals("Session", StringComparison.OrdinalIgnoreCase)
+            ? ObjectScope.Session
+            : ObjectScope.Member;
+
+        Guid? ownerGuid = null;
+        if (ownerMemberId != null && Guid.TryParse(ownerMemberId, out var parsed))
+        {
+            ownerGuid = parsed;
+        }
+
+        // Create all replacements first (so we can roll back if any fail)
+        var createdObjects = new List<SessionObject>();
+        foreach (var data in replacements)
+        {
+            var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data, ownerGuid);
+            if (obj == null)
+            {
+                // Roll back any objects we already created
+                foreach (var created in createdObjects)
+                {
+                    _objectService.DeleteObject(member.SessionId, created.Id);
+                }
+                _logger.LogWarning("ReplaceObject failed - could not create replacement object");
+                return null;
+            }
+            createdObjects.Add(obj);
+        }
+
+        // Delete the original object
+        var deletedObj = _objectService.DeleteObject(member.SessionId, deleteObjectId);
+        if (deletedObj == null)
+        {
+            // Roll back created objects
+            foreach (var created in createdObjects)
+            {
+                _objectService.DeleteObject(member.SessionId, created.Id);
+            }
+            _logger.LogWarning("ReplaceObject failed - could not delete original object");
+            return null;
+        }
+
+        var createdInfos = createdObjects.Select(o =>
+            new ObjectInfo(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
+
+        // Single atomic broadcast
+        await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
+            new ObjectReplacedEvent(deleteObjectId, createdInfos));
+
+        _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
+            deleteObjectId, createdObjects.Count, member.SessionId);
+
+        // Check type empty/restored
+        var deletedType = deletedObj.Data.TryGetValue("type", out var dt) ? dt?.ToString() : null;
+        if (deletedType != null && _objectService.GetObjectCountByType(member.SessionId, deletedType) == 0)
+        {
+            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectTypeEmpty", deletedType);
+        }
+        foreach (var created in createdObjects)
+        {
+            var createdType = created.Data.TryGetValue("type", out var ct) ? ct?.ToString() : null;
+            if (createdType != null && _objectService.GetObjectCountByType(member.SessionId, createdType) == 1)
+            {
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectTypeRestored", createdType);
+            }
+        }
+
+        return createdInfos;
+    }
+
+    /// <summary>
     /// Handles client disconnection.
     /// </summary>
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -433,7 +532,7 @@ public class SessionHub : Hub
     /// Broadcasts to all session members so the bullet owner can handle cleanup.
     /// Caller must not be the bullet owner (the asteroid owner confirms).
     /// </summary>
-    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize, double asteroidX, double asteroidY, double asteroidVelocityX, double asteroidVelocityY, double asteroidRadius)
+    public async Task ConfirmBulletHit(Guid bulletObjectId, Guid bulletOwnerMemberId, int points, string asteroidSize)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -450,7 +549,7 @@ public class SessionHub : Hub
         }
 
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnBulletHitConfirmed",
-            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize, asteroidX, asteroidY, asteroidVelocityX, asteroidVelocityY, asteroidRadius));
+            new BulletHitConfirmation(bulletObjectId, bulletOwnerMemberId, points, asteroidSize));
     }
 
     /// <summary>
@@ -538,7 +637,8 @@ public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int 
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
-public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize, double AsteroidX, double AsteroidY, double AsteroidVelocityX, double AsteroidVelocityY, double AsteroidRadius);
+public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);
 public record BulletHitRejection(Guid BulletObjectId, Guid BulletOwnerMemberId);
+public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
 public record ShipHitReport(Guid ReporterMemberId);
 public record ScoreReport(Guid ReporterMemberId, int Points);

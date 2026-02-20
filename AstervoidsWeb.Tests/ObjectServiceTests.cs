@@ -74,6 +74,42 @@ public class ObjectServiceTests
     }
 
     [Fact]
+    public void CreateObject_WithOwnerMemberId_ShouldSetDifferentOwner()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+        var otherMember = joinResult.Member!;
+
+        // Act
+        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" }, ownerMemberId: otherMember.Id);
+
+        // Assert
+        obj.Should().NotBeNull();
+        obj!.CreatorMemberId.Should().Be(creator.Id);
+        obj.OwnerMemberId.Should().Be(otherMember.Id);
+    }
+
+    [Fact]
+    public void CreateObject_WithInvalidOwnerMemberId_ShouldReturnNull()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+
+        // Act
+        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
+            ownerMemberId: Guid.NewGuid());
+
+        // Assert
+        obj.Should().BeNull();
+    }
+
+    [Fact]
     public void UpdateObject_ShouldMergeData()
     {
         // Arrange
