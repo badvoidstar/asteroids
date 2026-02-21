@@ -1,4 +1,4 @@
-name: Build and Deploy to Azure
+name: Azure CICD
 
 on:
   push:
@@ -118,11 +118,11 @@ jobs:
           ENV_NAME="${{ steps.vars.outputs.env_name }}"
           
           # Create or select azd environment
-          azd env new "$ENV_NAME" --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location eastus || true
+          azd env new "$ENV_NAME" --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location westus || true
           azd env select "$ENV_NAME"
           
           # Set location
-          azd env set AZURE_LOCATION eastus
+          azd env set AZURE_LOCATION westus
           
           # For branch deployments, set resource group to production's resource group
           # This tells azd deploy where to find the container app
