@@ -963,10 +963,11 @@
         MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
         SYNC_NOMINAL_FRAME_TIME: 1/20, // Target send interval (seconds)
         SYNC_MIN_FRAME_TIME: 1/480,  // Min frame time clamp for threshold calc
-        DELTA_ENCODING_ENABLED: true, // Send only changed fields to reduce bandwidth
+        DELTA_ENCODING_ENABLED: false, // Send only changed fields to reduce bandwidth
         INTERPOLATION_DELAY: 1000/20, // Render delay for smooth interpolation (ms)
         INTERPOLATION_ENABLED: true, // Enable/disable interpolation for remote objects
         ADAPTIVE_DELAY_ENABLED: false, // Auto-tune interpolation delay based on jitter
+        ADAPTIVE_DELAY_MAX: 100,       // Auto-tune interpolation max delay
         SNAP_THRESHOLD: 0.25        // Snap instead of interpolate when position error exceeds this (normalized)
     };
 
@@ -1070,7 +1071,7 @@
                 const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
-                ad.computedDelay = Math.max(16, Math.min(266, mean + 2 * stddev));
+                ad.computedDelay = Math.max(16, Math.min(ADAPTIVE_DELAY_MAX, mean + 2 * stddev));
             }
         },
 

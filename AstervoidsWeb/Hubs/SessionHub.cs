@@ -1,6 +1,8 @@
+using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
 
 namespace AstervoidsWeb.Hubs;
 
@@ -12,6 +14,7 @@ public class SessionHub : Hub
     private readonly ISessionService _sessionService;
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
+    private readonly SessionSettings _settings;
 
     // Group name for all connected clients to receive session list updates
     private const string AllClientsGroup = "AllClients";
@@ -19,11 +22,13 @@ public class SessionHub : Hub
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
-        ILogger<SessionHub> logger)
+        ILogger<SessionHub> logger,
+        IOptions<SessionSettings> settings)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
+        _settings = settings.Value;
     }
 
     /// <summary>
@@ -331,9 +336,15 @@ public class SessionHub : Hub
 
         if (objectInfos.Count > 0)
         {
-            // Broadcast trimmed update (no metadata that doesn't change after creation)
-            var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
-            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", updateInfos);
+            if (_settings.TrimUpdateMetadata)
+            {
+                var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", updateInfos);
+            }
+            else
+            {
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos);
+            }
         }
 
         return objectInfos;
