@@ -179,6 +179,21 @@ const ObjectSync = (function() {
      * Handle remote object created.
      */
     function handleRemoteObjectCreated(objectInfo) {
+        const existing = objects.get(objectInfo.id);
+        if (existing) {
+            // Backfill metadata from creation event (object was pre-created by update fallback)
+            existing.creatorMemberId = objectInfo.creatorMemberId;
+            existing.ownerMemberId = objectInfo.ownerMemberId;
+            existing.scope = objectInfo.scope;
+            existing.isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
+            // Keep existing data/version if already ahead from updates
+            if (objectInfo.version > existing.version) {
+                existing.data = objectInfo.data || {};
+                existing.version = objectInfo.version;
+            }
+            return;
+        }
+
         const obj = {
             id: objectInfo.id,
             creatorMemberId: objectInfo.creatorMemberId,
@@ -200,10 +215,10 @@ const ObjectSync = (function() {
     /**
      * Handle remote objects updated.
      */
-    function handleRemoteObjectsUpdated(updatedObjects) {
-        // Signal packet arrival (for adaptive delay tracking)
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderConnectionId, clientTimestamp) {
+        // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived();
+            callbacks.onBatchReceived(serverTimestamp, clientTimestamp);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {

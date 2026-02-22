@@ -960,15 +960,16 @@
         SPAWN_MIN_DISTANCE: 0.25,   // Minimum spawn distance from ship (normalized)
         
         // Multiplayer settings
-        MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
-        SYNC_NOMINAL_FRAME_TIME: 1/20, // Target send interval (seconds)
-        SYNC_MIN_FRAME_TIME: 1/480,  // Min frame time clamp for threshold calc
+        MULTIPLAYER_LIVES: 6,          // Shared lives pool for multiplayer sessions
+        SYNC_NOMINAL_FRAME_TIME: 1/10, // Target send interval (seconds)
+        SYNC_MIN_FRAME_TIME: 1/480,    // Min frame time clamp for threshold calc
         DELTA_ENCODING_ENABLED: false, // Send only changed fields to reduce bandwidth
-        INTERPOLATION_DELAY: 1000/20, // Render delay for smooth interpolation (ms)
-        INTERPOLATION_ENABLED: true, // Enable/disable interpolation for remote objects
-        ADAPTIVE_DELAY_ENABLED: false, // Auto-tune interpolation delay based on jitter
-        ADAPTIVE_DELAY_MAX: 100,       // Auto-tune interpolation max delay
-        SNAP_THRESHOLD: 0.25        // Snap instead of interpolate when position error exceeds this (normalized)
+        INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
+        INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
+        ADAPTIVE_DELAY_ENABLED: false,  // Auto-tune interpolation delay based on jitter
+        ADAPTIVE_DELAY_MIN: 1000/30,   // Auto-tune interpolation max delay
+        ADAPTIVE_DELAY_MAX: 1000/5,   // Auto-tune interpolation max delay
+        SNAP_THRESHOLD: 0.25           // Snap instead of interpolate when position error exceeds this (normalized)
     };
 
     // ============================================
@@ -1004,6 +1005,19 @@
             maxSamples: 30,
             computedDelay: CONFIG.INTERPOLATION_DELAY,
             lastPacketTime: 0
+        },
+        // One-way latency estimation (server→client)
+        latency: {
+            minOneWay: Infinity,
+            estimatedLatency: 0,
+            samples: [],
+            maxSamples: 30
+        },
+        // Round-trip time estimation (client→server→client)
+        rtt: {
+            samples: [],
+            maxSamples: 30,
+            estimatedRtt: 0
         },
         
         /**
@@ -1048,13 +1062,37 @@
          * Record arrival of an update packet for adaptive delay calculation.
          * Call once per OnObjectsUpdated broadcast, not per object.
          */
-        recordPacketArrival() {
-            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
-            const now = performance.now();
-            if (this.adaptiveDelay.lastPacketTime > 0) {
-                this.recordPacketInterval(now - this.adaptiveDelay.lastPacketTime);
+        recordPacketArrival(serverTimestamp, clientTimestamp) {
+            const now = Date.now();
+            // Server→client latency estimation
+            if (serverTimestamp) {
+                const oneWay = now - serverTimestamp;
+                const lat = this.latency;
+                lat.samples.push(oneWay);
+                if (lat.samples.length > lat.maxSamples) {
+                    lat.samples.shift();
+                }
+                lat.minOneWay = Math.min(lat.minOneWay, oneWay);
+                const mean = lat.samples.reduce((s, v) => s + v, 0) / lat.samples.length;
+                lat.estimatedLatency = Math.max(0, mean - lat.minOneWay);
             }
-            this.adaptiveDelay.lastPacketTime = now;
+            // RTT estimation (only for broadcasts echoing our own timestamp)
+            if (clientTimestamp) {
+                const rttSample = now - clientTimestamp;
+                const r = this.rtt;
+                r.samples.push(rttSample);
+                if (r.samples.length > r.maxSamples) {
+                    r.samples.shift();
+                }
+                r.estimatedRtt = r.samples.reduce((s, v) => s + v, 0) / r.samples.length;
+            }
+            // Adaptive delay jitter tracking
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
+            const perfNow = performance.now();
+            if (this.adaptiveDelay.lastPacketTime > 0) {
+                this.recordPacketInterval(perfNow - this.adaptiveDelay.lastPacketTime);
+            }
+            this.adaptiveDelay.lastPacketTime = perfNow;
         },
 
         /**
@@ -1071,7 +1109,7 @@
                 const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
-                ad.computedDelay = Math.max(16, Math.min(ADAPTIVE_DELAY_MAX, mean + 2 * stddev));
+                ad.computedDelay = Math.max(ADAPTIVE_DELAY_MIN, Math.min(ADAPTIVE_DELAY_MAX, mean + 2 * stddev));
             }
         },
 
@@ -1080,6 +1118,20 @@
          */
         getDelay() {
             return CONFIG.ADAPTIVE_DELAY_ENABLED ? this.adaptiveDelay.computedDelay : CONFIG.INTERPOLATION_DELAY;
+        },
+
+        /**
+         * Get the estimated network latency (queuing delay above baseline)
+         */
+        getLatency() {
+            return this.latency.estimatedLatency;
+        },
+
+        /**
+         * Get the estimated round-trip time (client→server→client)
+         */
+        getRtt() {
+            return this.rtt.estimatedRtt;
         },
         
         /**
@@ -1238,6 +1290,11 @@
             this.adaptiveDelay.packetIntervals = [];
             this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
             this.adaptiveDelay.lastPacketTime = 0;
+            this.latency.minOneWay = Infinity;
+            this.latency.estimatedLatency = 0;
+            this.latency.samples = [];
+            this.rtt.samples = [];
+            this.rtt.estimatedRtt = 0;
         }
     };
 
@@ -3253,11 +3310,13 @@
         if (netQuality) {
             if (isSessionMode()) {
                 const delayMs = Math.round(RemoteObjects.getDelay());
+                const latencyMs = Math.round(RemoteObjects.getLatency());
+                const rttMs = Math.round(RemoteObjects.getRtt());
                 let color;
-                if (delayMs <= 64) color = '#00ff00';
-                else if (delayMs <= 128) color = '#ffff00';
+                if (rttMs <= 64) color = '#00ff00';
+                else if (rttMs <= 128) color = '#ffff00';
                 else color = '#ff0000';
-                netQuality.textContent = `${delayMs}ms`;
+                netQuality.textContent = `RTT ${rttMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
@@ -3946,7 +4005,7 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
-                ObjectSync.on('onBatchReceived', () => RemoteObjects.recordPacketArrival());
+                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp));
                 // Apply configured sync timing
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,

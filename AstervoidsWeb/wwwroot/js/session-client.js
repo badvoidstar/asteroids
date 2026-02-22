@@ -172,9 +172,11 @@ const SessionClient = (function() {
             }
         });
 
-        connection.on('OnObjectsUpdated', (objects) => {
+        connection.on('OnObjectsUpdated', (objects, serverTimestamp, senderConnectionId, clientTimestamp) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects);
+                // Only pass clientTimestamp if this client is the sender (for RTT calculation)
+                const myTimestamp = (senderConnectionId === connection.connectionId) ? clientTimestamp : null;
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderConnectionId, myTimestamp);
             }
         });
 
@@ -443,7 +445,7 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('UpdateObjects', updates);
+            return await connection.invoke('UpdateObjects', updates, Date.now());
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);
             throw err;

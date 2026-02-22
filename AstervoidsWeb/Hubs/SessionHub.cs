@@ -307,7 +307,7 @@ public class SessionHub : Hub
     /// Updates multiple objects atomically.
     /// Only allows updates to objects owned by the caller (Server role can update any object).
     /// </summary>
-    public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates)
+    public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? clientTimestamp = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -336,14 +336,15 @@ public class SessionHub : Hub
 
         if (objectInfos.Count > 0)
         {
+            var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (_settings.TrimUpdateMetadata)
             {
                 var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
-                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", updateInfos);
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", updateInfos, serverTimestamp, Context.ConnectionId, clientTimestamp);
             }
             else
             {
-                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos);
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos, serverTimestamp, Context.ConnectionId, clientTimestamp);
             }
         }
 
