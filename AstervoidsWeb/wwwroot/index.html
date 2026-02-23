@@ -60,13 +60,11 @@
         /* HUD overlay for score, lives, and wave info */
         #hud {
             position: absolute;
-            top: 10px;
-            left: 10px;
-            right: 10px;
             display: flex;
             justify-content: space-between;
+            align-items: baseline;
             color: #fff;
-            font-size: 18px;
+            font-size: 36px;
             pointer-events: none;
         }
 
@@ -80,6 +78,13 @@
             color: #666;
             font-size: 12px;
             pointer-events: none;
+        }
+
+        /* Network quality indicator */
+        #net-quality {
+            position: absolute;
+            pointer-events: none;
+            font-family: 'Courier New', monospace;
         }
 
         /* Pause menu overlay */
@@ -169,13 +174,13 @@
         }
 
         #start-screen h1 {
-            font-size: 51px;
-            margin-bottom: 40px;
-            letter-spacing: 8px;
+            font-size: 38px;
+            margin-bottom: 30px;
+            letter-spacing: 6px;
         }
 
         #start-screen .start-prompt {
-            font-size: 24px;
+            font-size: 18px;
             color: #888;
             animation: pulse 1.5s ease-in-out infinite;
         }
@@ -195,12 +200,12 @@
             flex-direction: column;
             align-items: center;
             width: 100%;
-            max-width: 400px;
-            padding: 0 20px;
+            max-width: 300px;
+            padding: 0 15px;
         }
 
         #session-picker .picker-status {
-            font-size: 14px;
+            font-size: 11px;
             color: #888;
             margin-bottom: 15px;
             min-height: 20px;
@@ -216,7 +221,7 @@
 
         #session-list {
             width: 100%;
-            max-height: 200px;
+            max-height: 150px;
             overflow-y: auto;
             margin-bottom: 20px;
             border: 1px solid #444;
@@ -226,13 +231,13 @@
         #session-list:empty::after {
             content: 'No sessions available';
             display: block;
-            padding: 20px;
+            padding: 15px;
             text-align: center;
             color: #666;
         }
 
         .session-item {
-            padding: 12px 15px;
+            padding: 9px 11px;
             border-bottom: 1px solid #333;
             cursor: pointer;
             display: flex;
@@ -261,7 +266,7 @@
 
         .session-item.current .session-name::after {
             content: ' (joined)';
-            font-size: 10px;
+            font-size: 8px;
             color: #4f4;
         }
 
@@ -271,11 +276,11 @@
         }
 
         .session-item .session-name {
-            font-size: 16px;
+            font-size: 12px;
         }
 
         .session-item .session-players {
-            font-size: 12px;
+            font-size: 9px;
             color: #888;
         }
 
@@ -286,7 +291,7 @@
         #picker-buttons {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
             width: 100%;
         }
 
@@ -295,8 +300,8 @@
             border: 2px solid #fff;
             color: #fff;
             font-family: 'Courier New', monospace;
-            font-size: 18px;
-            padding: 12px 24px;
+            font-size: 14px;
+            padding: 9px 18px;
             cursor: pointer;
             transition: all 0.15s;
             text-transform: uppercase;
@@ -325,8 +330,8 @@
         .picker-btn.solo {
             border-color: #888;
             color: #888;
-            font-size: 14px;
-            margin-top: 10px;
+            font-size: 11px;
+            margin-top: 8px;
         }
 
         .picker-btn.solo:hover:not(:disabled) {
@@ -446,9 +451,8 @@
             width: 120px;
             height: 50px;
             border-radius: 25px;
-            bottom: 80px;
-            left: 50%;
-            transform: translateX(-50%);
+            top: 50px;
+            right: 10px;
             font-size: 16px;
             display: none;
         }
@@ -487,6 +491,9 @@
             <span id="wave">Wave: 1</span>
             <span id="lives">Lives: 3</span>
         </div>
+        
+        <!-- Network quality indicator -->
+        <div id="net-quality" style="display: none;"></div>
         
         <!-- Instructions: control hints -->
         <div id="instructions">
@@ -952,13 +959,17 @@
         SPAWN_MIN_DISTANCE: 0.25,   // Minimum spawn distance from ship (normalized)
         
         // Multiplayer settings
-        MULTIPLAYER_LIVES: 6,       // Shared lives pool for multiplayer sessions
-        SYNC_NOMINAL_FRAME_TIME: 1/30, // Target send interval in seconds (~33ms)
-        SYNC_MIN_FRAME_TIME: 1/480,  // Min frame time clamp for threshold calc
-        INTERPOLATION_DELAY: 1/60,    // Render delay for smooth interpolation (ms)
-        INTERPOLATION_ENABLED: true, // Enable/disable interpolation for remote objects
-        ADAPTIVE_DELAY_ENABLED: false, // Auto-tune interpolation delay based on jitter
-        SNAP_THRESHOLD: 0.25        // Snap instead of interpolate when position error exceeds this (normalized)
+        MULTIPLAYER_LIVES: 6,          // Shared lives pool for multiplayer sessions
+        SYNC_NOMINAL_FRAME_TIME: 1/10, // Target send interval (seconds)
+        SYNC_MIN_FRAME_TIME: 1/480,    // Min frame time clamp for threshold calc
+        ADAPTIVE_SEND_RATE: true,      // Dynamically adjust send rate based on RTT
+        DELTA_ENCODING_ENABLED: false, // Send only changed fields to reduce bandwidth
+        INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
+        INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
+        ADAPTIVE_DELAY_ENABLED: false,  // Auto-tune interpolation delay based on jitter
+        ADAPTIVE_DELAY_MIN: 1000/30,   // Auto-tune interpolation max delay
+        ADAPTIVE_DELAY_MAX: 1000/5,   // Auto-tune interpolation max delay
+        SNAP_THRESHOLD: 0.25           // Snap instead of interpolate when position error exceeds this (normalized)
     };
 
     // ============================================
@@ -992,7 +1003,21 @@
         adaptiveDelay: {
             packetIntervals: [],   // recent inter-packet intervals (ms)
             maxSamples: 30,
-            computedDelay: CONFIG.INTERPOLATION_DELAY
+            computedDelay: CONFIG.INTERPOLATION_DELAY,
+            lastPacketTime: 0
+        },
+        // One-way latency estimation (server→client)
+        latency: {
+            minOneWay: Infinity,
+            estimatedLatency: 0,
+            samples: [],
+            maxSamples: 30
+        },
+        // Round-trip time estimation (client→server→client)
+        rtt: {
+            samples: [],
+            maxSamples: 30,
+            estimatedRtt: 0
         },
         
         /**
@@ -1005,10 +1030,6 @@
             const existing = this.states.get(objectId);
             
             if (existing) {
-                // Track inter-packet interval for adaptive delay
-                if (CONFIG.ADAPTIVE_DELAY_ENABLED) {
-                    this.recordPacketInterval(now - existing.currentTime);
-                }
                 // Shift current to previous
                 existing.previous = existing.current;
                 existing.previousTime = existing.currentTime;
@@ -1038,6 +1059,45 @@
         },
 
         /**
+         * Record arrival of an update packet for adaptive delay calculation.
+         * Call once per OnObjectsUpdated broadcast, not per object.
+         */
+        recordPacketArrival(serverTimestamp, clientTimestamp) {
+            const now = Date.now();
+            // Server→client latency estimation
+            if (serverTimestamp) {
+                const oneWay = now - serverTimestamp;
+                const lat = this.latency;
+                lat.samples.push(oneWay);
+                if (lat.samples.length > lat.maxSamples) {
+                    lat.samples.shift();
+                }
+                lat.minOneWay = Math.min(lat.minOneWay, oneWay);
+                const mean = lat.samples.reduce((s, v) => s + v, 0) / lat.samples.length;
+                lat.estimatedLatency = Math.max(0, mean - lat.minOneWay);
+            }
+            // RTT estimation (only for broadcasts echoing our own timestamp)
+            if (clientTimestamp) {
+                const rttSample = now - clientTimestamp;
+                const r = this.rtt;
+                r.samples.push(rttSample);
+                if (r.samples.length > r.maxSamples) {
+                    r.samples.shift();
+                }
+                r.estimatedRtt = r.samples.reduce((s, v) => s + v, 0) / r.samples.length;
+                // Adapt send rate based on RTT
+                ObjectSync.updateSendRate(r.estimatedRtt);
+            }
+            // Adaptive delay jitter tracking
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
+            const perfNow = performance.now();
+            if (this.adaptiveDelay.lastPacketTime > 0) {
+                this.recordPacketInterval(perfNow - this.adaptiveDelay.lastPacketTime);
+            }
+            this.adaptiveDelay.lastPacketTime = perfNow;
+        },
+
+        /**
          * Record a packet interval for adaptive delay calculation
          */
         recordPacketInterval(interval) {
@@ -1051,7 +1111,7 @@
                 const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
-                ad.computedDelay = Math.max(16, Math.min(100, mean + 2 * stddev));
+                ad.computedDelay = Math.max(ADAPTIVE_DELAY_MIN, Math.min(ADAPTIVE_DELAY_MAX, mean + 2 * stddev));
             }
         },
 
@@ -1060,6 +1120,20 @@
          */
         getDelay() {
             return CONFIG.ADAPTIVE_DELAY_ENABLED ? this.adaptiveDelay.computedDelay : CONFIG.INTERPOLATION_DELAY;
+        },
+
+        /**
+         * Get the estimated network latency (queuing delay above baseline)
+         */
+        getLatency() {
+            return this.latency.estimatedLatency;
+        },
+
+        /**
+         * Get the estimated round-trip time (client→server→client)
+         */
+        getRtt() {
+            return this.rtt.estimatedRtt;
         },
         
         /**
@@ -1217,6 +1291,12 @@
             this.lastVersions.clear();
             this.adaptiveDelay.packetIntervals = [];
             this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
+            this.adaptiveDelay.lastPacketTime = 0;
+            this.latency.minOneWay = Infinity;
+            this.latency.estimatedLatency = 0;
+            this.latency.samples = [];
+            this.rtt.samples = [];
+            this.rtt.estimatedRtt = 0;
         }
     };
 
@@ -1395,6 +1475,28 @@
             game.viewport.y = 0;
             game.viewport.width = newWidth;
             game.viewport.height = newHeight;
+        }
+        
+        // Position HUD within the viewport and scale text to viewport size
+        const hud = document.getElementById('hud');
+        if (hud) {
+            const vp = game.viewport;
+            const padding = Math.round(vp.height * 0.015);
+            hud.style.top = `${vp.y + padding}px`;
+            hud.style.left = `${vp.x + padding}px`;
+            hud.style.right = `${(newWidth - vp.x - vp.width) + padding}px`;
+            hud.style.fontSize = `${Math.round(Math.min(vp.width, vp.height) * 0.035)}px`;
+        }
+        
+        // Position network quality indicator at bottom of viewport
+        const netQuality = document.getElementById('net-quality');
+        if (netQuality) {
+            const vp = game.viewport;
+            const padding = Math.round(vp.height * 0.015);
+            const fontSize = Math.round(Math.min(vp.width, vp.height) * 0.025);
+            netQuality.style.bottom = `${(newHeight - vp.y - vp.height) + padding}px`;
+            netQuality.style.left = `${vp.x + padding}px`;
+            netQuality.style.fontSize = `${fontSize}px`;
         }
         
         // No need to scale entity positions - they use normalized coordinates (0-1)
@@ -3204,6 +3306,26 @@
                 sessionIndicator.style.display = 'none';
             }
         }
+        
+        // Update network quality indicator
+        const netQuality = document.getElementById('net-quality');
+        if (netQuality) {
+            if (isSessionMode()) {
+                const delayMs = Math.round(RemoteObjects.getDelay());
+                const latencyMs = Math.round(RemoteObjects.getLatency());
+                const rttMs = Math.round(RemoteObjects.getRtt());
+                let color;
+                if (rttMs <= 64) color = '#00ff00';
+                else if (rttMs <= 128) color = '#ffff00';
+                else color = '#ff0000';
+                const sendMs = Math.round(1000 / ObjectSync.getSendRate());
+                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms`;
+                netQuality.style.color = color;
+                netQuality.style.display = '';
+            } else {
+                netQuality.style.display = 'none';
+            }
+        }
     }
 
     /**
@@ -3214,8 +3336,9 @@
      * @param {number} size - Font size
      */
     function drawCenteredText(text, y, size = 32) {
+        const scaledSize = Math.round(size * getReferenceDimension() / 600);
         ctx.fillStyle = CONFIG.STROKE_COLOR;
-        ctx.font = `${size}px 'Courier New', monospace`;
+        ctx.font = `${scaledSize}px 'Courier New', monospace`;
         ctx.textAlign = 'center';
         ctx.fillText(text, getGameWidth() / 2, y);
     }
@@ -3421,10 +3544,11 @@
         }
         
         if (isGameOver()) {
-            drawCenteredText('GAME OVER', getGameHeight() / 2 - 40, 48);
-            drawCenteredText(`Final Score: ${game.score}`, getGameHeight() / 2 + 10, 24);
+            const gh = getGameHeight();
+            drawCenteredText('GAME OVER', gh / 2 - 40, 48);
+            drawCenteredText(`Final Score: ${game.score}`, gh / 2 + 10, 24);
             if (!touchControlsEnabled) {
-                drawCenteredText('Press ENTER for menu', getGameHeight() / 2 + 50, 20);
+                drawCenteredText('Press ENTER for menu', gh / 2 + 50, 20);
             }
         }
         
@@ -3699,9 +3823,12 @@
             if (touchButtons.restart) {
                 touchButtons.restart.classList.toggle('visible', isGameOver());
             }
-            // Hide pause button in session mode
+            // Show pause button only during active solo play or while paused
             if (touchButtons.pause) {
-                touchButtons.pause.style.display = isSessionMode() ? 'none' : '';
+                const showPause = !isSessionMode()
+                    && startScreen.classList.contains('hidden')
+                    && (game.state === 'playing' || game.state === 'waveDelay' || game.state === 'paused');
+                touchButtons.pause.style.display = showPause ? '' : 'none';
             }
             requestAnimationFrame(mobileLoop);
         });
@@ -3884,10 +4011,13 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
+                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp));
                 // Apply configured sync timing
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
-                    minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME
+                    minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME,
+                    deltaEncoding: CONFIG.DELTA_ENCODING_ENABLED,
+                    adaptiveSendRate: CONFIG.ADAPTIVE_SEND_RATE
                 });
                 
                 sessionPicker.connected = true;

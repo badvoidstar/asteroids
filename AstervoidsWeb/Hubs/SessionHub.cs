@@ -1,6 +1,8 @@
+using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.Options;
 
 namespace AstervoidsWeb.Hubs;
 
@@ -12,6 +14,7 @@ public class SessionHub : Hub
     private readonly ISessionService _sessionService;
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
+    private readonly SessionSettings _settings;
 
     // Group name for all connected clients to receive session list updates
     private const string AllClientsGroup = "AllClients";
@@ -19,11 +22,13 @@ public class SessionHub : Hub
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
-        ILogger<SessionHub> logger)
+        ILogger<SessionHub> logger,
+        IOptions<SessionSettings> settings)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
+        _settings = settings.Value;
     }
 
     /// <summary>
@@ -302,7 +307,7 @@ public class SessionHub : Hub
     /// Updates multiple objects atomically.
     /// Only allows updates to objects owned by the caller (Server role can update any object).
     /// </summary>
-    public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates)
+    public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? clientTimestamp = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -331,8 +336,16 @@ public class SessionHub : Hub
 
         if (objectInfos.Count > 0)
         {
-            // Notify all members including sender
-            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos);
+            var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (_settings.TrimUpdateMetadata)
+            {
+                var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", updateInfos, serverTimestamp, Context.ConnectionId, clientTimestamp);
+            }
+            else
+            {
+                await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated", objectInfos, serverTimestamp, Context.ConnectionId, clientTimestamp);
+            }
         }
 
         return objectInfos;
@@ -635,6 +648,7 @@ public record MemberLeftInfo(
 public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt, bool GameStarted);
 public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
 public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
+public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record BulletHitReport(Guid AsteroidObjectId, Guid BulletObjectId, Guid ReporterMemberId);
 public record BulletHitConfirmation(Guid BulletObjectId, Guid BulletOwnerMemberId, int Points, string AsteroidSize);

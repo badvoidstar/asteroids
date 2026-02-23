@@ -13,17 +13,29 @@ const ObjectSync = (function() {
     // Pending updates to be batched
     let pendingUpdates = [];
     
+    // Delta encoding: track last-sent data per object to only send changes
+    const lastSentData = new Map();
+    let deltaEncodingEnabled = false;
+    
+    // Full-state sync interval (frames at nominal rate)
+    const FULL_SYNC_INTERVAL = 60;
+    
     // Frame-count-based sync settings
     let nominalFrameTime = 1 / 30;  // target send interval in seconds
+    let baseNominalFrameTime = 1 / 30; // configured baseline (before adaptive adjustment)
     let minFrameTime = 1 / 480;     // clamp to prevent extreme thresholds
     let frameCounter = 0;
     let sendThreshold = 2;          // recalculated each frame from actual frame time
+    let adaptiveSendRate = false;    // dynamically adjust send rate based on RTT
+    const ADAPTIVE_SEND_MIN = 1 / 30; // fastest send interval (30Hz) in seconds
+    const ADAPTIVE_SEND_MAX = 1 / 1;  // slowest send interval (1Hz) in seconds
 
     // Callbacks
     const callbacks = {
         onObjectCreated: null,
         onObjectUpdated: null,
         onObjectDeleted: null,
+        onBatchReceived: null,
         onSyncError: null
     };
     
@@ -34,9 +46,16 @@ const ObjectSync = (function() {
     function configure(config) {
         if (config.nominalFrameTime !== undefined) {
             nominalFrameTime = config.nominalFrameTime;
+            baseNominalFrameTime = config.nominalFrameTime;
         }
         if (config.minFrameTime !== undefined) {
             minFrameTime = config.minFrameTime;
+        }
+        if (config.deltaEncoding !== undefined) {
+            deltaEncodingEnabled = config.deltaEncoding;
+        }
+        if (config.adaptiveSendRate !== undefined) {
+            adaptiveSendRate = config.adaptiveSendRate;
         }
     }
     
@@ -46,6 +65,24 @@ const ObjectSync = (function() {
      */
     function getSendThreshold() {
         return sendThreshold;
+    }
+
+    /**
+     * Adapt send rate based on measured RTT.
+     * Linearly scales send interval: low RTT → 20Hz, high RTT → 2Hz.
+     * @param {number} rttMs - Current round-trip time in milliseconds
+     */
+    function updateSendRate(rttMs) {
+        if (!adaptiveSendRate) return;
+        const rttSec = rttMs / 1000;
+        nominalFrameTime = Math.max(ADAPTIVE_SEND_MIN, Math.min(ADAPTIVE_SEND_MAX, rttSec));
+    }
+
+    /**
+     * Get the current effective send rate in Hz.
+     */
+    function getSendRate() {
+        return Math.round(1 / nominalFrameTime);
     }
     
     /**
@@ -168,6 +205,21 @@ const ObjectSync = (function() {
      * Handle remote object created.
      */
     function handleRemoteObjectCreated(objectInfo) {
+        const existing = objects.get(objectInfo.id);
+        if (existing) {
+            // Backfill metadata from creation event (object was pre-created by update fallback)
+            existing.creatorMemberId = objectInfo.creatorMemberId;
+            existing.ownerMemberId = objectInfo.ownerMemberId;
+            existing.scope = objectInfo.scope;
+            existing.isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
+            // Keep existing data/version if already ahead from updates
+            if (objectInfo.version > existing.version) {
+                existing.data = objectInfo.data || {};
+                existing.version = objectInfo.version;
+            }
+            return;
+        }
+
         const obj = {
             id: objectInfo.id,
             creatorMemberId: objectInfo.creatorMemberId,
@@ -189,16 +241,20 @@ const ObjectSync = (function() {
     /**
      * Handle remote objects updated.
      */
-    function handleRemoteObjectsUpdated(updatedObjects) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderConnectionId, clientTimestamp) {
+        // Signal packet arrival (for adaptive delay and latency tracking)
+        if (callbacks.onBatchReceived) {
+            callbacks.onBatchReceived(serverTimestamp, clientTimestamp);
+        }
+        // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
                 if (update.version > existing.version) {
                     const oldType = existing.data?.type;
-                    existing.data = update.data;
+                    Object.assign(existing.data, update.data);
                     existing.version = update.version;
-                    existing.ownerMemberId = update.ownerMemberId;
                     
                     // Update type index if type changed
                     updateTypeIndex(existing, oldType, update.data?.type);
@@ -208,12 +264,13 @@ const ObjectSync = (function() {
                     }
                 }
             } else {
-                // Object doesn't exist locally, add it
+                // Object not yet known — create with available data
+                // (full metadata arrives via OnObjectCreated; this is a fallback)
                 const obj = {
                     id: update.id,
-                    creatorMemberId: update.creatorMemberId,
-                    ownerMemberId: update.ownerMemberId,
-                    scope: update.scope,
+                    creatorMemberId: null,
+                    ownerMemberId: null,
+                    scope: null,
                     data: update.data || {},
                     version: update.version,
                     isLocal: false
@@ -236,6 +293,7 @@ const ObjectSync = (function() {
         if (obj) {
             removeFromTypeIndex(obj);
             objects.delete(objectId);
+            lastSentData.delete(objectId);
 
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(obj);
@@ -345,6 +403,8 @@ const ObjectSync = (function() {
         return true;
     }
 
+    let fullSyncCounter = 0;
+
     /**
      * Called once per frame to drive frame-count-based sync.
      * Recalculates the send threshold from the current frame time,
@@ -362,14 +422,64 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Compute delta between current data and last-sent data for an object.
+     * Returns only the fields that changed, or null if nothing changed.
+     * Always includes 'type' for receiver-side identification.
+     */
+    function computeDelta(objectId, data, forceFullSync) {
+        const prev = lastSentData.get(objectId);
+        if (!prev || forceFullSync) {
+            lastSentData.set(objectId, { ...data });
+            return { ...data };
+        }
+
+        const delta = {};
+        let hasChanges = false;
+        for (const key in data) {
+            if (data[key] !== prev[key]) {
+                delta[key] = data[key];
+                hasChanges = true;
+            }
+        }
+
+        if (!hasChanges) return null;
+
+        // Always include type for receiver identification
+        if (data.type !== undefined) delta.type = data.type;
+        Object.assign(prev, delta);
+        return delta;
+    }
+
+    /**
      * Flush all pending updates to the server.
+     * When delta encoding is enabled, only sends changed fields.
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
         if (!SessionClient.isInSession()) return;
 
-        const updates = pendingUpdates;
+        let updates;
+        if (deltaEncodingEnabled) {
+            const forceFullSync = (++fullSyncCounter >= FULL_SYNC_INTERVAL);
+            if (forceFullSync) fullSyncCounter = 0;
+
+            updates = [];
+            for (const update of pendingUpdates) {
+                const delta = computeDelta(update.objectId, update.data, forceFullSync);
+                if (delta) {
+                    updates.push({
+                        objectId: update.objectId,
+                        data: delta,
+                        expectedVersion: update.expectedVersion
+                    });
+                }
+            }
+        } else {
+            updates = pendingUpdates;
+        }
         pendingUpdates = [];
+
+        if (updates.length === 0) return;
 
         try {
             await SessionClient.updateObjects(updates);
@@ -395,6 +505,7 @@ const ObjectSync = (function() {
         if (obj) {
             removeFromTypeIndex(obj);
             objects.delete(objectId);
+            lastSentData.delete(objectId);
         }
 
         // Also remove from pending updates
@@ -510,6 +621,7 @@ const ObjectSync = (function() {
             if (obj) {
                 removeFromTypeIndex(obj);
                 objects.delete(objectId);
+                lastSentData.delete(objectId);
 
                 if (callbacks.onObjectDeleted) {
                     callbacks.onObjectDeleted(obj);
@@ -531,7 +643,9 @@ const ObjectSync = (function() {
     function clear() {
         objects.clear();
         typeIndex.clear();
+        lastSentData.clear();
         pendingUpdates = [];
+        fullSyncCounter = 0;
     }
 
     // Public API
@@ -552,6 +666,8 @@ const ObjectSync = (function() {
         getObjectCount,
         configure,
         getSendThreshold,
+        getSendRate,
+        updateSendRate,
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,
