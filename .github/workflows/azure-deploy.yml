@@ -118,11 +118,11 @@ jobs:
           ENV_NAME="${{ steps.vars.outputs.env_name }}"
           
           # Create or select azd environment
-          azd env new "$ENV_NAME" --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location westus || true
+          azd env new "$ENV_NAME" --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }} --location westus2 || true
           azd env select "$ENV_NAME"
           
           # Set location
-          azd env set AZURE_LOCATION westus
+          azd env set AZURE_LOCATION westus2
           
           # For branch deployments, set resource group to production's resource group
           # This tells azd deploy where to find the container app
