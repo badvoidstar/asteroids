@@ -27,7 +27,7 @@ const ObjectSync = (function() {
     let frameCounter = 0;
     let sendThreshold = 2;          // recalculated each frame from actual frame time
     let adaptiveSendRate = false;    // dynamically adjust send rate based on RTT
-    const ADAPTIVE_SEND_MIN = 1 / 20; // fastest send interval (20Hz) in seconds
+    const ADAPTIVE_SEND_MIN = 1 / 30; // fastest send interval (30Hz) in seconds
     const ADAPTIVE_SEND_MAX = 1 / 1;  // slowest send interval (1Hz) in seconds
 
     // Callbacks

@@ -174,13 +174,13 @@
         }
 
         #start-screen h1 {
-            font-size: 51px;
-            margin-bottom: 40px;
-            letter-spacing: 8px;
+            font-size: 38px;
+            margin-bottom: 30px;
+            letter-spacing: 6px;
         }
 
         #start-screen .start-prompt {
-            font-size: 24px;
+            font-size: 18px;
             color: #888;
             animation: pulse 1.5s ease-in-out infinite;
         }
@@ -200,12 +200,12 @@
             flex-direction: column;
             align-items: center;
             width: 100%;
-            max-width: 400px;
-            padding: 0 20px;
+            max-width: 300px;
+            padding: 0 15px;
         }
 
         #session-picker .picker-status {
-            font-size: 14px;
+            font-size: 11px;
             color: #888;
             margin-bottom: 15px;
             min-height: 20px;
@@ -221,7 +221,7 @@
 
         #session-list {
             width: 100%;
-            max-height: 200px;
+            max-height: 150px;
             overflow-y: auto;
             margin-bottom: 20px;
             border: 1px solid #444;
@@ -231,13 +231,13 @@
         #session-list:empty::after {
             content: 'No sessions available';
             display: block;
-            padding: 20px;
+            padding: 15px;
             text-align: center;
             color: #666;
         }
 
         .session-item {
-            padding: 12px 15px;
+            padding: 9px 11px;
             border-bottom: 1px solid #333;
             cursor: pointer;
             display: flex;
@@ -266,7 +266,7 @@
 
         .session-item.current .session-name::after {
             content: ' (joined)';
-            font-size: 10px;
+            font-size: 8px;
             color: #4f4;
         }
 
@@ -276,11 +276,11 @@
         }
 
         .session-item .session-name {
-            font-size: 16px;
+            font-size: 12px;
         }
 
         .session-item .session-players {
-            font-size: 12px;
+            font-size: 9px;
             color: #888;
         }
 
@@ -291,7 +291,7 @@
         #picker-buttons {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
             width: 100%;
         }
 
@@ -300,8 +300,8 @@
             border: 2px solid #fff;
             color: #fff;
             font-family: 'Courier New', monospace;
-            font-size: 18px;
-            padding: 12px 24px;
+            font-size: 14px;
+            padding: 9px 18px;
             cursor: pointer;
             transition: all 0.15s;
             text-transform: uppercase;
@@ -330,8 +330,8 @@
         .picker-btn.solo {
             border-color: #888;
             color: #888;
-            font-size: 14px;
-            margin-top: 10px;
+            font-size: 11px;
+            margin-top: 8px;
         }
 
         .picker-btn.solo:hover:not(:disabled) {
@@ -451,9 +451,8 @@
             width: 120px;
             height: 50px;
             border-radius: 25px;
-            bottom: 80px;
-            left: 50%;
-            transform: translateX(-50%);
+            top: 50px;
+            right: 10px;
             font-size: 16px;
             display: none;
         }
@@ -3319,8 +3318,8 @@
                 if (rttMs <= 64) color = '#00ff00';
                 else if (rttMs <= 128) color = '#ffff00';
                 else color = '#ff0000';
-                const sendHz = ObjectSync.getSendRate();
-                netQuality.textContent = `RTT ${rttMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | TX ${sendHz}Hz`;
+                const sendMs = Math.round(1000 / ObjectSync.getSendRate());
+                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
@@ -3541,15 +3540,15 @@
         
         // Draw state-specific overlays (in gameplay coordinates)
         if (game.state === 'waveDelay') {
-            drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 96);
+            drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 48);
         }
         
         if (isGameOver()) {
             const gh = getGameHeight();
-            drawCenteredText('GAME OVER', gh / 2 - 80, 96);
-            drawCenteredText(`Final Score: ${game.score}`, gh / 2 + 20, 48);
+            drawCenteredText('GAME OVER', gh / 2 - 40, 48);
+            drawCenteredText(`Final Score: ${game.score}`, gh / 2 + 10, 24);
             if (!touchControlsEnabled) {
-                drawCenteredText('Press ENTER for menu', gh / 2 + 100, 40);
+                drawCenteredText('Press ENTER for menu', gh / 2 + 50, 20);
             }
         }
         
@@ -3824,9 +3823,12 @@
             if (touchButtons.restart) {
                 touchButtons.restart.classList.toggle('visible', isGameOver());
             }
-            // Hide pause button in session mode
+            // Show pause button only during active solo play or while paused
             if (touchButtons.pause) {
-                touchButtons.pause.style.display = isSessionMode() ? 'none' : '';
+                const showPause = !isSessionMode()
+                    && startScreen.classList.contains('hidden')
+                    && (game.state === 'playing' || game.state === 'waveDelay' || game.state === 'paused');
+                touchButtons.pause.style.display = showPause ? '' : 'none';
             }
             requestAnimationFrame(mobileLoop);
         });
