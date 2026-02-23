@@ -22,9 +22,13 @@ const ObjectSync = (function() {
     
     // Frame-count-based sync settings
     let nominalFrameTime = 1 / 30;  // target send interval in seconds
+    let baseNominalFrameTime = 1 / 30; // configured baseline (before adaptive adjustment)
     let minFrameTime = 1 / 480;     // clamp to prevent extreme thresholds
     let frameCounter = 0;
     let sendThreshold = 2;          // recalculated each frame from actual frame time
+    let adaptiveSendRate = false;    // dynamically adjust send rate based on RTT
+    const ADAPTIVE_SEND_MIN = 1 / 20; // fastest send interval (20Hz) in seconds
+    const ADAPTIVE_SEND_MAX = 1 / 1;  // slowest send interval (1Hz) in seconds
 
     // Callbacks
     const callbacks = {
@@ -42,12 +46,16 @@ const ObjectSync = (function() {
     function configure(config) {
         if (config.nominalFrameTime !== undefined) {
             nominalFrameTime = config.nominalFrameTime;
+            baseNominalFrameTime = config.nominalFrameTime;
         }
         if (config.minFrameTime !== undefined) {
             minFrameTime = config.minFrameTime;
         }
         if (config.deltaEncoding !== undefined) {
             deltaEncodingEnabled = config.deltaEncoding;
+        }
+        if (config.adaptiveSendRate !== undefined) {
+            adaptiveSendRate = config.adaptiveSendRate;
         }
     }
     
@@ -57,6 +65,24 @@ const ObjectSync = (function() {
      */
     function getSendThreshold() {
         return sendThreshold;
+    }
+
+    /**
+     * Adapt send rate based on measured RTT.
+     * Linearly scales send interval: low RTT → 20Hz, high RTT → 2Hz.
+     * @param {number} rttMs - Current round-trip time in milliseconds
+     */
+    function updateSendRate(rttMs) {
+        if (!adaptiveSendRate) return;
+        const rttSec = rttMs / 1000;
+        nominalFrameTime = Math.max(ADAPTIVE_SEND_MIN, Math.min(ADAPTIVE_SEND_MAX, rttSec));
+    }
+
+    /**
+     * Get the current effective send rate in Hz.
+     */
+    function getSendRate() {
+        return Math.round(1 / nominalFrameTime);
     }
     
     /**
@@ -640,6 +666,8 @@ const ObjectSync = (function() {
         getObjectCount,
         configure,
         getSendThreshold,
+        getSendRate,
+        updateSendRate,
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,

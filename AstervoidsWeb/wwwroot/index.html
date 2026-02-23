@@ -963,6 +963,7 @@
         MULTIPLAYER_LIVES: 6,          // Shared lives pool for multiplayer sessions
         SYNC_NOMINAL_FRAME_TIME: 1/10, // Target send interval (seconds)
         SYNC_MIN_FRAME_TIME: 1/480,    // Min frame time clamp for threshold calc
+        ADAPTIVE_SEND_RATE: true,      // Dynamically adjust send rate based on RTT
         DELTA_ENCODING_ENABLED: false, // Send only changed fields to reduce bandwidth
         INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
         INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
@@ -1085,6 +1086,8 @@
                     r.samples.shift();
                 }
                 r.estimatedRtt = r.samples.reduce((s, v) => s + v, 0) / r.samples.length;
+                // Adapt send rate based on RTT
+                ObjectSync.updateSendRate(r.estimatedRtt);
             }
             // Adaptive delay jitter tracking
             if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
@@ -3316,7 +3319,8 @@
                 if (rttMs <= 64) color = '#00ff00';
                 else if (rttMs <= 128) color = '#ffff00';
                 else color = '#ff0000';
-                netQuality.textContent = `RTT ${rttMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms`;
+                const sendHz = ObjectSync.getSendRate();
+                netQuality.textContent = `RTT ${rttMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | TX ${sendHz}Hz`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
@@ -4010,7 +4014,8 @@
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
                     minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME,
-                    deltaEncoding: CONFIG.DELTA_ENCODING_ENABLED
+                    deltaEncoding: CONFIG.DELTA_ENCODING_ENABLED,
+                    adaptiveSendRate: CONFIG.ADAPTIVE_SEND_RATE
                 });
                 
                 sessionPicker.connected = true;
