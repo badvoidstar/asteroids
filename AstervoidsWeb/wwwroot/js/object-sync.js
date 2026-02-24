@@ -433,15 +433,23 @@ const ObjectSync = (function() {
      * Create a new synchronized object.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session' (default: 'Member')
+     * @param {string} ownerMemberId - Optional owner override
+     * @param {function} isStillNeeded - Optional callback checked after async creation;
+     *   if it returns false, the server object is auto-deleted (handles race where
+     *   the caller destroys the local representation during the server round-trip)
      */
-    async function createObject(data = {}, scope = 'Member', ownerMemberId = null) {
+    async function createObject(data = {}, scope = 'Member', ownerMemberId = null, isStillNeeded = null) {
         if (!SessionClient.isInSession()) {
             throw new Error('Not in a session');
         }
 
         try {
             const objectInfo = await SessionClient.createObject(data, scope, ownerMemberId);
-            // Object will be added via the onObjectCreated event
+            // Auto-cleanup: if caller's object was destroyed during async creation
+            if (isStillNeeded && !isStillNeeded()) {
+                deleteObject(objectInfo.id); // fire-and-forget server cleanup
+                return null;
+            }
             return objectInfo;
         } catch (err) {
             console.error('[ObjectSync] Create object failed:', err);

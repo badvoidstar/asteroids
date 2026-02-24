@@ -2323,7 +2323,10 @@
         game.multiplayer.myColorIndex = colorIndex;
         
         try {
-            const objectInfo = await ObjectSync.createObject(game.ship.toSyncData(), 'Member');
+            const objectInfo = await ObjectSync.createObject(
+                game.ship.toSyncData(), 'Member', null,
+                () => game.ship !== null);
+            if (!objectInfo) return;
             game.ship.syncObjectId = objectInfo.id;
             game.multiplayer.myShipObjectId = objectInfo.id;
         } catch (err) {
@@ -2476,7 +2479,10 @@
         if (!isSessionMode()) return;
         
         try {
-            const objectInfo = await ObjectSync.createObject(asteroid.toSyncData(), 'Session', ownerMemberId);
+            const objectInfo = await ObjectSync.createObject(
+                asteroid.toSyncData(), 'Session', ownerMemberId,
+                () => game.astervoids.includes(asteroid));
+            if (!objectInfo) return;
             asteroid.syncObjectId = objectInfo.id;
         } catch (err) {
             console.error('[Multiplayer] Failed to create asteroid:', err);
@@ -2593,12 +2599,10 @@
         if (!isSessionMode()) return;
         
         try {
-            const objectInfo = await ObjectSync.createObject(bullet.toSyncData(), 'Member');
-            // If bullet was destroyed during creation (e.g., hit asteroid), clean up
-            if (!game.bullets.includes(bullet)) {
-                await ObjectSync.deleteObject(objectInfo.id);
-                return;
-            }
+            const objectInfo = await ObjectSync.createObject(
+                bullet.toSyncData(), 'Member', null,
+                () => game.bullets.includes(bullet));
+            if (!objectInfo) return;
             bullet.syncObjectId = objectInfo.id;
         } catch (err) {
             console.error('[Multiplayer] Failed to create bullet:', err);
@@ -2714,7 +2718,10 @@
                 processedHits: {}
             };
             
-            const objectInfo = await ObjectSync.createObject(gameStateData, 'Session');
+            const objectInfo = await ObjectSync.createObject(
+                gameStateData, 'Session', null,
+                () => isSessionMode());
+            if (!objectInfo) return;
             game.multiplayer.gameStateObjectId = objectInfo.id;
         } catch (err) {
             console.error('[Multiplayer] Failed to create GameState:', err);
