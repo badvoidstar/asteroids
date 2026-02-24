@@ -3405,12 +3405,6 @@
         waveDisplay.textContent = `Wave: ${game.wave}`;
         livesDisplay.textContent = `Lives: ${game.lives}`;
         
-        // Show player count in multiplayer
-        if (isSessionMode()) {
-            const playerCount = 1 + game.multiplayer.remoteShips.size;
-            livesDisplay.textContent = `Lives: ${game.lives} | Players: ${playerCount}`;
-        }
-        
         // Update session indicator
         const sessionIndicator = document.getElementById('session-indicator');
         if (sessionIndicator) {
