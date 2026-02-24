@@ -2480,8 +2480,7 @@
         
         try {
             const objectInfo = await ObjectSync.createObject(
-                asteroid.toSyncData(), 'Session', ownerMemberId,
-                () => game.astervoids.includes(asteroid));
+                asteroid.toSyncData(), 'Session', ownerMemberId);
             if (!objectInfo) return;
             asteroid.syncObjectId = objectInfo.id;
         } catch (err) {
