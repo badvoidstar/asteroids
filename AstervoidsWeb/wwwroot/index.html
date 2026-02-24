@@ -2736,14 +2736,22 @@
         
         const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
         const processedHits = (gsObj?.data?.processedHits) || {};
+        const processedScores = (gsObj?.data?.processedScores) || {};
+        let groupScore = gsObj?.data?.groupScore || 0;
         
-        // Aggregate score from all ships
+        // Accumulate score deltas from all ships (survives member departure)
         const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
-        let totalScore = 0;
         for (const ship of shipObjects) {
-            totalScore += (ship.data?.score || 0);
+            const shipId = ship.id;
+            const shipScore = ship.data?.score || 0;
+            const lastProcessed = processedScores[shipId] || 0;
+            const delta = shipScore - lastProcessed;
+            if (delta > 0) {
+                groupScore += delta;
+                processedScores[shipId] = shipScore;
+            }
         }
-        game.score = totalScore;
+        game.score = groupScore;
         
         // Process hitCounts from all ships (idempotent via processedHits tracking)
         for (const ship of shipObjects) {
@@ -2767,10 +2775,12 @@
             wave: game.wave,
             state: game.state,
             lives: game.lives,
-            score: game.score,
+            score: groupScore,
+            groupScore: groupScore,
             speedMultiplier: game.speedMultiplier,
             waveDelayTimer: game.waveDelayTimer,
-            processedHits: processedHits
+            processedHits: processedHits,
+            processedScores: processedScores
         };
         
         ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
