@@ -967,9 +967,10 @@
         INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
         INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
         ADAPTIVE_DELAY_ENABLED: false,  // Auto-tune interpolation delay based on jitter
-        ADAPTIVE_DELAY_MIN: 1000/30,   // Auto-tune interpolation max delay
+        ADAPTIVE_DELAY_MIN: 1000/60,   // Auto-tune interpolation max delay
         ADAPTIVE_DELAY_MAX: 1000/5,   // Auto-tune interpolation max delay
-        SNAP_THRESHOLD: 0.25           // Snap instead of interpolate when position error exceeds this (normalized)
+        SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
+        MAX_EXTRAPOLATION: 0.15        // Max extrapolation time in seconds to prevent overshoot
     };
 
     // ============================================
@@ -1153,8 +1154,12 @@
             const timeDiff = state.currentTime - state.previousTime;
             if (timeDiff <= 0) return state.current;
             
+            // Clamp timeDiff to prevent burst arrivals from collapsing the interval
+            const minTimeDiff = CONFIG.SYNC_NOMINAL_FRAME_TIME * 500; // half nominal interval in ms
+            const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
+            
             const targetTime = renderTime - this.getDelay();
-            const t = (targetTime - state.previousTime) / timeDiff;
+            const t = (targetTime - state.previousTime) / effectiveTimeDiff;
             
             if (t <= 0) {
                 return state.previous;
@@ -1163,10 +1168,10 @@
                 if (this.shouldSnap(state.previous, state.current)) {
                     return state.current;
                 }
-                return this.hermite(state, t, timeDiff);
+                return this.hermite(state, t, effectiveTimeDiff);
             } else {
-                // Extrapolate using velocity
-                const extraTime = (targetTime - state.currentTime) / 1000;
+                // Extrapolate using velocity, capped to prevent overshoot
+                const extraTime = Math.min((targetTime - state.currentTime) / 1000, CONFIG.MAX_EXTRAPOLATION);
                 const refDim = getReferenceDimension();
                 const r = this.getBoundingRadius(state.current);
                 return {
@@ -1688,6 +1693,8 @@
             this.colorIndex = colorIndex;  // Player color index (0-3)
             this.syncObjectId = null;      // ObjectSync ID when in session
             this.memberId = null;          // Session member ID who owns this ship
+            this.score = 0;                // Per-ship score (self-awarded)
+            this.hitCount = 0;             // Monotonic hit counter (GameState owner watches)
         }
 
         /**
@@ -1706,7 +1713,9 @@
                 thrusting: this.thrusting,
                 invulnerable: this.invulnerable,
                 colorIndex: this.colorIndex,
-                memberId: this.memberId
+                memberId: this.memberId,
+                score: this.score || 0,
+                hitCount: this.hitCount || 0
             };
         }
 
@@ -2104,7 +2113,8 @@
                 lifetime: this.lifetime,
                 colorIndex: this.colorIndex,
                 ownerMemberId: this.ownerMemberId,
-                pendingHit: this.pendingHit
+                pendingHit: this.pendingHit,
+                hitTargetId: this.hitTargetId || null
             };
         }
 
@@ -2230,7 +2240,8 @@
             myColorIndex: 0,          // Local player's color index
             remoteShips: new Map(),   // objectId -> Ship instance for remote players
             gameStateObjectId: null,  // ObjectSync ID for shared game state
-            isAuthority: false        // True if this client is the Server (authority)
+            isAuthority: false,       // True if this client is the Server (authority)
+            processedPendingBullets: new Set()  // Track pendingHit bullets we've already processed
         },
         // Cosmetic astervoids for start screen (separate from game astervoids)
         cosmeticAstervoids: []
@@ -2244,6 +2255,15 @@
     // Helper to check if this client has authority (is Server)
     function isAuthority() {
         return isSessionMode() && game.multiplayer.isAuthority;
+    }
+
+    // Helper to check if this client owns the GameState object
+    function isGameStateOwner() {
+        if (!isSessionMode()) return false;
+        const myMemberId = SessionClient.getCurrentMember()?.id;
+        if (!myMemberId) return false;
+        const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+        return gsObj && gsObj.ownerMemberId === myMemberId;
     }
 
     // Helper to check if game is over (lives depleted during active play)
@@ -2433,6 +2453,7 @@
         game.multiplayer.remoteShips.clear();
         game.multiplayer.gameStateObjectId = null;
         game.multiplayer.isAuthority = false;
+        game.multiplayer.processedPendingBullets.clear();
         game.astervoids = [];
         game.bullets = [];
         RemoteObjects.clear();
@@ -2666,21 +2687,23 @@
     }
 
     /**
-     * Create a GameState object in ObjectSync (authority only)
+     * Create a GameState object in ObjectSync (game initiator — typically server)
      * Called when starting a multiplayer game
      */
     async function createSyncedGameState() {
-        if (!isSessionMode() || !isAuthority()) return;
+        if (!isSessionMode()) return;
         
         try {
             const gameStateData = {
                 type: OBJECT_TYPES.GAME_STATE,
+                gameStarted: true,
                 wave: game.wave,
                 state: game.state,
                 lives: game.lives,
                 score: game.score,
                 speedMultiplier: game.speedMultiplier,
-                waveDelayTimer: game.waveDelayTimer
+                waveDelayTimer: game.waveDelayTimer,
+                processedHits: {}
             };
             
             const objectInfo = await ObjectSync.createObject(gameStateData, 'Session');
@@ -2691,31 +2714,60 @@
     }
 
     /**
-     * Sync GameState to ObjectSync (authority only)
-     * Called when game state changes
+     * Sync GameState to ObjectSync (GameState owner only)
+     * Aggregates score from all ships and processes hitCounts for lives
      */
     function syncGameState(immediate = false) {
-        if (!isSessionMode() || !isAuthority() || !game.multiplayer.gameStateObjectId) return;
+        if (!isSessionMode() || !isGameStateOwner() || !game.multiplayer.gameStateObjectId) return;
+        
+        const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
+        const processedHits = (gsObj?.data?.processedHits) || {};
+        
+        // Aggregate score from all ships
+        const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+        let totalScore = 0;
+        for (const ship of shipObjects) {
+            totalScore += (ship.data?.score || 0);
+        }
+        game.score = totalScore;
+        
+        // Process hitCounts from all ships (idempotent via processedHits tracking)
+        for (const ship of shipObjects) {
+            const shipId = ship.id;
+            const hitCount = ship.data?.hitCount || 0;
+            const lastProcessed = processedHits[shipId] || 0;
+            const newHits = hitCount - lastProcessed;
+            if (newHits > 0) {
+                game.lives -= newHits;
+                processedHits[shipId] = hitCount;
+                if (game.lives <= 0) {
+                    game.lives = 0;
+                    AudioSystem.beat.stop();
+                }
+            }
+        }
         
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
+            gameStarted: true,
             wave: game.wave,
             state: game.state,
             lives: game.lives,
             score: game.score,
             speedMultiplier: game.speedMultiplier,
-            waveDelayTimer: game.waveDelayTimer
+            waveDelayTimer: game.waveDelayTimer,
+            processedHits: processedHits
         };
         
         ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
     }
 
     /**
-     * Update local game state from ObjectSync (non-authority clients)
-     * Called every frame by clients
+     * Update local game state from ObjectSync (non-GameState-owner clients)
+     * Called every frame by clients who don't own GameState
      */
     function updateGameStateFromSync() {
-        if (!isSessionMode() || isAuthority()) return;
+        if (!isSessionMode() || isGameStateOwner()) return;
         
         const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
         if (!gameStateObj || !gameStateObj.data) return;
@@ -2755,30 +2807,14 @@
     }
 
     /**
-     * Handle server promotion - take over authority
-     * Called when this client is promoted to Server role
+     * Handle server promotion - take over server role
+     * Note: GameState ownership is independent — it migrates via session-scoped
+     * auto-migration, not server promotion. Server role only matters for initial
+     * session creation and UI display.
      */
     function handleServerPromotion() {
-        console.log('[Multiplayer] This client promoted to Server - taking over authority');
+        console.log('[Multiplayer] This client promoted to Server');
         game.multiplayer.isAuthority = true;
-        
-        // Take over GameState syncing
-        const gameStateObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
-        if (gameStateObj) {
-            game.multiplayer.gameStateObjectId = gameStateObj.id;
-        }
-        
-        // Take over asteroid simulation - rebuild from ObjectSync (if game is active)
-        if (game.state === 'playing' || game.state === 'waveDelay') {
-            const asteroidObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.ASTEROID);
-            game.astervoids = [];
-            for (const obj of asteroidObjects) {
-                const asteroid = Asteroid.fromSyncData(obj.data);
-                asteroid.syncObjectId = obj.id;
-                game.astervoids.push(asteroid);
-            }
-            console.log('[Multiplayer] Server promotion: took over', asteroidObjects.length, 'astervoids');
-        }
     }
 
     // ============================================
@@ -2815,13 +2851,13 @@
             game.lives = CONFIG.MULTIPLAYER_LIVES;
             
             if (isAuthority()) {
-                // Authority: start fresh game
+                // Server: start fresh game and create GameState
                 game.astervoids = [];
                 game.bullets = [];
                 game.score = 0;
                 game.wave = 0;
             } else {
-                // Non-authority: sync existing state from server
+                // Non-server: sync existing state
                 game.astervoids = [];
                 game.bullets = [];
                 updateAstervoidsFromSync();
@@ -3184,18 +3220,18 @@
                                 deleteSyncedBullet(removedBullet);
                             }
                             // Split sends to server — OnObjectReplaced handles asteroid state for all clients
-                            // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
                             splitAsteroid(asteroid);
-                            // Report score to authority (uniform path for all players)
-                            SessionClient.reportScore(points);
+                            // Self-award score on own ship
+                            if (game.ship) {
+                                game.ship.score = (game.ship.score || 0) + points;
+                            }
                         } else {
-                            // Asteroid owned by someone else — report collision, hide bullet
+                            // Asteroid owned by someone else — mark bullet with pendingHit
                             bullet.pendingHit = true;
+                            bullet.hitTargetId = asteroid.syncObjectId;
+                            bullet.pendingPoints = asteroid.getPoints();
                             if (bullet.syncObjectId) {
                                 ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData(), true);
-                            }
-                            if (asteroid.syncObjectId && bullet.syncObjectId) {
-                                SessionClient.reportBulletHit(asteroid.syncObjectId, bullet.syncObjectId);
                             }
                         }
                     } else {
@@ -3218,6 +3254,58 @@
         if (game.ship && game.ship.invulnerable <= 0 && game.state === 'playing') {
             if (checkShipAsteroidCollision(game.ship)) {
                 handleShipHit(game.ship);
+            }
+        }
+        
+        // Asteroid owner scans remote bullets with pendingHit targeting our asteroids
+        if (isSessionMode()) {
+            const bulletObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.BULLET);
+            for (const bulletObj of bulletObjects) {
+                if (!bulletObj.data?.pendingHit || !bulletObj.data?.hitTargetId) continue;
+                if (bulletObj.data?.ownerMemberId === myMemberId) continue; // skip own bullets
+                if (game.multiplayer.processedPendingBullets.has(bulletObj.id)) continue;
+                
+                // Check if we own the target asteroid
+                const targetSyncObj = ObjectSync.getObject(bulletObj.data.hitTargetId);
+                if (!targetSyncObj || targetSyncObj.ownerMemberId !== myMemberId) continue;
+                
+                // Find the asteroid in our local state
+                const asteroid = game.astervoids.find(a => a.syncObjectId === bulletObj.data.hitTargetId);
+                if (!asteroid) continue; // Already destroyed
+                
+                // Mark as processed to prevent duplicate splits during server round-trip
+                game.multiplayer.processedPendingBullets.add(bulletObj.id);
+                
+                // Split asteroid with split attribution for bullet owner confirmation
+                splitAsteroid(asteroid, bulletObj.data.ownerMemberId);
+            }
+            
+            // Clean up processed bullets that no longer exist
+            for (const bulletId of game.multiplayer.processedPendingBullets) {
+                if (!ObjectSync.getObject(bulletId)) {
+                    game.multiplayer.processedPendingBullets.delete(bulletId);
+                }
+            }
+            
+            // Bullet owner checks for OnObjectReplaced confirmation via splitByBulletId
+            // Process pending bullets — check if target asteroid was replaced
+            for (let i = game.bullets.length - 1; i >= 0; i--) {
+                const bullet = game.bullets[i];
+                if (!bullet.pendingHit || bullet.ownerMemberId !== myMemberId) continue;
+                
+                // Check if target asteroid still exists
+                const targetObj = bullet.hitTargetId ? ObjectSync.getObject(bullet.hitTargetId) : null;
+                if (!targetObj) {
+                    // Asteroid gone — bullet hit was processed (or asteroid destroyed by other means)
+                    const points = bullet.pendingPoints || CONFIG.POINTS_SMALL;
+                    if (game.ship) {
+                        game.ship.score = (game.ship.score || 0) + points;
+                    }
+                    const removedBullet = game.bullets.splice(i, 1)[0];
+                    if (removedBullet.syncObjectId) {
+                        deleteSyncedBullet(removedBullet);
+                    }
+                }
             }
         }
     }
@@ -3260,14 +3348,14 @@
         AudioSystem.thrustSound.stop();
         
         if (isSessionMode()) {
+            // Increment monotonic hitCount on ship (GameState owner watches this)
+            ship.hitCount = (ship.hitCount || 0) + 1;
+            
             // Reset ship locally
             ship.reset();
             if (game.multiplayer.myShipObjectId) {
                 ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toSyncData(), true);
             }
-            
-            // All players report ship hit — authority processes via onShipHitReported
-            SessionClient.reportShipHit();
         } else {
             // Solo mode — handle everything locally
             game.lives--;
@@ -3444,12 +3532,12 @@
                 // Check collisions
                 checkCollisions();
                 
-                // Check for wave completion
+                // Check for wave completion (GameState owner detects locally)
                 if (game.astervoids.length === 0 && game.state === 'playing') {
-                    // Solo mode: detect locally; multiplayer: driven by OnObjectTypeEmpty event
-                    if (!isSessionMode()) {
+                    if (!isSessionMode() || isGameStateOwner()) {
                         game.state = 'waveDelay';
                         game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                        if (isSessionMode()) syncGameState();
                     }
                 }
                 
@@ -3457,8 +3545,8 @@
                 if (game.state === 'waveDelay') {
                     game.waveDelayTimer -= dt;
                     if (game.waveDelayTimer <= 0) {
-                        // Only authority spawns waves in multiplayer
-                        if (!isSessionMode() || isAuthority()) {
+                        // GameState owner spawns waves in multiplayer
+                        if (!isSessionMode() || isGameStateOwner()) {
                             spawnWave();
                             if (isSessionMode()) syncGameState();
                         }
@@ -3477,10 +3565,10 @@
             // --- SYNC (always runs while state is playing/waveDelay) ---
             // Game state sync continues even when lives <= 0, ensuring all
             // clients receive the final lives count and transition together.
-            if (isSessionMode() && isAuthority()) {
+            if (isSessionMode() && isGameStateOwner()) {
                 syncGameState();
             }
-            if (isSessionMode() && !isAuthority()) {
+            if (isSessionMode() && !isGameStateOwner()) {
                 updateGameStateFromSync();
             }
             
@@ -3962,7 +4050,7 @@
         sessionPicker.maxSessions = result.maxSessions;
         sessionPicker.canCreate = result.canCreateSession;
 
-        // If in a session, check if it still exists and update gameStarted
+        // If in a session, check if it still exists
         if (sessionPicker.currentSessionId) {
             const currentSession = sessionPicker.sessions.find(s => s.id === sessionPicker.currentSessionId);
             if (!currentSession) {
@@ -3970,8 +4058,6 @@
                 handleLeaveLobby('Session ended');
                 return;
             }
-            // Update gameStarted from session data
-            sessionPicker.gameStarted = currentSession.gameStarted;
         }
 
         renderSessionList();
@@ -4012,6 +4098,13 @@
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
                 ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp));
+                // Detect GameState creation (replaces onGameStarted event)
+                ObjectSync.on('onObjectCreated', (obj) => {
+                    if (obj.data?.type === OBJECT_TYPES.GAME_STATE && sessionPicker.currentSessionId) {
+                        sessionPicker.gameStarted = true;
+                        updatePickerButtons();
+                    }
+                });
                 // Apply configured sync timing
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
@@ -4064,7 +4157,10 @@
                 };
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = result.member.role === 'Server';
-                sessionPicker.gameStarted = result.session.gameStarted;
+                // Derive gameStarted from presence of GameState object in session objects
+                sessionPicker.gameStarted = (result.session.objects || []).some(
+                    obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
+                );
                 
                 // Recalculate viewport for session aspect ratio
                 resizeCanvas(true);
@@ -4162,15 +4258,9 @@
         if (!sessionPicker.currentSessionId) return;
 
         if (sessionPicker.isServer) {
-            // Server clicks Start - signal game start and begin gameplay
-            try {
-                await SessionClient.startGame();
-                sessionPicker.gameStarted = true;
-                await startGameFromPicker();
-            } catch (err) {
-                console.error('Failed to start game:', err);
-                setPickerStatus('Failed to start game', 'error');
-            }
+            // Server clicks Start - create GameState object and begin gameplay
+            sessionPicker.gameStarted = true;
+            await startGameFromPicker();
         } else {
             // Client clicks Enter - begin gameplay (game already started by server)
             await startGameFromPicker();
@@ -4369,7 +4459,8 @@
     });
 
     // Handle member leaving - clean up their objects
-    SessionClient.on('onMemberLeft', (info) => {
+    SessionClient.on('onMemberLeft', (info, eventSequence) => {
+        ObjectSync.trackEventSequence(eventSequence);
         // Handle object cleanup from member departure
         if (info.deletedObjectIds && info.deletedObjectIds.length > 0) {
             ObjectSync.handleMemberDeparture(info.deletedObjectIds);
@@ -4389,114 +4480,6 @@
         }
     });
 
-    // Handle bullet hit reported — asteroid owner processes the collision
-    SessionClient.on('onBulletHitReported', (report) => {
-        const myMemberId = SessionClient.getCurrentMember()?.id;
-        if (!myMemberId) return;
-        
-        // Check if we own the target asteroid
-        const asteroidSyncObj = ObjectSync.getObject(report.asteroidObjectId);
-        if (!asteroidSyncObj || asteroidSyncObj.ownerMemberId !== myMemberId) return;
-        
-        // Find the asteroid in our local game state
-        const asteroid = game.astervoids.find(a => a.syncObjectId === report.asteroidObjectId);
-        if (!asteroid) {
-            // Asteroid already destroyed — reject
-            SessionClient.rejectBulletHit(report.bulletObjectId, report.reporterMemberId);
-            return;
-        }
-        
-        const points = asteroid.getPoints();
-        const size = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
-                     asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
-        
-        // Split asteroid — sends to server, all clients process via OnObjectReplaced
-        // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
-        splitAsteroid(asteroid, report.reporterMemberId);
-        
-        // Confirm back to the bullet owner
-        SessionClient.confirmBulletHit(report.bulletObjectId, report.reporterMemberId, points, size);
-    });
-
-    // Handle bullet hit confirmed — bullet owner cleans up bullet and reports score
-    SessionClient.on('onBulletHitConfirmed', (confirmation) => {
-        const myMemberId = SessionClient.getCurrentMember()?.id;
-        if (confirmation.bulletOwnerMemberId !== myMemberId) return;
-        
-        // Find and destroy the confirmed bullet
-        const bulletIndex = game.bullets.findIndex(b => b.syncObjectId === confirmation.bulletObjectId);
-        if (bulletIndex !== -1) {
-            const bullet = game.bullets.splice(bulletIndex, 1)[0];
-            if (bullet.syncObjectId) {
-                deleteSyncedBullet(bullet);
-            }
-        }
-        
-        // Explosion sound plays via updateAstervoidsFromSync cleanup when parent disappears
-        
-        // Report score to authority
-        SessionClient.reportScore(confirmation.points);
-    });
-
-    // Handle bullet hit rejected — bullet owner un-hides bullet
-    SessionClient.on('onBulletHitRejected', (rejection) => {
-        const myMemberId = SessionClient.getCurrentMember()?.id;
-        if (rejection.bulletOwnerMemberId !== myMemberId) return;
-        
-        // Find the bullet and un-mark it
-        const bullet = game.bullets.find(b => b.syncObjectId === rejection.bulletObjectId);
-        if (bullet) {
-            bullet.pendingHit = false;
-            if (bullet.syncObjectId) {
-                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData(), true);
-            }
-        }
-    });
-
-    // Handle ship hit reported — all members play explosion sound, authority decrements lives
-    SessionClient.on('onShipHitReported', (report) => {
-        // All members hear the ship explosion
-        const myMemberId = SessionClient.getCurrentMember()?.id;
-        if (report.reporterMemberId !== myMemberId) {
-            AudioSystem.playShipExplosion();
-        }
-        
-        // Only the GameState owner (authority) decrements lives
-        if (!isAuthority()) return;
-        
-        game.lives--;
-        updateHUD();
-        if (game.lives <= 0) {
-            AudioSystem.beat.stop();
-        }
-        syncGameState(true);
-    });
-
-    // Handle score reported — authority adds points to shared score
-    SessionClient.on('onScoreReported', (report) => {
-        if (!isAuthority()) return;
-        
-        game.score += report.points;
-        updateHUD();
-        syncGameState();
-    });
-
-    // Handle server-authoritative object type count events for wave detection
-    SessionClient.on('onObjectTypeEmpty', (objectType) => {
-        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'playing' && isAuthority()) {
-            game.state = 'waveDelay';
-            game.waveDelayTimer = CONFIG.WAVE_DELAY;
-            syncGameState();
-        }
-    });
-
-    SessionClient.on('onObjectTypeRestored', (objectType) => {
-        if (objectType === OBJECT_TYPES.ASTEROID && game.state === 'waveDelay' && isAuthority()) {
-            game.state = 'playing';
-            syncGameState();
-        }
-    });
-
     // Handle session list changes (signal from server - fetch fresh data with jitter)
     let sessionRefreshTimeout = null;
     SessionClient.on('onSessionsChanged', () => {
@@ -4510,14 +4493,6 @@
                 sessionRefreshTimeout = null;
                 refreshSessionList();
             }, Math.random() * 500);
-        }
-    });
-
-    // Handle game started notification (for clients)
-    SessionClient.on('onGameStarted', (sessionId) => {
-        if (sessionPicker.currentSessionId === sessionId) {
-            sessionPicker.gameStarted = true;
-            updatePickerButtons();
         }
     });
 
@@ -4570,8 +4545,8 @@
                     // Update remote state
                     updateRemoteShips();
                     updateBulletsFromSync();
-                    if (!isAuthority()) updateGameStateFromSync();
-                    if (isAuthority()) syncGameState();
+                    if (!isGameStateOwner()) updateGameStateFromSync();
+                    if (isGameStateOwner()) syncGameState();
                 }, targetFrameTime);
             }
         } else {

@@ -81,8 +81,7 @@ public record SessionInfo(
     string Name,
     int MemberCount,
     int MaxMembers,
-    DateTime CreatedAt,
-    bool GameStarted
+    DateTime CreatedAt
 );
 
 /// <summary>

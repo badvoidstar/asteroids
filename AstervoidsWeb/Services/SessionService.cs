@@ -205,7 +205,7 @@ public class SessionService : ISessionService
     {
         var sessions = _sessions.Values
             .Where(s => !s.Members.IsEmpty)
-            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, _maxMembersPerSession, s.CreatedAt, s.GameStarted))
+            .Select(s => new SessionInfo(s.Id, s.Name, s.Members.Count, _maxMembersPerSession, s.CreatedAt))
             .OrderByDescending(s => s.CreatedAt)
             .ToList();
 
