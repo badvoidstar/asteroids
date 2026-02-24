@@ -2266,6 +2266,9 @@
         return gsObj && gsObj.ownerMemberId === myMemberId;
     }
 
+    // Guard to prevent wave re-detection while async spawn is in flight
+    let spawningWave = false;
+
     // Helper to check if game is over (lives depleted during active play)
     function isGameOver() {
         return game.state === 'gameover' ||
@@ -3510,12 +3513,15 @@
                 // Update bullets and remove expired ones
                 const myMemberId = SessionClient.getCurrentMember()?.id;
                 game.bullets = game.bullets.filter(bullet => {
-                    bullet.update(dt);
+                    // Only locally update our own bullets; remote bullets are positioned by sync
+                    const isMyBullet = !isSessionMode() || bullet.ownerMemberId === myMemberId;
+                    if (isMyBullet) {
+                        bullet.update(dt);
+                    }
                     
-                    // Check if expired
-                    if (bullet.isExpired()) {
-                        // Delete synced bullet if it's ours
-                        if (isSessionMode() && bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
+                    // Only expire our own bullets; remote bullet lifecycle is owner-driven
+                    if (isMyBullet && bullet.isExpired()) {
+                        if (isSessionMode() && bullet.syncObjectId) {
                             deleteSyncedBullet(bullet);
                         }
                         return false;
@@ -3533,7 +3539,7 @@
                 checkCollisions();
                 
                 // Check for wave completion (GameState owner detects locally)
-                if (game.astervoids.length === 0 && game.state === 'playing') {
+                if (game.astervoids.length === 0 && game.state === 'playing' && !spawningWave) {
                     if (!isSessionMode() || isGameStateOwner()) {
                         game.state = 'waveDelay';
                         game.waveDelayTimer = CONFIG.WAVE_DELAY;
@@ -3547,8 +3553,11 @@
                     if (game.waveDelayTimer <= 0) {
                         // GameState owner spawns waves in multiplayer
                         if (!isSessionMode() || isGameStateOwner()) {
-                            spawnWave();
-                            if (isSessionMode()) syncGameState();
+                            spawningWave = true;
+                            spawnWave().then(() => {
+                                spawningWave = false;
+                                if (isSessionMode()) syncGameState();
+                            });
                         }
                         game.state = 'playing';
                         AudioSystem.playNewWave();
@@ -4345,6 +4354,7 @@
         game.score = 0;
         game.lives = CONFIG.STARTING_LIVES;
         game.wave = 0;
+        spawningWave = false;
         pauseMenu.classList.remove('visible');
         startScreen.classList.remove('hidden');
 
