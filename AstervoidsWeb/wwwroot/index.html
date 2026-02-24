@@ -1015,10 +1015,12 @@
             maxSamples: 30
         },
         // Round-trip time estimation (client→server→client)
+        // Uses EMA with asymmetric smoothing: rises fast, decays gradually
         rtt: {
-            samples: [],
-            maxSamples: 30,
-            estimatedRtt: 0
+            estimatedRtt: 0,
+            alphaUp: 0.3,    // fast reaction to congestion
+            alphaDown: 0.1,  // gradual recovery
+            initialized: false
         },
         
         /**
@@ -1081,11 +1083,13 @@
             if (clientTimestamp) {
                 const rttSample = now - clientTimestamp;
                 const r = this.rtt;
-                r.samples.push(rttSample);
-                if (r.samples.length > r.maxSamples) {
-                    r.samples.shift();
+                if (!r.initialized) {
+                    r.estimatedRtt = rttSample;
+                    r.initialized = true;
+                } else {
+                    const alpha = rttSample > r.estimatedRtt ? r.alphaUp : r.alphaDown;
+                    r.estimatedRtt = r.estimatedRtt + alpha * (rttSample - r.estimatedRtt);
                 }
-                r.estimatedRtt = r.samples.reduce((s, v) => s + v, 0) / r.samples.length;
                 // Adapt send rate based on RTT
                 ObjectSync.updateSendRate(r.estimatedRtt);
             }
@@ -1300,8 +1304,8 @@
             this.latency.minOneWay = Infinity;
             this.latency.estimatedLatency = 0;
             this.latency.samples = [];
-            this.rtt.samples = [];
             this.rtt.estimatedRtt = 0;
+            this.rtt.initialized = false;
         }
     };
 
