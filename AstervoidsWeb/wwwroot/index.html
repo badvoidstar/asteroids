@@ -2575,7 +2575,7 @@
         
         // Remove remote astervoids that no longer exist in sync (skip locally-owned)
         game.astervoids = game.astervoids.filter(a => {
-            if (!a.syncObjectId) return true; // Keep unsynced local astervoids
+            if (!a.syncObjectId) return !isSessionMode(); // In session mode, unsynced = orphan
             const syncObj = ObjectSync.getObject(a.syncObjectId);
             if (syncObj && syncObj.ownerMemberId === myMemberId) return true; // Keep our own
             if (!currentSyncIds.has(a.syncObjectId)) {
@@ -2982,7 +2982,7 @@
         
         // In session mode, let OnObjectCreated → updateAstervoidsFromSync handle local state
         // In solo mode, push directly to game state
-        if (isSessionMode() && isAuthority()) {
+        if (isSessionMode()) {
             await createSyncedAsteroid(asteroid);
         } else {
             game.astervoids.push(asteroid);
