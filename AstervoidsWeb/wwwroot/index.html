@@ -2594,6 +2594,11 @@
         
         try {
             const objectInfo = await ObjectSync.createObject(bullet.toSyncData(), 'Member');
+            // If bullet was destroyed during creation (e.g., hit asteroid), clean up
+            if (!game.bullets.includes(bullet)) {
+                await ObjectSync.deleteObject(objectInfo.id);
+                return;
+            }
             bullet.syncObjectId = objectInfo.id;
         } catch (err) {
             console.error('[Multiplayer] Failed to create bullet:', err);
