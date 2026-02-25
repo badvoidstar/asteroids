@@ -19,6 +19,7 @@ const ObjectSync = (function() {
     // Event sequence tracking for gap detection
     let lastEventSequence = 0;
     let reconciling = false;
+    let reconciliationCount = 0;
     
     // Delta encoding: track last-sent data per object to only send changes
     const lastSentData = new Map();
@@ -173,6 +174,7 @@ const ObjectSync = (function() {
         senderSequence = 0;
         lastEventSequence = session.eventSequence || 0;
         reconciling = false;
+        reconciliationCount = 0;
 
         if (session.objects) {
             for (const obj of session.objects) {
@@ -422,6 +424,7 @@ const ObjectSync = (function() {
             }
             
             console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
+            reconciliationCount++;
         } catch (err) {
             console.error('[ObjectSync] Reconciliation failed:', err);
         } finally {
@@ -771,6 +774,13 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Get the reconciliation count for this session.
+     */
+    function getReconciliationCount() {
+        return reconciliationCount;
+    }
+
+    /**
      * Clear all local objects (for testing).
      */
     function clear() {
@@ -801,6 +811,7 @@ const ObjectSync = (function() {
         getObjectsByType,
         getObjectByType,
         getObjectCount,
+        getReconciliationCount,
         configure,
         getSendThreshold,
         getSendRate,

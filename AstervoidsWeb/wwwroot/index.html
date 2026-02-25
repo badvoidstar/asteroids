@@ -3432,7 +3432,7 @@
                 const myMemberId = SessionClient.getCurrentMember()?.id;
                 const allObjs = ObjectSync.getObjectCount();
                 const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
-                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs}`;
+                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs} | REC ${ObjectSync.getReconciliationCount()}`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
