@@ -263,18 +263,18 @@ public class SessionHub : Hub
     /// Updates multiple objects atomically.
     /// Only allows updates to objects owned by the caller.
     /// </summary>
-    public async Task<IEnumerable<ObjectInfo>> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null)
+    public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
         {
             _logger.LogWarning("UpdateObjects failed - member not found for connection {ConnectionId}", Context.ConnectionId);
-            return Enumerable.Empty<ObjectInfo>();
+            return null;
         }
 
         var session = _sessionService.GetSession(member.SessionId);
         if (session == null)
-            return Enumerable.Empty<ObjectInfo>();
+            return null;
 
         // Filter to only objects owned by the caller
         var authorizedUpdates = new List<ObjectUpdate>();
@@ -292,16 +292,20 @@ public class SessionHub : Hub
         var objectInfos = updatedObjects.Select(o => new ObjectInfo(
             o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
 
+        long memberSequence = 0;
+        long serverTimestamp = 0;
         if (objectInfos.Count > 0)
         {
-            var memberSequence = NextMemberSequence(member);
-            var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            memberSequence = NextMemberSequence(member);
+            serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
-            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
+            // Broadcast to other members only — sender gets versions/RTT from the response
+            await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
                 updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp);
         }
 
-        return objectInfos;
+        var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
+        return new UpdateObjectsResponse(versions, memberSequence, serverTimestamp);
     }
 
     /// <summary>
@@ -516,4 +520,5 @@ public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, stri
 public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
+public record UpdateObjectsResponse(Dictionary<string, long> Versions, long MemberSequence, long ServerTimestamp);
 public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, Dictionary<string, long> MemberSequences);

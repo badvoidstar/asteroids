@@ -1,6 +1,56 @@
 /**
  * Object Sync Module
  * Handles local object registry and synchronization with the session.
+ *
+ * ## Per-Member Event Sequencing
+ *
+ * Every broadcast from the backend carries (senderMemberId, memberSequence).
+ * Each member has its own monotonic counter on the backend (Interlocked.Increment),
+ * starting at 0 and incrementing for each event triggered by that member:
+ * OnMemberJoined, OnObjectCreated, OnObjectsUpdated, OnObjectDeleted, OnObjectReplaced.
+ *
+ * OnMemberLeft is special: it uses the departing member's ID with hardcoded seq 0,
+ * since the member is being removed and will never send again. Receivers already
+ * track that member at seq >= 1, so 0 > lastSeq is false — no false gap.
+ *
+ * Each frontend tracks a memberSequences Map (memberId -> lastSeqReceived).
+ * On each incoming event, trackMemberSequence() checks:
+ *   - First event from a member (no baseline): initializes the entry, no gap possible.
+ *   - Sequential (seq === lastSeq + 1): normal, updates the map.
+ *   - Gap (seq > lastSeq + 1): event(s) lost, triggers reconciliation.
+ *   - Old/duplicate (seq <= lastSeq): silently ignored.
+ *
+ * Gap detection is only performed for OTHER members' streams. The local member's
+ * own sequence is tracked (to keep the map current) but gaps are not flagged,
+ * because the sender can't miss their own events and the mixed delivery channels
+ * (invoke response for updates vs broadcast for create/delete/replace) can race
+ * at await microtask boundaries.
+ *
+ * This works because SignalR guarantees in-order delivery per connection, and all
+ * events for a given member flow through that member's single connection. So the
+ * backend's Interlocked.Increment producing 5, 6, 7 guarantees arrival in that
+ * order at every receiver. The old global sequence had a race where concurrent
+ * broadcasts from different members could arrive out of order — per-member
+ * sequencing eliminates this entirely since each member's stream is independent.
+ *
+ * ## Self-Echo Elimination
+ *
+ * Object update broadcasts are sent to OthersInGroup only — the sender does NOT
+ * receive their own updates as an echo. Instead, the UpdateObjects hub method
+ * returns a response containing server-assigned versions, the sender's own
+ * memberSequence, and serverTimestamp. flushUpdates() uses this response to:
+ *   - Apply version progression to local objects (keeps optimistic concurrency in sync)
+ *   - Track the sender's own member sequence (gap detection for own stream)
+ *   - Compute RTT from request/response round-trip (more accurate than broadcast echo)
+ *
+ * ## Reconciliation (Gap Recovery)
+ *
+ * When a gap is detected, triggerReconciliation() calls GetSessionState() which
+ * returns a full object snapshot plus the current server-side memberSequences for
+ * every member. The local memberSequences map is reset from this snapshot,
+ * fast-forwarding past the gap to prevent re-triggering. Objects are synced:
+ * missing objects added, stale objects updated, ghost objects removed. A
+ * reconciling flag prevents concurrent reconciliations.
  */
 
 const ObjectSync = (function() {
@@ -257,29 +307,21 @@ const ObjectSync = (function() {
     }
 
     /**
-     * Handle remote objects updated.
-     * When isSelfEcho is true, only update versions (not data) for locally-owned objects
-     * to avoid overwriting fresh local state with stale echoed data.
+     * Handle remote objects updated (from other members only — self-echo eliminated).
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, clientTimestamp, isSelfEcho, senderSeq, memberSequence) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived(serverTimestamp, clientTimestamp);
+            callbacks.onBatchReceived(serverTimestamp, null);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
-        const currentMemberId = isSelfEcho ? SessionClient.getCurrentMember()?.id : null;
         for (const update of updatedObjects) {
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
                 if (update.version > existing.version) {
-                    // Skip data overwrite for our own objects echoed back from server
-                    if (isSelfEcho && existing.ownerMemberId === currentMemberId) {
-                        existing.version = update.version;
-                        continue;
-                    }
                     const oldType = existing.data?.type;
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
@@ -350,6 +392,10 @@ const ObjectSync = (function() {
 
     /**
      * Track per-member event sequence and trigger reconciliation on gaps.
+     * Only checks for gaps from OTHER members — the local member's own sequence
+     * is tracked without gap detection because the sender can't miss their own
+     * events (they initiated them), and the response/broadcast timing for own
+     * events can race due to await microtask boundaries.
      * @param {string} memberId - The member who triggered the event
      * @param {number} memberSequence - The member's monotonic sequence number
      */
@@ -357,7 +403,9 @@ const ObjectSync = (function() {
         if (memberId == null || memberSequence == null) return;
         
         const lastSeq = memberSequences.get(memberId);
-        if (lastSeq !== undefined && memberSequence > lastSeq + 1) {
+        // Only detect gaps for other members' streams
+        const myId = SessionClient.getCurrentMember()?.id;
+        if (myId !== memberId && lastSeq !== undefined && memberSequence > lastSeq + 1) {
             console.warn('[ObjectSync] Per-member sequence gap:', memberId, 'expected', lastSeq + 1, 'got', memberSequence);
             triggerReconciliation();
         }
@@ -629,8 +677,31 @@ const ObjectSync = (function() {
 
         flushInProgress = true;
         const currentSenderSequence = ++senderSequence;
+        const clientTimestamp = Date.now();
         try {
-            await SessionClient.updateObjects(updates, currentSenderSequence);
+            const response = await SessionClient.updateObjects(updates, currentSenderSequence);
+            if (response) {
+                // Apply server-assigned versions to local objects
+                if (response.versions) {
+                    for (const [id, version] of Object.entries(response.versions)) {
+                        const obj = objects.get(id);
+                        if (obj && version > obj.version) {
+                            obj.version = version;
+                        }
+                    }
+                }
+                // Track own member sequence from response
+                if (response.memberSequence > 0) {
+                    const myId = SessionClient.getCurrentMember()?.id;
+                    if (myId) {
+                        trackMemberSequence(myId, response.memberSequence);
+                    }
+                }
+                // RTT from request/response round-trip
+                if (response.serverTimestamp && callbacks.onBatchReceived) {
+                    callbacks.onBatchReceived(response.serverTimestamp, clientTimestamp);
+                }
+            }
         } catch (err) {
             console.error('[ObjectSync] Batch update failed:', err);
             if (callbacks.onSyncError) {
