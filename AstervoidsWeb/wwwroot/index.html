@@ -3417,7 +3417,7 @@
             }
         }
         
-        // Update network quality indicator
+        // Update network quality indicator (bottom row)
         const netQuality = document.getElementById('net-quality');
         if (netQuality) {
             if (isSessionMode()) {
@@ -3429,7 +3429,10 @@
                 else if (rttMs <= 128) color = '#ffff00';
                 else color = '#ff0000';
                 const sendMs = Math.round(1000 / ObjectSync.getSendRate());
-                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms`;
+                const myMemberId = SessionClient.getCurrentMember()?.id;
+                const allObjs = ObjectSync.getObjectCount();
+                const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
+                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs}`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
