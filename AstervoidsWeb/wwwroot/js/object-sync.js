@@ -20,6 +20,12 @@
  *   - Gap (seq > lastSeq + 1): event(s) lost, triggers reconciliation.
  *   - Old/duplicate (seq <= lastSeq): silently ignored.
  *
+ * Gap detection is only performed for OTHER members' streams. The local member's
+ * own sequence is tracked (to keep the map current) but gaps are not flagged,
+ * because the sender can't miss their own events and the mixed delivery channels
+ * (invoke response for updates vs broadcast for create/delete/replace) can race
+ * at await microtask boundaries.
+ *
  * This works because SignalR guarantees in-order delivery per connection, and all
  * events for a given member flow through that member's single connection. So the
  * backend's Interlocked.Increment producing 5, 6, 7 guarantees arrival in that
@@ -386,6 +392,10 @@ const ObjectSync = (function() {
 
     /**
      * Track per-member event sequence and trigger reconciliation on gaps.
+     * Only checks for gaps from OTHER members — the local member's own sequence
+     * is tracked without gap detection because the sender can't miss their own
+     * events (they initiated them), and the response/broadcast timing for own
+     * events can race due to await microtask boundaries.
      * @param {string} memberId - The member who triggered the event
      * @param {number} memberSequence - The member's monotonic sequence number
      */
@@ -393,7 +403,9 @@ const ObjectSync = (function() {
         if (memberId == null || memberSequence == null) return;
         
         const lastSeq = memberSequences.get(memberId);
-        if (lastSeq !== undefined && memberSequence > lastSeq + 1) {
+        // Only detect gaps for other members' streams
+        const myId = SessionClient.getCurrentMember()?.id;
+        if (myId !== memberId && lastSeq !== undefined && memberSequence > lastSeq + 1) {
             console.warn('[ObjectSync] Per-member sequence gap:', memberId, 'expected', lastSeq + 1, 'got', memberSequence);
             triggerReconciliation();
         }
