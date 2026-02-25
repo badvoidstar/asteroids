@@ -251,6 +251,8 @@ public class SessionHub : Hub
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Notify all members including sender
+        // Future optimization: Use OthersInGroup (like UpdateObjects) since sender already
+        // has ObjectInfo from invoke response. Would need to track own memberSequence from response.
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated",
             objectInfo, member.Id, memberSequence, serverTimestamp);
 
@@ -342,6 +344,7 @@ public class SessionHub : Hub
             var memberSequence = NextMemberSequence(member);
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+            // Future optimization: Use OthersInGroup since sender already deleted locally (local-first)
             await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectDeleted",
                 objectId, member.Id, memberSequence, serverTimestamp);
             _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, member.SessionId);
@@ -426,6 +429,7 @@ public class SessionHub : Hub
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Single atomic broadcast
+        // Future optimization: Use OthersInGroup since sender already has replacements from invoke response
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
             new ObjectReplacedEvent(deleteObjectId, createdInfos),
             member.Id, memberSequence, serverTimestamp);
