@@ -4490,6 +4490,11 @@
         updatePickerButtons();
     });
 
+    // Handle member joining - track event sequence
+    SessionClient.on('onMemberJoined', (memberInfo, eventSequence) => {
+        ObjectSync.trackEventSequence(eventSequence);
+    });
+
     // Handle member leaving - clean up their objects
     SessionClient.on('onMemberLeft', (info, eventSequence) => {
         ObjectSync.trackEventSequence(eventSequence);
