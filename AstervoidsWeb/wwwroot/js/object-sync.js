@@ -1,6 +1,43 @@
 /**
  * Object Sync Module
  * Handles local object registry and synchronization with the session.
+ *
+ * ## Per-Member Event Sequencing
+ *
+ * Every broadcast from the backend carries (senderMemberId, memberSequence).
+ * Each member has its own monotonic counter on the backend (Interlocked.Increment),
+ * starting at 0 and incrementing for each event triggered by that member:
+ * OnMemberJoined, OnObjectCreated, OnObjectsUpdated, OnObjectDeleted, OnObjectReplaced.
+ *
+ * OnMemberLeft is special: it uses the departing member's ID with hardcoded seq 0,
+ * since the member is being removed and will never send again. Receivers already
+ * track that member at seq >= 1, so 0 > lastSeq is false — no false gap.
+ *
+ * Each frontend tracks a memberSequences Map (memberId -> lastSeqReceived).
+ * On each incoming event, trackMemberSequence() checks:
+ *   - First event from a member (no baseline): initializes the entry, no gap possible.
+ *   - Sequential (seq === lastSeq + 1): normal, updates the map.
+ *   - Gap (seq > lastSeq + 1): event(s) lost, triggers reconciliation.
+ *   - Old/duplicate (seq <= lastSeq): silently ignored.
+ *
+ * This works because SignalR guarantees in-order delivery per connection, and all
+ * events for a given member flow through that member's single connection. So the
+ * backend's Interlocked.Increment producing 5, 6, 7 guarantees arrival in that
+ * order at every receiver. The old global sequence had a race where concurrent
+ * broadcasts from different members could arrive out of order — per-member
+ * sequencing eliminates this entirely since each member's stream is independent.
+ *
+ * The sending member also receives their own broadcasts (self-echo) and validates
+ * their own sequence stream, providing an additional consistency check.
+ *
+ * ## Reconciliation (Gap Recovery)
+ *
+ * When a gap is detected, triggerReconciliation() calls GetSessionState() which
+ * returns a full object snapshot plus the current server-side memberSequences for
+ * every member. The local memberSequences map is reset from this snapshot,
+ * fast-forwarding past the gap to prevent re-triggering. Objects are synced:
+ * missing objects added, stale objects updated, ghost objects removed. A
+ * reconciling flag prevents concurrent reconciliations.
  */
 
 const ObjectSync = (function() {
