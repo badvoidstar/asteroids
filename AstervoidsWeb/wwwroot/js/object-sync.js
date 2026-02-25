@@ -192,7 +192,7 @@ const ObjectSync = (function() {
             }
         }
 
-        console.log('[ObjectSync] Loaded', objects.size, 'objects from session, eventSequence:', lastEventSequence);
+        console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
     }
 
     /**
@@ -204,7 +204,7 @@ const ObjectSync = (function() {
         pendingUpdates = [];
         frameCounter = 0;
         senderSequence = 0;
-        lastEventSequence = 0;
+        memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
         console.log('[ObjectSync] Cleared all objects');
@@ -804,7 +804,7 @@ const ObjectSync = (function() {
         pendingUpdates = [];
         fullSyncCounter = 0;
         senderSequence = 0;
-        lastEventSequence = 0;
+        memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
     }
