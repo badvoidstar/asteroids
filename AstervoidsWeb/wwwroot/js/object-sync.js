@@ -16,9 +16,10 @@ const ObjectSync = (function() {
     // Sender sequence counter (incremented per flush)
     let senderSequence = 0;
     
-    // Event sequence tracking for gap detection
-    let lastEventSequence = 0;
+    // Per-member event sequence tracking for gap detection
+    const memberSequences = new Map(); // memberId -> lastSeq
     let reconciling = false;
+    let reconciliationCount = 0;
     
     // Delta encoding: track last-sent data per object to only send changes
     const lastSentData = new Map();
@@ -171,8 +172,9 @@ const ObjectSync = (function() {
         pendingUpdates = [];
         frameCounter = 0;
         senderSequence = 0;
-        lastEventSequence = session.eventSequence || 0;
+        memberSequences.clear();
         reconciling = false;
+        reconciliationCount = 0;
 
         if (session.objects) {
             for (const obj of session.objects) {
@@ -190,7 +192,7 @@ const ObjectSync = (function() {
             }
         }
 
-        console.log('[ObjectSync] Loaded', objects.size, 'objects from session, eventSequence:', lastEventSequence);
+        console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
     }
 
     /**
@@ -202,7 +204,7 @@ const ObjectSync = (function() {
         pendingUpdates = [];
         frameCounter = 0;
         senderSequence = 0;
-        lastEventSequence = 0;
+        memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
         console.log('[ObjectSync] Cleared all objects');
@@ -218,8 +220,8 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      */
-    function handleRemoteObjectCreated(objectInfo, eventSequence) {
-        trackEventSequence(eventSequence);
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+        trackMemberSequence(senderMemberId, memberSequence);
         
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -259,8 +261,8 @@ const ObjectSync = (function() {
      * When isSelfEcho is true, only update versions (not data) for locally-owned objects
      * to avoid overwriting fresh local state with stale echoed data.
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, clientTimestamp, isSelfEcho, senderSeq, eventSequence) {
-        trackEventSequence(eventSequence);
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, clientTimestamp, isSelfEcho, senderSeq, memberSequence) {
+        trackMemberSequence(senderMemberId, memberSequence);
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
@@ -314,8 +316,8 @@ const ObjectSync = (function() {
     /**
      * Handle remote object deleted.
      */
-    function handleRemoteObjectDeleted(objectId, eventSequence) {
-        trackEventSequence(eventSequence);
+    function handleRemoteObjectDeleted(objectId, senderMemberId, memberSequence) {
+        trackMemberSequence(senderMemberId, memberSequence);
         const obj = objects.get(objectId);
         if (obj) {
             removeFromTypeIndex(obj);
@@ -331,12 +333,12 @@ const ObjectSync = (function() {
     /**
      * Handle remote object replaced (atomic delete + create).
      */
-    function handleRemoteObjectReplaced(event, eventSequence) {
-        trackEventSequence(eventSequence);
-        // Delete the original object
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+        trackMemberSequence(senderMemberId, memberSequence);
+        // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
-        // Create all replacement objects
+        // Create all replacement objects (no sequence tracking — already tracked above)
         for (const objectInfo of event.createdObjects) {
             handleRemoteObjectCreated(objectInfo);
         }
@@ -347,18 +349,26 @@ const ObjectSync = (function() {
     }
 
     /**
-     * Track event sequence and trigger reconciliation on gaps.
+     * Track per-member event sequence and trigger reconciliation on gaps.
+     * @param {string} memberId - The member who triggered the event
+     * @param {number} memberSequence - The member's monotonic sequence number
      */
-    function trackEventSequence(eventSequence) {
-        if (eventSequence == null) return;
+    function trackMemberSequence(memberId, memberSequence) {
+        if (memberId == null || memberSequence == null) return;
         
-        if (lastEventSequence > 0 && eventSequence > lastEventSequence + 1) {
-            console.warn('[ObjectSync] Event sequence gap: expected', lastEventSequence + 1, 'got', eventSequence);
+        const lastSeq = memberSequences.get(memberId);
+        if (lastSeq !== undefined && memberSequence > lastSeq + 1) {
+            console.warn('[ObjectSync] Per-member sequence gap:', memberId, 'expected', lastSeq + 1, 'got', memberSequence);
             triggerReconciliation();
         }
-        if (eventSequence > lastEventSequence) {
-            lastEventSequence = eventSequence;
+        if (lastSeq === undefined || memberSequence > lastSeq) {
+            memberSequences.set(memberId, memberSequence);
         }
+    }
+
+    // Public alias for external callers (member events tracked from index.html)
+    function trackEventSequence(senderMemberId, memberSequence) {
+        trackMemberSequence(senderMemberId, memberSequence);
     }
 
     /**
@@ -373,7 +383,13 @@ const ObjectSync = (function() {
             const snapshot = await SessionClient.getSessionState();
             if (!snapshot) return;
             
-            lastEventSequence = snapshot.eventSequence || 0;
+            // Restore per-member sequences from snapshot
+            memberSequences.clear();
+            if (snapshot.memberSequences) {
+                for (const [memberId, seq] of Object.entries(snapshot.memberSequences)) {
+                    memberSequences.set(memberId, seq);
+                }
+            }
             
             // Build set of server-known object IDs
             const serverObjectIds = new Set();
@@ -422,6 +438,7 @@ const ObjectSync = (function() {
             }
             
             console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
+            reconciliationCount++;
         } catch (err) {
             console.error('[ObjectSync] Reconciliation failed:', err);
         } finally {
@@ -771,6 +788,13 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Get the reconciliation count for this session.
+     */
+    function getReconciliationCount() {
+        return reconciliationCount;
+    }
+
+    /**
      * Clear all local objects (for testing).
      */
     function clear() {
@@ -780,7 +804,7 @@ const ObjectSync = (function() {
         pendingUpdates = [];
         fullSyncCounter = 0;
         senderSequence = 0;
-        lastEventSequence = 0;
+        memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
     }
@@ -801,6 +825,7 @@ const ObjectSync = (function() {
         getObjectsByType,
         getObjectByType,
         getObjectCount,
+        getReconciliationCount,
         configure,
         getSendThreshold,
         getSendRate,

@@ -116,18 +116,18 @@ const SessionClient = (function() {
         });
 
         // Session events
-        connection.on('OnMemberJoined', (memberInfo, eventSequence, serverTimestamp) => {
+        connection.on('OnMemberJoined', (memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
             console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
                 currentSession.members.push(memberInfo);
             }
             if (callbacks.onMemberJoined) {
-                callbacks.onMemberJoined(memberInfo, eventSequence);
+                callbacks.onMemberJoined(memberInfo, senderMemberId, memberSequence);
             }
         });
 
-        connection.on('OnMemberLeft', (info, eventSequence, serverTimestamp) => {
+        connection.on('OnMemberLeft', (info, senderMemberId, memberSequence, serverTimestamp) => {
             console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
@@ -137,7 +137,7 @@ const SessionClient = (function() {
 
             // Handle object cleanup/migration FIRST (before role change, so promoted member sees correct ownership)
             if (callbacks.onMemberLeft) {
-                callbacks.onMemberLeft(info, eventSequence);
+                callbacks.onMemberLeft(info, senderMemberId, memberSequence);
             }
 
             // Check if we were promoted (after migration so ownership is correct for handleServerPromotion)
@@ -158,30 +158,30 @@ const SessionClient = (function() {
         });
 
         // Object events
-        connection.on('OnObjectCreated', (objectInfo, eventSequence, serverTimestamp) => {
+        connection.on('OnObjectCreated', (objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo, eventSequence);
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
             }
         });
 
-        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, eventSequence, serverTimestamp, clientTimestamp) => {
+        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp) => {
             if (callbacks.onObjectsUpdated) {
                 const isSelfEcho = (senderMemberId === currentMember?.id);
                 // Only pass clientTimestamp if this client is the sender (for RTT calculation)
                 const myTimestamp = isSelfEcho ? clientTimestamp : null;
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, myTimestamp, isSelfEcho, senderSequence, eventSequence);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, myTimestamp, isSelfEcho, senderSequence, memberSequence);
             }
         });
 
-        connection.on('OnObjectDeleted', (objectId, eventSequence, serverTimestamp) => {
+        connection.on('OnObjectDeleted', (objectId, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectDeleted) {
-                callbacks.onObjectDeleted(objectId, eventSequence);
+                callbacks.onObjectDeleted(objectId, senderMemberId, memberSequence);
             }
         });
 
-        connection.on('OnObjectReplaced', (event, eventSequence, serverTimestamp) => {
+        connection.on('OnObjectReplaced', (event, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, eventSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
             }
         });
 
@@ -259,8 +259,7 @@ const SessionClient = (function() {
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
-                aspectRatio: response.aspectRatio,
-                eventSequence: response.eventSequence
+                aspectRatio: response.aspectRatio
             };
             currentMember = {
                 id: response.memberId,

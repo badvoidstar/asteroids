@@ -94,13 +94,13 @@ public class SessionHub : Hub
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
-        var eventSequence = NextEventSequence(session);
+        var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Notify other members
         await Clients.OthersInGroup(session.Id.ToString()).SendAsync("OnMemberJoined",
             new MemberInfo(member.Id, member.Role.ToString(), member.JoinedAt),
-            eventSequence, serverTimestamp);
+            member.Id, memberSequence, serverTimestamp);
 
         _logger.LogInformation(
             "Member {MemberId} joined session {SessionName} ({SessionId})",
@@ -121,8 +121,7 @@ public class SessionHub : Hub
             member.Role.ToString(),
             members,
             objects,
-            session.AspectRatio,
-            eventSequence
+            session.AspectRatio
         );
     }
 
@@ -156,10 +155,10 @@ public class SessionHub : Hub
 
         if (!result.SessionDestroyed && session != null)
         {
-            var eventSequence = NextEventSequence(session);
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             // Notify remaining members with enriched departure info
+            // Use departing member's ID as sender (this runs on their connection)
             await Clients.Group(result.SessionId.ToString()).SendAsync("OnMemberLeft",
                 new MemberLeftInfo(
                     result.MemberId,
@@ -168,7 +167,7 @@ public class SessionHub : Hub
                     departureResult.DeletedObjectIds,
                     departureResult.MigratedObjects
                 ),
-                eventSequence, serverTimestamp);
+                result.MemberId, (long)0, serverTimestamp);
 
             if (result.PromotedMember != null)
             {
@@ -248,12 +247,12 @@ public class SessionHub : Hub
 
         var objectInfo = new ObjectInfo(obj.Id, obj.CreatorMemberId, obj.OwnerMemberId, obj.Scope.ToString(), obj.Data, obj.Version);
 
-        var eventSequence = NextEventSequence(session);
+        var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Notify all members including sender
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated",
-            objectInfo, eventSequence, serverTimestamp);
+            objectInfo, member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
 
@@ -295,11 +294,11 @@ public class SessionHub : Hub
 
         if (objectInfos.Count > 0)
         {
-            var eventSequence = NextEventSequence(session);
+            var memberSequence = NextMemberSequence(member);
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
             await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
-                updateInfos, member.Id, senderSequence, eventSequence, serverTimestamp, clientTimestamp);
+                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp);
         }
 
         return objectInfos;
@@ -336,11 +335,11 @@ public class SessionHub : Hub
         var deletedObj = _objectService.DeleteObject(member.SessionId, objectId);
         if (deletedObj != null)
         {
-            var eventSequence = NextEventSequence(session);
+            var memberSequence = NextMemberSequence(member);
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectDeleted",
-                objectId, eventSequence, serverTimestamp);
+                objectId, member.Id, memberSequence, serverTimestamp);
             _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, member.SessionId);
         }
 
@@ -419,13 +418,13 @@ public class SessionHub : Hub
         var createdInfos = createdObjects.Select(o =>
             new ObjectInfo(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
 
-        var eventSequence = NextEventSequence(session);
+        var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Single atomic broadcast
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
             new ObjectReplacedEvent(deleteObjectId, createdInfos),
-            eventSequence, serverTimestamp);
+            member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
             deleteObjectId, createdObjects.Count, member.SessionId);
@@ -454,7 +453,10 @@ public class SessionHub : Hub
         var objects = session.Objects.Values.Select(o => new ObjectInfo(
             o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version));
 
-        return new SessionStateSnapshot(members, objects, session.EventSequence);
+        var memberSequences = session.Members.Values.ToDictionary(
+            m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
+
+        return new SessionStateSnapshot(members, objects, memberSequences);
     }
 
     /// <summary>
@@ -481,11 +483,11 @@ public class SessionHub : Hub
     }
 
     /// <summary>
-    /// Atomically increments and returns the next event sequence number for a session.
+    /// Atomically increments and returns the next event sequence number for a member.
     /// </summary>
-    private static long NextEventSequence(Session session)
+    private static long NextMemberSequence(Member member)
     {
-        return Interlocked.Increment(ref session.EventSequence);
+        return Interlocked.Increment(ref member.EventSequence);
     }
 }
 
@@ -498,8 +500,7 @@ public record JoinSessionResponse(
     string Role,
     IEnumerable<MemberInfo> Members,
     IEnumerable<ObjectInfo> Objects,
-    double AspectRatio,
-    long EventSequence
+    double AspectRatio
 );
 public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
 public record MemberLeftInfo(
@@ -515,4 +516,4 @@ public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, stri
 public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long Version);
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
-public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, long EventSequence);
+public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, Dictionary<string, long> MemberSequences);

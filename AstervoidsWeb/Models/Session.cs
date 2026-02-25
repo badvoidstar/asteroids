@@ -47,13 +47,6 @@ public class Session
     public long Version { get; set; } = 1;
 
     /// <summary>
-    /// Monotonic event sequence counter for all session-group broadcasts.
-    /// Used by clients to detect missed events and trigger reconciliation.
-    /// Accessed via Interlocked.Increment for thread safety.
-    /// </summary>
-    public long EventSequence = 0;
-
-    /// <summary>
     /// Lock object for coordinating server promotion.
     /// </summary>
     internal readonly object PromotionLock = new();

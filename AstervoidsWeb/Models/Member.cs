@@ -29,4 +29,10 @@ public class Member
     /// The session this member belongs to.
     /// </summary>
     public Guid SessionId { get; init; }
+
+    /// <summary>
+    /// Per-member monotonic event sequence counter for broadcasts triggered by this member.
+    /// Used by clients for per-member gap detection. Accessed via Interlocked.Increment.
+    /// </summary>
+    public long EventSequence = 0;
 }
