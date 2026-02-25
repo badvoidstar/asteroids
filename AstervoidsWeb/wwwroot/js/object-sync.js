@@ -219,6 +219,7 @@ const ObjectSync = (function() {
     function handleSessionJoined(session, member) {
         objects.clear();
         typeIndex.clear();
+        lastSentData.clear();
         pendingUpdates = [];
         frameCounter = 0;
         senderSequence = 0;
@@ -251,6 +252,7 @@ const ObjectSync = (function() {
     function handleSessionLeft() {
         objects.clear();
         typeIndex.clear();
+        lastSentData.clear();
         pendingUpdates = [];
         frameCounter = 0;
         senderSequence = 0;

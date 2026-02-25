@@ -963,7 +963,7 @@
         SYNC_NOMINAL_FRAME_TIME: 1/10, // Target send interval (seconds)
         SYNC_MIN_FRAME_TIME: 1/480,    // Min frame time clamp for threshold calc
         ADAPTIVE_SEND_RATE: true,      // Dynamically adjust send rate based on RTT
-        DELTA_ENCODING_ENABLED: false, // Send only changed fields to reduce bandwidth
+        DELTA_ENCODING_ENABLED: true, // Send only changed fields to reduce bandwidth
         INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
         INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
         ADAPTIVE_DELAY_ENABLED: false,  // Auto-tune interpolation delay based on jitter
@@ -1724,6 +1724,26 @@
         }
 
         /**
+         * Return only dynamic fields for per-frame updates.
+         * Static fields (type, colorIndex, memberId) are sent in creation data.
+         */
+        toUpdateData() {
+            return {
+                type: OBJECT_TYPES.SHIP,
+                x: this.x,
+                y: this.y,
+                angle: this.angle,
+                velocityX: this.velocityX,
+                velocityY: this.velocityY,
+                rotationSpeed: this.rotationSpeed,
+                thrusting: this.thrusting,
+                invulnerable: this.invulnerable,
+                score: this.score || 0,
+                hitCount: this.hitCount || 0
+            };
+        }
+
+        /**
          * Update ship from sync data (for remote ships)
          * @param {object} data - Sync data from ObjectSync
          */
@@ -1942,6 +1962,19 @@
         }
 
         /**
+         * Return only dynamic fields for per-frame updates.
+         * Static fields (type, radius, velocityX/Y, rotationSpeed, seed) are sent in creation data.
+         */
+        toUpdateData() {
+            return {
+                type: OBJECT_TYPES.ASTEROID,
+                x: this.x,
+                y: this.y,
+                angle: this.angle
+            };
+        }
+
+        /**
          * Update asteroid from sync data (for remote astervoids)
          * @param {object} data - Sync data from ObjectSync
          */
@@ -2117,6 +2150,21 @@
                 lifetime: this.lifetime,
                 colorIndex: this.colorIndex,
                 ownerMemberId: this.ownerMemberId,
+                pendingHit: this.pendingHit,
+                hitTargetId: this.hitTargetId || null
+            };
+        }
+
+        /**
+         * Return only dynamic fields for per-frame updates.
+         * Static fields (type, velocityX/Y, colorIndex, ownerMemberId) are sent in creation data.
+         */
+        toUpdateData() {
+            return {
+                type: OBJECT_TYPES.BULLET,
+                x: this.x,
+                y: this.y,
+                lifetime: this.lifetime,
                 pendingHit: this.pendingHit,
                 hitTargetId: this.hitTargetId || null
             };
@@ -2344,7 +2392,7 @@
      */
     function syncLocalShip() {
         if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
-        ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toSyncData());
+        ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toUpdateData());
     }
     
     /**
@@ -2505,7 +2553,7 @@
             if (asteroid.syncObjectId) {
                 const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
                 if (syncObj && syncObj.ownerMemberId === myMemberId) {
-                    ObjectSync.updateObject(asteroid.syncObjectId, asteroid.toSyncData());
+                    ObjectSync.updateObject(asteroid.syncObjectId, asteroid.toUpdateData());
                 }
             }
         }
@@ -2624,7 +2672,7 @@
         for (const bullet of game.bullets) {
             // Only sync our own bullets
             if (bullet.ownerMemberId === myMemberId && bullet.syncObjectId) {
-                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData());
+                ObjectSync.updateObject(bullet.syncObjectId, bullet.toUpdateData());
             }
         }
     }
@@ -2787,6 +2835,8 @@
             processedScores: processedScores
         };
         
+        // Future optimization: GameState is less latency-sensitive than positions — could
+        // reduce its sync rate independently or only send on state changes
         ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
     }
 
@@ -3259,7 +3309,7 @@
                             bullet.hitTargetId = asteroid.syncObjectId;
                             bullet.pendingPoints = asteroid.getPoints();
                             if (bullet.syncObjectId) {
-                                ObjectSync.updateObject(bullet.syncObjectId, bullet.toSyncData(), true);
+                                ObjectSync.updateObject(bullet.syncObjectId, bullet.toUpdateData(), true);
                             }
                         }
                     } else {
@@ -3382,7 +3432,7 @@
             // Reset ship locally
             ship.reset();
             if (game.multiplayer.myShipObjectId) {
-                ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toSyncData(), true);
+                ObjectSync.updateObject(game.multiplayer.myShipObjectId, ship.toUpdateData(), true);
             }
         } else {
             // Solo mode — handle everything locally

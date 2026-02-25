@@ -13,6 +13,7 @@ builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IObjectService, ObjectService>();
 
 // Add SignalR
+// Future optimization: Add .AddMessagePackProtocol() for binary serialization (~30-50% smaller payloads)
 builder.Services.AddSignalR();
 
 var app = builder.Build();
