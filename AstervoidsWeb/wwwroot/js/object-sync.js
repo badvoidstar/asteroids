@@ -13,6 +13,13 @@ const ObjectSync = (function() {
     // Pending updates to be batched
     let pendingUpdates = [];
     
+    // Sender sequence counter (incremented per flush)
+    let senderSequence = 0;
+    
+    // Event sequence tracking for gap detection
+    let lastEventSequence = 0;
+    let reconciling = false;
+    
     // Delta encoding: track last-sent data per object to only send changes
     const lastSentData = new Map();
     let deltaEncodingEnabled = false;
@@ -27,7 +34,7 @@ const ObjectSync = (function() {
     let frameCounter = 0;
     let sendThreshold = 2;          // recalculated each frame from actual frame time
     let adaptiveSendRate = false;    // dynamically adjust send rate based on RTT
-    const ADAPTIVE_SEND_MIN = 1 / 30; // fastest send interval (30Hz) in seconds
+    const ADAPTIVE_SEND_MIN = 1 / 20; // fastest send interval (20Hz) in seconds
     const ADAPTIVE_SEND_MAX = 1 / 1;  // slowest send interval (1Hz) in seconds
 
     // Callbacks
@@ -163,6 +170,9 @@ const ObjectSync = (function() {
         typeIndex.clear();
         pendingUpdates = [];
         frameCounter = 0;
+        senderSequence = 0;
+        lastEventSequence = session.eventSequence || 0;
+        reconciling = false;
 
         if (session.objects) {
             for (const obj of session.objects) {
@@ -180,7 +190,7 @@ const ObjectSync = (function() {
             }
         }
 
-        console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
+        console.log('[ObjectSync] Loaded', objects.size, 'objects from session, eventSequence:', lastEventSequence);
     }
 
     /**
@@ -191,6 +201,10 @@ const ObjectSync = (function() {
         typeIndex.clear();
         pendingUpdates = [];
         frameCounter = 0;
+        senderSequence = 0;
+        lastEventSequence = 0;
+        reconciling = false;
+        flushInProgress = false;
         console.log('[ObjectSync] Cleared all objects');
     }
 
@@ -204,7 +218,9 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      */
-    function handleRemoteObjectCreated(objectInfo) {
+    function handleRemoteObjectCreated(objectInfo, eventSequence) {
+        trackEventSequence(eventSequence);
+        
         const existing = objects.get(objectInfo.id);
         if (existing) {
             // Backfill metadata from creation event (object was pre-created by update fallback)
@@ -240,18 +256,28 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote objects updated.
+     * When isSelfEcho is true, only update versions (not data) for locally-owned objects
+     * to avoid overwriting fresh local state with stale echoed data.
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderConnectionId, clientTimestamp) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, clientTimestamp, isSelfEcho, senderSeq, eventSequence) {
+        trackEventSequence(eventSequence);
+        
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, clientTimestamp);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
+        const currentMemberId = isSelfEcho ? SessionClient.getCurrentMember()?.id : null;
         for (const update of updatedObjects) {
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
                 if (update.version > existing.version) {
+                    // Skip data overwrite for our own objects echoed back from server
+                    if (isSelfEcho && existing.ownerMemberId === currentMemberId) {
+                        existing.version = update.version;
+                        continue;
+                    }
                     const oldType = existing.data?.type;
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
@@ -288,7 +314,8 @@ const ObjectSync = (function() {
     /**
      * Handle remote object deleted.
      */
-    function handleRemoteObjectDeleted(objectId) {
+    function handleRemoteObjectDeleted(objectId, eventSequence) {
+        trackEventSequence(eventSequence);
         const obj = objects.get(objectId);
         if (obj) {
             removeFromTypeIndex(obj);
@@ -304,7 +331,8 @@ const ObjectSync = (function() {
     /**
      * Handle remote object replaced (atomic delete + create).
      */
-    function handleRemoteObjectReplaced(event) {
+    function handleRemoteObjectReplaced(event, eventSequence) {
+        trackEventSequence(eventSequence);
         // Delete the original object
         handleRemoteObjectDeleted(event.deletedObjectId);
 
@@ -319,18 +347,109 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Track event sequence and trigger reconciliation on gaps.
+     */
+    function trackEventSequence(eventSequence) {
+        if (eventSequence == null) return;
+        
+        if (lastEventSequence > 0 && eventSequence > lastEventSequence + 1) {
+            console.warn('[ObjectSync] Event sequence gap: expected', lastEventSequence + 1, 'got', eventSequence);
+            triggerReconciliation();
+        }
+        if (eventSequence > lastEventSequence) {
+            lastEventSequence = eventSequence;
+        }
+    }
+
+    /**
+     * Trigger state reconciliation via GetSessionState.
+     */
+    async function triggerReconciliation() {
+        if (reconciling) return;
+        reconciling = true;
+        
+        try {
+            console.log('[ObjectSync] Reconciling state...');
+            const snapshot = await SessionClient.getSessionState();
+            if (!snapshot) return;
+            
+            lastEventSequence = snapshot.eventSequence || 0;
+            
+            // Build set of server-known object IDs
+            const serverObjectIds = new Set();
+            for (const obj of (snapshot.objects || [])) {
+                serverObjectIds.add(obj.id);
+                
+                const existing = objects.get(obj.id);
+                if (existing) {
+                    // Update ownership and version if server is newer
+                    existing.ownerMemberId = obj.ownerMemberId;
+                    if (obj.version > existing.version) {
+                        const oldType = existing.data?.type;
+                        existing.data = obj.data || {};
+                        existing.version = obj.version;
+                        updateTypeIndex(existing, oldType, existing.data?.type);
+                    }
+                } else {
+                    // Add missing object
+                    const localObj = {
+                        id: obj.id,
+                        creatorMemberId: obj.creatorMemberId,
+                        ownerMemberId: obj.ownerMemberId,
+                        scope: obj.scope,
+                        data: obj.data || {},
+                        version: obj.version,
+                        isLocal: false
+                    };
+                    objects.set(obj.id, localObj);
+                    addToTypeIndex(localObj);
+                    if (callbacks.onObjectCreated) {
+                        callbacks.onObjectCreated(localObj);
+                    }
+                }
+            }
+            
+            // Remove ghost objects (locally present but not on server)
+            for (const [id, obj] of objects) {
+                if (!serverObjectIds.has(id)) {
+                    removeFromTypeIndex(obj);
+                    objects.delete(id);
+                    lastSentData.delete(id);
+                    if (callbacks.onObjectDeleted) {
+                        callbacks.onObjectDeleted(obj);
+                    }
+                }
+            }
+            
+            console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
+        } catch (err) {
+            console.error('[ObjectSync] Reconciliation failed:', err);
+        } finally {
+            reconciling = false;
+        }
+    }
+
+    /**
      * Create a new synchronized object.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session' (default: 'Member')
+     * @param {string} ownerMemberId - Optional owner override
+     * @param {function} isStillNeeded - Optional callback checked after async creation;
+     *   if it returns false, the server object is auto-deleted (handles race where
+     *   the caller destroys the local representation during the server round-trip)
      */
-    async function createObject(data = {}, scope = 'Member', ownerMemberId = null) {
+    async function createObject(data = {}, scope = 'Member', ownerMemberId = null, isStillNeeded = null) {
         if (!SessionClient.isInSession()) {
             throw new Error('Not in a session');
         }
 
         try {
             const objectInfo = await SessionClient.createObject(data, scope, ownerMemberId);
-            // Object will be added via the onObjectCreated event
+            // Auto-cleanup: if caller's object was destroyed during async creation
+            if (isStillNeeded && !isStillNeeded()) {
+                deleteObject(objectInfo.id); // fire-and-forget server cleanup
+                return null;
+            }
             return objectInfo;
         } catch (err) {
             console.error('[ObjectSync] Create object failed:', err);
@@ -383,15 +502,14 @@ const ObjectSync = (function() {
             updateTypeIndex(obj, oldType, data.type);
         }
 
-        // Queue for batch sync
+        // Queue for batch sync (expectedVersion resolved at flush time, not here)
         const existingUpdate = pendingUpdates.find(u => u.objectId === objectId);
         if (existingUpdate) {
             Object.assign(existingUpdate.data, data);
         } else {
             pendingUpdates.push({
                 objectId: objectId,
-                data: { ...data },
-                expectedVersion: obj.version
+                data: { ...data }
             });
         }
 
@@ -404,6 +522,7 @@ const ObjectSync = (function() {
     }
 
     let fullSyncCounter = 0;
+    let flushInProgress = false;
 
     /**
      * Called once per frame to drive frame-count-based sync.
@@ -452,11 +571,13 @@ const ObjectSync = (function() {
 
     /**
      * Flush all pending updates to the server.
-     * When delta encoding is enabled, only sends changed fields.
+     * Resolves expectedVersion at flush time from current object state to avoid
+     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
         if (!SessionClient.isInSession()) return;
+        if (flushInProgress) return;
 
         let updates;
         if (deltaEncodingEnabled) {
@@ -467,27 +588,39 @@ const ObjectSync = (function() {
             for (const update of pendingUpdates) {
                 const delta = computeDelta(update.objectId, update.data, forceFullSync);
                 if (delta) {
+                    const obj = objects.get(update.objectId);
                     updates.push({
                         objectId: update.objectId,
                         data: delta,
-                        expectedVersion: update.expectedVersion
+                        expectedVersion: obj ? obj.version : undefined
                     });
                 }
             }
         } else {
-            updates = pendingUpdates;
+            updates = pendingUpdates.map(update => {
+                const obj = objects.get(update.objectId);
+                return {
+                    objectId: update.objectId,
+                    data: update.data,
+                    expectedVersion: obj ? obj.version : undefined
+                };
+            });
         }
         pendingUpdates = [];
 
         if (updates.length === 0) return;
 
+        flushInProgress = true;
+        const currentSenderSequence = ++senderSequence;
         try {
-            await SessionClient.updateObjects(updates);
+            await SessionClient.updateObjects(updates, currentSenderSequence);
         } catch (err) {
             console.error('[ObjectSync] Batch update failed:', err);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('update', err);
             }
+        } finally {
+            flushInProgress = false;
         }
     }
 
@@ -646,6 +779,10 @@ const ObjectSync = (function() {
         lastSentData.clear();
         pendingUpdates = [];
         fullSyncCounter = 0;
+        senderSequence = 0;
+        lastEventSequence = 0;
+        reconciling = false;
+        flushInProgress = false;
     }
 
     // Public API
@@ -671,6 +808,7 @@ const ObjectSync = (function() {
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,
+        trackEventSequence,
         on,
         clear
     };

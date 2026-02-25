@@ -392,72 +392,10 @@ public class ObjectServiceTests
             ["type"] = "bullet"
         });
 
-        // Act & Assert
-        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(2);
-        _objectService.GetObjectCountByType(session.Id, "bullet").Should().Be(1);
-        _objectService.GetObjectCountByType(session.Id, "ship").Should().Be(0);
-    }
-
-    [Fact]
-    public void GetObjectCountByType_AfterLastDelete_ShouldReturnZero()
-    {
-        // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
-
-        var asteroid = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
-        {
-            ["type"] = "asteroid", ["x"] = 0.5
-        });
-
-        // Act
-        _objectService.DeleteObject(session.Id, asteroid!.Id);
-
-        // Assert
-        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(0);
-    }
-
-    [Fact]
-    public void GetObjectCountByType_AfterNonLastDelete_ShouldReturnRemaining()
-    {
-        // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
-
-        var a1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
-        {
-            ["type"] = "asteroid", ["x"] = 0.1
-        });
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
-        {
-            ["type"] = "asteroid", ["x"] = 0.2
-        });
-
-        // Act
-        _objectService.DeleteObject(session.Id, a1!.Id);
-
-        // Assert
-        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
-    }
-
-    [Fact]
-    public void GetObjectCountByType_FirstCreate_ShouldReturnOne()
-    {
-        // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
-
-        // Act
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
-        {
-            ["type"] = "asteroid"
-        });
-
-        // Assert
-        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
+        // Act & Assert — verify objects exist via GetSessionObjects
+        var objects = _objectService.GetSessionObjects(session.Id).ToList();
+        objects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(2);
+        objects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "bullet").Should().Be(1);
     }
 
     [Fact]
@@ -491,8 +429,9 @@ public class ObjectServiceTests
         // Assert — ship type becomes empty (only client had one), bullet does not (server still has one)
         departure.AffectedTypes.Should().Contain("ship");
         departure.AffectedTypes.Should().Contain("bullet");
-        _objectService.GetObjectCountByType(session.Id, "ship").Should().Be(0);
-        _objectService.GetObjectCountByType(session.Id, "bullet").Should().Be(1);
+        var remainingObjects = _objectService.GetSessionObjects(session.Id).ToList();
+        remainingObjects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "ship").Should().Be(0);
+        remainingObjects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "bullet").Should().Be(1);
     }
 
     [Fact]
@@ -519,6 +458,6 @@ public class ObjectServiceTests
         var migratedObj = _objectService.GetObject(session.Id, asteroid.Id);
         migratedObj.Should().NotBeNull();
         migratedObj!.OwnerMemberId.Should().Be(server.Id);
-        _objectService.GetObjectCountByType(session.Id, "asteroid").Should().Be(1);
+        _objectService.GetSessionObjects(session.Id).Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(1);
     }
 }

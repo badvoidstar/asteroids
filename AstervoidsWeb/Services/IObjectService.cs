@@ -44,11 +44,6 @@ public interface IObjectService
     SessionObject? GetObject(Guid sessionId, Guid objectId);
 
     /// <summary>
-    /// Counts how many objects in a session have the given type in their Data["type"] field.
-    /// </summary>
-    int GetObjectCountByType(Guid sessionId, string type);
-
-    /// <summary>
     /// Handles cleanup when a member departs a session.
     /// Deletes member-scoped objects owned by the departing member.
     /// Transfers session-scoped objects to remaining members (distributed round-robin or to a single member based on configuration).

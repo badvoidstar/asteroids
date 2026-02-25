@@ -133,16 +133,6 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
-    public int GetObjectCountByType(Guid sessionId, string type)
-    {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
-            return 0;
-
-        return session.Objects.Values.Count(obj =>
-            obj.Data.TryGetValue("type", out var t) && string.Equals(t?.ToString(), type, StringComparison.Ordinal));
-    }
-
     public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
     {
         var session = _sessionService.GetSession(sessionId);

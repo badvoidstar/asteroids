@@ -47,10 +47,11 @@ public class Session
     public long Version { get; set; } = 1;
 
     /// <summary>
-    /// Whether the game has been started by the server.
-    /// Clients can only enter after this is true.
+    /// Monotonic event sequence counter for all session-group broadcasts.
+    /// Used by clients to detect missed events and trigger reconciliation.
+    /// Accessed via Interlocked.Increment for thread safety.
     /// </summary>
-    public bool GameStarted { get; set; } = false;
+    public long EventSequence = 0;
 
     /// <summary>
     /// Lock object for coordinating server promotion.

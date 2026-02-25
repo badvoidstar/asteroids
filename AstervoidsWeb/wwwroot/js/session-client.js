@@ -25,15 +25,7 @@ const SessionClient = (function() {
         onObjectsUpdated: null,
         onObjectDeleted: null,
         onObjectReplaced: null,
-        onObjectTypeEmpty: null,
-        onObjectTypeRestored: null,
         onSessionsChanged: null,
-        onGameStarted: null,
-        onBulletHitReported: null,
-        onBulletHitConfirmed: null,
-        onBulletHitRejected: null,
-        onShipHitReported: null,
-        onScoreReported: null,
         onError: null
     };
 
@@ -124,18 +116,18 @@ const SessionClient = (function() {
         });
 
         // Session events
-        connection.on('OnMemberJoined', (memberInfo) => {
+        connection.on('OnMemberJoined', (memberInfo, eventSequence, serverTimestamp) => {
             console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
                 currentSession.members.push(memberInfo);
             }
             if (callbacks.onMemberJoined) {
-                callbacks.onMemberJoined(memberInfo);
+                callbacks.onMemberJoined(memberInfo, eventSequence);
             }
         });
 
-        connection.on('OnMemberLeft', (info) => {
+        connection.on('OnMemberLeft', (info, eventSequence, serverTimestamp) => {
             console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
@@ -145,7 +137,7 @@ const SessionClient = (function() {
 
             // Handle object cleanup/migration FIRST (before role change, so promoted member sees correct ownership)
             if (callbacks.onMemberLeft) {
-                callbacks.onMemberLeft(info);
+                callbacks.onMemberLeft(info, eventSequence);
             }
 
             // Check if we were promoted (after migration so ownership is correct for handleServerPromotion)
@@ -166,41 +158,30 @@ const SessionClient = (function() {
         });
 
         // Object events
-        connection.on('OnObjectCreated', (objectInfo) => {
+        connection.on('OnObjectCreated', (objectInfo, eventSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo);
+                callbacks.onObjectCreated(objectInfo, eventSequence);
             }
         });
 
-        connection.on('OnObjectsUpdated', (objects, serverTimestamp, senderConnectionId, clientTimestamp) => {
+        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, eventSequence, serverTimestamp, clientTimestamp) => {
             if (callbacks.onObjectsUpdated) {
+                const isSelfEcho = (senderMemberId === currentMember?.id);
                 // Only pass clientTimestamp if this client is the sender (for RTT calculation)
-                const myTimestamp = (senderConnectionId === connection.connectionId) ? clientTimestamp : null;
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderConnectionId, myTimestamp);
+                const myTimestamp = isSelfEcho ? clientTimestamp : null;
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, myTimestamp, isSelfEcho, senderSequence, eventSequence);
             }
         });
 
-        connection.on('OnObjectDeleted', (objectId) => {
+        connection.on('OnObjectDeleted', (objectId, eventSequence, serverTimestamp) => {
             if (callbacks.onObjectDeleted) {
-                callbacks.onObjectDeleted(objectId);
+                callbacks.onObjectDeleted(objectId, eventSequence);
             }
         });
 
-        connection.on('OnObjectReplaced', (event) => {
+        connection.on('OnObjectReplaced', (event, eventSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event);
-            }
-        });
-
-        connection.on('OnObjectTypeEmpty', (objectType) => {
-            if (callbacks.onObjectTypeEmpty) {
-                callbacks.onObjectTypeEmpty(objectType);
-            }
-        });
-
-        connection.on('OnObjectTypeRestored', (objectType) => {
-            if (callbacks.onObjectTypeRestored) {
-                callbacks.onObjectTypeRestored(objectType);
+                callbacks.onObjectReplaced(event, eventSequence);
             }
         });
 
@@ -209,48 +190,6 @@ const SessionClient = (function() {
             console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
-            }
-        });
-
-        // Game started in current session
-        connection.on('OnGameStarted', (sessionId) => {
-            console.log('[SessionClient] Game started in session:', sessionId);
-            if (currentSession) {
-                currentSession.gameStarted = true;
-            }
-            if (callbacks.onGameStarted) {
-                callbacks.onGameStarted(sessionId);
-            }
-        });
-
-        // Collision events
-        connection.on('OnBulletHitReported', (report) => {
-            if (callbacks.onBulletHitReported) {
-                callbacks.onBulletHitReported(report);
-            }
-        });
-
-        connection.on('OnBulletHitConfirmed', (confirmation) => {
-            if (callbacks.onBulletHitConfirmed) {
-                callbacks.onBulletHitConfirmed(confirmation);
-            }
-        });
-
-        connection.on('OnBulletHitRejected', (rejection) => {
-            if (callbacks.onBulletHitRejected) {
-                callbacks.onBulletHitRejected(rejection);
-            }
-        });
-
-        connection.on('OnShipHitReported', (report) => {
-            if (callbacks.onShipHitReported) {
-                callbacks.onShipHitReported(report);
-            }
-        });
-
-        connection.on('OnScoreReported', (report) => {
-            if (callbacks.onScoreReported) {
-                callbacks.onScoreReported(report);
             }
         });
     }
@@ -321,7 +260,7 @@ const SessionClient = (function() {
                 members: response.members,
                 objects: response.objects,
                 aspectRatio: response.aspectRatio,
-                gameStarted: response.gameStarted
+                eventSequence: response.eventSequence
             };
             currentMember = {
                 id: response.memberId,
@@ -365,29 +304,6 @@ const SessionClient = (function() {
             }
         } catch (err) {
             console.error('[SessionClient] Leave session failed:', err);
-        }
-    }
-
-    /**
-     * Start the game in the current session. Only the server can call this.
-     */
-    async function startGame() {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
-
-        try {
-            const success = await connection.invoke('StartGame');
-            if (success && currentSession) {
-                currentSession.gameStarted = true;
-            }
-            return success;
-        } catch (err) {
-            console.error('[SessionClient] Start game failed:', err);
-            throw err;
         }
     }
 
@@ -436,7 +352,7 @@ const SessionClient = (function() {
     /**
      * Update multiple objects atomically.
      */
-    async function updateObjects(updates) {
+    async function updateObjects(updates, senderSequence = null) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
@@ -445,7 +361,7 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('UpdateObjects', updates, Date.now());
+            return await connection.invoke('UpdateObjects', updates, senderSequence, Date.now());
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);
             throw err;
@@ -490,65 +406,18 @@ const SessionClient = (function() {
         }
     }
 
-    /**
-     * Report that a bullet hit an asteroid. Asteroid owner will process the collision.
-     */
-    async function reportBulletHit(asteroidObjectId, bulletObjectId) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
-        try {
-            await connection.invoke('ReportBulletHit', asteroidObjectId, bulletObjectId);
-        } catch (err) {
-            console.error('[SessionClient] ReportBulletHit failed:', err);
+    async function getSessionState() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            throw new Error('Not connected to session hub');
         }
-    }
-
-    /**
-     * Confirm that a bullet hit was accepted (called by asteroid owner).
-     */
-    async function confirmBulletHit(bulletObjectId, bulletOwnerMemberId, points, asteroidSize) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
-        try {
-            await connection.invoke('ConfirmBulletHit', bulletObjectId, bulletOwnerMemberId, points, asteroidSize);
-        } catch (err) {
-            console.error('[SessionClient] ConfirmBulletHit failed:', err);
+        if (!currentSession) {
+            throw new Error('Not in a session');
         }
-    }
-
-    /**
-     * Reject a bullet hit because the asteroid no longer exists (called by asteroid owner).
-     */
-    async function rejectBulletHit(bulletObjectId, bulletOwnerMemberId) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
         try {
-            await connection.invoke('RejectBulletHit', bulletObjectId, bulletOwnerMemberId);
+            return await connection.invoke('GetSessionState');
         } catch (err) {
-            console.error('[SessionClient] RejectBulletHit failed:', err);
-        }
-    }
-
-    /**
-     * Report score points earned by a player.
-     * Authority will update the shared score.
-     */
-    async function reportScore(points) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
-        try {
-            await connection.invoke('ReportScore', points);
-        } catch (err) {
-            console.error('[SessionClient] ReportScore failed:', err);
-        }
-    }
-
-    /**
-     * Report that this player's ship was hit by an asteroid.
-     * GameState owner will decrement lives.
-     */
-    async function reportShipHit() {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) return;
-        try {
-            await connection.invoke('ReportShipHit');
-        } catch (err) {
-            console.error('[SessionClient] ReportShipHit failed:', err);
+            console.error('[SessionClient] GetSessionState failed:', err);
+            throw err;
         }
     }
 
@@ -598,17 +467,12 @@ const SessionClient = (function() {
         createSession,
         joinSession,
         leaveSession,
-        startGame,
         getActiveSessions,
         createObject,
         updateObjects,
         replaceObject,
         deleteObject,
-        reportBulletHit,
-        confirmBulletHit,
-        rejectBulletHit,
-        reportShipHit,
-        reportScore,
+        getSessionState,
         on,
         getCurrentSession,
         getCurrentMember,
