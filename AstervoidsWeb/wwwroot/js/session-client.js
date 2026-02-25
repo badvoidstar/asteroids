@@ -166,10 +166,7 @@ const SessionClient = (function() {
 
         connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp) => {
             if (callbacks.onObjectsUpdated) {
-                const isSelfEcho = (senderMemberId === currentMember?.id);
-                // Only pass clientTimestamp if this client is the sender (for RTT calculation)
-                const myTimestamp = isSelfEcho ? clientTimestamp : null;
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, myTimestamp, isSelfEcho, senderSequence, memberSequence);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence);
             }
         });
 
@@ -360,7 +357,8 @@ const SessionClient = (function() {
         }
 
         try {
-            return await connection.invoke('UpdateObjects', updates, senderSequence, Date.now());
+            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now());
+            return response;
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);
             throw err;

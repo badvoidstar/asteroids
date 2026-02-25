@@ -27,8 +27,15 @@
  * broadcasts from different members could arrive out of order — per-member
  * sequencing eliminates this entirely since each member's stream is independent.
  *
- * The sending member also receives their own broadcasts (self-echo) and validates
- * their own sequence stream, providing an additional consistency check.
+ * ## Self-Echo Elimination
+ *
+ * Object update broadcasts are sent to OthersInGroup only — the sender does NOT
+ * receive their own updates as an echo. Instead, the UpdateObjects hub method
+ * returns a response containing server-assigned versions, the sender's own
+ * memberSequence, and serverTimestamp. flushUpdates() uses this response to:
+ *   - Apply version progression to local objects (keeps optimistic concurrency in sync)
+ *   - Track the sender's own member sequence (gap detection for own stream)
+ *   - Compute RTT from request/response round-trip (more accurate than broadcast echo)
  *
  * ## Reconciliation (Gap Recovery)
  *
@@ -294,29 +301,21 @@ const ObjectSync = (function() {
     }
 
     /**
-     * Handle remote objects updated.
-     * When isSelfEcho is true, only update versions (not data) for locally-owned objects
-     * to avoid overwriting fresh local state with stale echoed data.
+     * Handle remote objects updated (from other members only — self-echo eliminated).
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, clientTimestamp, isSelfEcho, senderSeq, memberSequence) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived(serverTimestamp, clientTimestamp);
+            callbacks.onBatchReceived(serverTimestamp, null);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
-        const currentMemberId = isSelfEcho ? SessionClient.getCurrentMember()?.id : null;
         for (const update of updatedObjects) {
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
                 if (update.version > existing.version) {
-                    // Skip data overwrite for our own objects echoed back from server
-                    if (isSelfEcho && existing.ownerMemberId === currentMemberId) {
-                        existing.version = update.version;
-                        continue;
-                    }
                     const oldType = existing.data?.type;
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
@@ -666,8 +665,31 @@ const ObjectSync = (function() {
 
         flushInProgress = true;
         const currentSenderSequence = ++senderSequence;
+        const clientTimestamp = Date.now();
         try {
-            await SessionClient.updateObjects(updates, currentSenderSequence);
+            const response = await SessionClient.updateObjects(updates, currentSenderSequence);
+            if (response) {
+                // Apply server-assigned versions to local objects
+                if (response.versions) {
+                    for (const [id, version] of Object.entries(response.versions)) {
+                        const obj = objects.get(id);
+                        if (obj && version > obj.version) {
+                            obj.version = version;
+                        }
+                    }
+                }
+                // Track own member sequence from response
+                if (response.memberSequence > 0) {
+                    const myId = SessionClient.getCurrentMember()?.id;
+                    if (myId) {
+                        trackMemberSequence(myId, response.memberSequence);
+                    }
+                }
+                // RTT from request/response round-trip
+                if (response.serverTimestamp && callbacks.onBatchReceived) {
+                    callbacks.onBatchReceived(response.serverTimestamp, clientTimestamp);
+                }
+            }
         } catch (err) {
             console.error('[ObjectSync] Batch update failed:', err);
             if (callbacks.onSyncError) {
