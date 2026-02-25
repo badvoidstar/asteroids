@@ -4491,13 +4491,13 @@
     });
 
     // Handle member joining - track event sequence
-    SessionClient.on('onMemberJoined', (memberInfo, eventSequence) => {
-        ObjectSync.trackEventSequence(eventSequence);
+    SessionClient.on('onMemberJoined', (memberInfo, senderMemberId, memberSequence) => {
+        ObjectSync.trackEventSequence(senderMemberId, memberSequence);
     });
 
     // Handle member leaving - clean up their objects
-    SessionClient.on('onMemberLeft', (info, eventSequence) => {
-        ObjectSync.trackEventSequence(eventSequence);
+    SessionClient.on('onMemberLeft', (info, senderMemberId, memberSequence) => {
+        ObjectSync.trackEventSequence(senderMemberId, memberSequence);
         // Handle object cleanup from member departure
         if (info.deletedObjectIds && info.deletedObjectIds.length > 0) {
             ObjectSync.handleMemberDeparture(info.deletedObjectIds);
