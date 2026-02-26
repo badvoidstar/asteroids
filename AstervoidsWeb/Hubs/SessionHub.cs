@@ -323,6 +323,14 @@ public class SessionHub : Hub
     /// Same trade-off as CreateObject: sender's memberSequence comes from the response, not
     /// a broadcast echo. Lost response would leave sender's sequence map stale until
     /// reconciliation. See trackMemberSequence() in object-sync.js.
+    ///
+    /// Ownership safety: the local-first deletion is safe because ownership only changes
+    /// via HandleMemberDeparture (when a member leaves). A member that is actively deleting
+    /// objects is not departing, so no concurrent ownership migration can occur. The hub
+    /// enforces ownership (OwnerMemberId == member.Id) and rejects the delete if ownership
+    /// has changed, but the local Map would already be out of sync until reconciliation.
+    /// If voluntary ownership transfer is ever added, local-first deletion would need to
+    /// check ownership locally before removing, or defer removal until server confirms.
     /// </summary>
     public async Task<DeleteObjectResponse?> DeleteObject(Guid objectId)
     {

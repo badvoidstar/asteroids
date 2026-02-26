@@ -788,6 +788,13 @@ const ObjectSync = (function() {
      * NOT receive its own deletion echo. Same trade-off as createObject: sender's
      * memberSequence is tracked from the response. See createObject comment for
      * detailed rationale on lost-response recovery.
+     *
+     * Ownership safety: local-first deletion is safe because ownership only changes
+     * via HandleMemberDeparture (member leaving). A member actively deleting objects
+     * is not departing, so no concurrent ownership migration can occur. The hub
+     * rejects the delete if ownership has changed, but the local Map would already
+     * be stale until reconciliation. If voluntary ownership transfer is ever added,
+     * this would need a local ownership check before removing, or deferred removal.
      */
     async function deleteObject(objectId) {
         if (!SessionClient.isInSession()) {
