@@ -677,7 +677,10 @@ const ObjectSync = (function() {
     /**
      * Compute delta between current data and last-sent data for an object.
      * Returns only the fields that changed, or null if nothing changed.
-     * Always includes 'type' for receiver-side identification.
+     * Note: 'type' is NOT included in deltas — it never changes after creation and
+     * the backend preserves it in the stored object state. The broadcast to other
+     * members sends the full merged state from the backend, so receivers always
+     * have 'type' from the original OnObjectCreated event.
      */
     function computeDelta(objectId, data, forceFullSync) {
         const prev = lastSentData.get(objectId);
@@ -697,8 +700,6 @@ const ObjectSync = (function() {
 
         if (!hasChanges) return null;
 
-        // Always include type for receiver identification
-        if (data.type !== undefined) delta.type = data.type;
         Object.assign(prev, delta);
         return delta;
     }
