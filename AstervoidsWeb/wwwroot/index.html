@@ -2835,8 +2835,8 @@
             processedScores: processedScores
         };
         
-        // Future optimization: GameState is less latency-sensitive than positions — could
-        // reduce its sync rate independently or only send on state changes
+        // Note: this queues into pendingUpdates (same batch as ship/asteroid/bullet updates).
+        // Delta encoding skips GameState when nothing changed, so no further rate reduction needed.
         ObjectSync.updateObject(game.multiplayer.gameStateObjectId, gameStateData, immediate);
     }
 
