@@ -35,13 +35,22 @@
  *
  * ## Self-Echo Elimination
  *
- * Object update broadcasts are sent to OthersInGroup only — the sender does NOT
- * receive their own updates as an echo. Instead, the UpdateObjects hub method
- * returns a response containing server-assigned versions, the sender's own
- * memberSequence, and serverTimestamp. flushUpdates() uses this response to:
- *   - Apply version progression to local objects (keeps optimistic concurrency in sync)
- *   - Track the sender's own member sequence (gap detection for own stream)
- *   - Compute RTT from request/response round-trip (more accurate than broadcast echo)
+ * Three event types use OthersInGroup (sender does NOT receive broadcast echo):
+ *   - UpdateObjects: sender gets versions, memberSequence, serverTimestamp from response
+ *   - CreateObject: sender registers object locally from response (local-first)
+ *   - DeleteObject: sender removes object locally before invoking (local-first)
+ * For all three, the sender's own memberSequence is tracked from the invoke response.
+ *
+ * OnObjectReplaced still uses Group (sender DOES receive echo) because replaceObject
+ * is NOT local-first — the sender relies on the broadcast to mutate its object map
+ * (delete parent + add children, which may have different owners).
+ *
+ * Because the sender's own events arrive through invoke responses (not broadcasts),
+ * gap detection is skipped for the sender's own member stream. This avoids false
+ * reconciliations from: (a) mixed delivery channels racing at await boundaries,
+ * and (b) lost invoke responses leaving stale sequence values. A lost response is
+ * self-correcting — the next successful response or reconciliation snapshot will
+ * restore the correct sequence value.
  *
  * ## Reconciliation (Gap Recovery)
  *
@@ -394,10 +403,25 @@ const ObjectSync = (function() {
 
     /**
      * Track per-member event sequence and trigger reconciliation on gaps.
-     * Only checks for gaps from OTHER members — the local member's own sequence
-     * is tracked without gap detection because the sender can't miss their own
-     * events (they initiated them), and the response/broadcast timing for own
-     * events can race due to await microtask boundaries.
+     *
+     * Gap detection is only performed for OTHER members' streams. The local member's
+     * own sequence is tracked (to keep the map current for reconciliation snapshots)
+     * but gaps are NOT flagged, for two reasons:
+     *
+     * 1. Self-echo elimination: UpdateObjects, CreateObject, and DeleteObject all use
+     *    OthersInGroup — the sender never receives broadcast echoes for these events.
+     *    The sender's own memberSequence is instead tracked from invoke responses
+     *    (flushUpdates, createObject, deleteObject). OnObjectReplaced still echoes.
+     *
+     * 2. Mixed delivery channels: even for OnObjectReplaced (which still uses Group),
+     *    the broadcast callback (synchronous) can race with invoke response processing
+     *    (await microtask), causing out-of-order sequence values for the sender's own
+     *    stream. This would trigger false reconciliations.
+     *
+     * If a sender's invoke response is lost, their own sequence map entry will be stale.
+     * This is harmless because: (a) gap detection is skipped, and (b) the next successful
+     * response or reconciliation snapshot will correct it.
+     *
      * @param {string} memberId - The member who triggered the event
      * @param {number} memberSequence - The member's monotonic sequence number
      */
@@ -498,6 +522,14 @@ const ObjectSync = (function() {
 
     /**
      * Create a new synchronized object.
+     * Local-first: registers the object in the local map from the invoke response.
+     * The backend broadcasts OnObjectCreated to OthersInGroup only — the sender does
+     * NOT receive its own creation echo. This means the sender's memberSequence for
+     * this event is tracked from the response, not the broadcast. If the response is
+     * lost, the sender's sequence map will have a gap for their own member ID, but
+     * gap detection is skipped for own streams (see trackMemberSequence), so this
+     * won't trigger false reconciliation. The stale sequence value will be corrected
+     * on the next successful response or reconciliation snapshot.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session' (default: 'Member')
      * @param {string} ownerMemberId - Optional owner override
@@ -511,12 +543,45 @@ const ObjectSync = (function() {
         }
 
         try {
-            const objectInfo = await SessionClient.createObject(data, scope, ownerMemberId);
+            const response = await SessionClient.createObject(data, scope, ownerMemberId);
+            if (!response || !response.objectInfo) return null;
+
+            const objectInfo = response.objectInfo;
+
             // Auto-cleanup: if caller's object was destroyed during async creation
             if (isStillNeeded && !isStillNeeded()) {
                 deleteObject(objectInfo.id); // fire-and-forget server cleanup
                 return null;
             }
+
+            // Local-first: register the object from the invoke response (no broadcast echo)
+            const existing = objects.get(objectInfo.id);
+            if (!existing) {
+                const obj = {
+                    id: objectInfo.id,
+                    creatorMemberId: objectInfo.creatorMemberId,
+                    ownerMemberId: objectInfo.ownerMemberId,
+                    scope: objectInfo.scope,
+                    data: objectInfo.data || {},
+                    version: objectInfo.version,
+                    isLocal: objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id
+                };
+                objects.set(obj.id, obj);
+                addToTypeIndex(obj);
+
+                if (callbacks.onObjectCreated) {
+                    callbacks.onObjectCreated(obj);
+                }
+            }
+
+            // Track own member sequence from response (no broadcast echo to track it from)
+            if (response.memberSequence > 0) {
+                const myId = SessionClient.getCurrentMember()?.id;
+                if (myId) {
+                    trackMemberSequence(myId, response.memberSequence);
+                }
+            }
+
             return objectInfo;
         } catch (err) {
             console.error('[ObjectSync] Create object failed:', err);
@@ -716,7 +781,11 @@ const ObjectSync = (function() {
 
     /**
      * Delete an object.
-     * Removes from local state immediately (local-first) before sending to server.
+     * Local-first: removes from local state immediately before sending to server.
+     * The backend broadcasts OnObjectDeleted to OthersInGroup only — the sender does
+     * NOT receive its own deletion echo. Same trade-off as createObject: sender's
+     * memberSequence is tracked from the response. See createObject comment for
+     * detailed rationale on lost-response recovery.
      */
     async function deleteObject(objectId) {
         if (!SessionClient.isInSession()) {
@@ -735,8 +804,17 @@ const ObjectSync = (function() {
         pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
 
         try {
-            const success = await SessionClient.deleteObject(objectId);
-            return success;
+            const response = await SessionClient.deleteObject(objectId);
+
+            // Track own member sequence from response (no broadcast echo to track it from)
+            if (response && response.memberSequence > 0) {
+                const myId = SessionClient.getCurrentMember()?.id;
+                if (myId) {
+                    trackMemberSequence(myId, response.memberSequence);
+                }
+            }
+
+            return response?.success ?? false;
         } catch (err) {
             console.warn('[ObjectSync] Server delete failed (local deletion already applied):', objectId, err.message);
             if (callbacks.onSyncError) {
