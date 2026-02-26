@@ -991,6 +991,7 @@ const ObjectSync = (function() {
         getSendThreshold,
         getSendRate,
         updateSendRate,
+        triggerReconciliation,
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,

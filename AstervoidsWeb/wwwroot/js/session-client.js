@@ -101,6 +101,9 @@ const SessionClient = (function() {
         connection.onreconnected(connectionId => {
             console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
+            // Reconcile state — invoke responses for Create/Delete/Update may have been
+            // lost during the reconnection window (OthersInGroup means no broadcast fallback)
+            ObjectSync.triggerReconciliation();
             if (callbacks.onConnected) {
                 callbacks.onConnected();
             }
