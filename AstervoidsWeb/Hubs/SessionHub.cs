@@ -429,7 +429,9 @@ public class SessionHub : Hub
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Single atomic broadcast
-        // Future optimization: Use OthersInGroup since sender already has replacements from invoke response
+        // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
+        // update its local object map (replaceObject is not local-first). Would need
+        // to refactor replaceObject to process the invoke response locally first.
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
             new ObjectReplacedEvent(deleteObjectId, createdInfos),
             member.Id, memberSequence, serverTimestamp);
