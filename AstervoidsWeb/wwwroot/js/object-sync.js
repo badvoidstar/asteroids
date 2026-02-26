@@ -37,8 +37,8 @@
  *
  * Three event types use OthersInGroup (sender does NOT receive broadcast echo):
  *   - UpdateObjects: sender gets versions, memberSequence, serverTimestamp from response
- *   - CreateObject: sender registers object locally from response (local-first)
- *   - DeleteObject: sender removes object locally before invoking (local-first)
+ *   - CreateObject: sender registers object from invoke response (response-first)
+ *   - DeleteObject: sender removes object before invoking (local-first)
  * For all three, the sender's own memberSequence is tracked from the invoke response.
  *
  * OnObjectReplaced still uses Group (sender DOES receive echo) because replaceObject
@@ -522,7 +522,9 @@ const ObjectSync = (function() {
 
     /**
      * Create a new synchronized object.
-     * Local-first: registers the object in the local map from the invoke response.
+     * Response-first: registers the object in the local map from the invoke response.
+     * Unlike deleteObject (which is local-first, removing before invoking), createObject
+     * cannot pre-register because it needs the server-assigned ID and version.
      * The backend broadcasts OnObjectCreated to OthersInGroup only — the sender does
      * NOT receive its own creation echo. This means the sender's memberSequence for
      * this event is tracked from the response, not the broadcast. If the response is
@@ -554,7 +556,7 @@ const ObjectSync = (function() {
                 return null;
             }
 
-            // Local-first: register the object from the invoke response (no broadcast echo)
+            // Response-first: register the object from the invoke response (no broadcast echo)
             const existing = objects.get(objectInfo.id);
             if (!existing) {
                 const obj = {

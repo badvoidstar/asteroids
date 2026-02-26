@@ -214,8 +214,9 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Creates a new synchronized object in the session.
-    /// Broadcast uses OthersInGroup — the sender registers the object locally from the
-    /// invoke response (local-first). This means the sender's own memberSequence for this
+    /// Broadcast uses OthersInGroup — the sender registers the object from the
+    /// invoke response (response-first, since server-assigned ID is needed).
+    /// This means the sender's own memberSequence for this
     /// event is not delivered via broadcast; it is returned in the response instead.
     /// Trade-off: if the invoke response is lost (rare — TCP/WebSocket guarantees delivery,
     /// but SignalR reconnection could cause this), the sender's local state would diverge
@@ -256,7 +257,7 @@ public class SessionHub : Hub
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        // Broadcast to other members only — sender registers from invoke response (local-first).
+        // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
         await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectCreated",
             objectInfo, member.Id, memberSequence, serverTimestamp);
