@@ -1009,7 +1009,8 @@
         adaptiveDelay: {
             packetIntervals: [],   // recent inter-packet intervals (ms)
             computedDelay: CONFIG.INTERPOLATION_DELAY,
-            lastServerTimestamp: 0 // server-side timestamp of last packet (ms since epoch)
+            lastServerTimestamp: 0, // server-side timestamp of last remote broadcast (ms since epoch)
+            remoteSendInterval: 0  // sender's stated send interval (ms), used as BUF mean term
         },
         // One-way latency estimation (server→client)
         latency: {
@@ -1075,7 +1076,7 @@
          * Record arrival of an update packet for adaptive delay calculation.
          * Call once per OnObjectsUpdated broadcast, not per object.
          */
-        recordPacketArrival(serverTimestamp, clientTimestamp) {
+        recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs) {
             const now = Date.now();
             // Server→client latency estimation
             if (serverTimestamp) {
@@ -1103,18 +1104,38 @@
                 // Adapt send rate based on RTT
                 ObjectSync.updateSendRate(r.estimatedRtt);
             }
-            // Adaptive delay jitter tracking
-            // Before: used performance.now() to measure inter-arrival intervals on the client.
-            // This quantized intervals to ~16ms frame boundaries (event processing clusters
-            // around requestAnimationFrame), causing the computed delay to jump in frame-sized steps.
-            // After: use server timestamps (DateTimeOffset.UtcNow, millisecond precision) to measure
-            // inter-send intervals. Eliminates client-side frame quantization at the cost of not
-            // capturing network arrival jitter directly (the +2σ headroom still buffers variability).
+            // Adaptive delay jitter tracking — remote broadcasts only.
+            // Own invoke responses (clientTimestamp set) are excluded so the interval
+            // tracker reflects the remote member's actual send cadence, not an
+            // interleaving of two streams at half the real interval.
+            //
+            // The sender's stated send interval (senderSendIntervalMs) is used as the
+            // mean term in the BUF formula. Observed intervals are only used for the
+            // jitter (σ) term. This eliminates the need to infer the send rate from
+            // noisy observations, and avoids idle-gap corruption from delta encoding
+            // suppressing sends when the remote player's objects haven't changed.
+            //
+            // Outlier filtering uses the stated interval as a tight reference: intervals
+            // exceeding 2× the stated interval are idle gaps and are skipped. Without a
+            // stated interval (backward compat), falls back to 3× observed mean or 1s.
             if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
-            if (serverTimestamp && this.adaptiveDelay.lastServerTimestamp > 0) {
-                this.recordPacketInterval(serverTimestamp - this.adaptiveDelay.lastServerTimestamp);
-            }
-            if (serverTimestamp) {
+            if (!clientTimestamp && serverTimestamp) {
+                // Store the sender's stated send interval for the BUF mean term
+                if (senderSendIntervalMs && senderSendIntervalMs > 0) {
+                    this.adaptiveDelay.remoteSendInterval = senderSendIntervalMs;
+                }
+                if (this.adaptiveDelay.lastServerTimestamp > 0) {
+                    const interval = serverTimestamp - this.adaptiveDelay.lastServerTimestamp;
+                    const ad = this.adaptiveDelay;
+                    const maxInterval = ad.remoteSendInterval > 0
+                        ? 2 * ad.remoteSendInterval
+                        : (ad.packetIntervals.length >= CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES
+                            ? 3 * (ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length)
+                            : 1000);
+                    if (interval <= maxInterval) {
+                        this.recordPacketInterval(interval);
+                    }
+                }
                 this.adaptiveDelay.lastServerTimestamp = serverTimestamp;
             }
         },
@@ -1129,8 +1150,8 @@
                 ad.packetIntervals.shift();
             }
             if (ad.packetIntervals.length >= CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES) {
-                const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
-                const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
+                const observedMean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
+                const variance = ad.packetIntervals.reduce((s, v) => s + (v - observedMean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
 
                 // The adaptive delay has two components:
@@ -1139,40 +1160,22 @@
                 //   2. Jitter buffer (JITTER_MULT × σ): covers timing variance so late packets
                 //      don't push us into extrapolation unexpectedly (2σ ≈ 95% coverage).
                 //
-                // Evolution of the send interval component:
+                // The mean term uses the sender's stated send interval (remoteSendInterval)
+                // when available, falling back to the observed mean for backward compatibility.
+                // This decouples the send rate estimate from interval noise and idle gaps.
+                // The σ term always uses observed intervals to capture actual arrival jitter.
                 //
-                // V1: delay = mean + JITTER_MULT × σ
-                //     Full send interval buffer — never extrapolates, but adds ~100ms of visual
-                //     lag at 10Hz even on a LAN where packets arrive in 2-3ms.
-                //
-                // V2 (current): delay = mean × networkFactor + JITTER_MULT × σ
-                //     Scales the send interval component by network quality (RTT relative to
-                //     send interval). On fast networks, accepts brief extrapolation at the tail
-                //     of each interval since the next packet confirms quickly. On slow networks,
-                //     retains the full buffer.
-                //
-                //     networkFactor = clamp(NET_FLOOR + RTT / (NET_SCALE × mean), NET_FLOOR, 1.0)
-                //       LAN (RTT ~5ms):   factor ≈ 0.53 → delay ≈ 55ms, extrapolates ~45ms
-                //       Regional (50ms):   factor ≈ 0.75 → delay ≈ 78ms, extrapolates ~22ms
-                //       Remote (100ms+):   factor = 1.0  → delay ≈ 105ms, no extrapolation
-                //     NET_FLOOR bounds worst-case extrapolation to that fraction of send interval.
+                // networkFactor scales the mean term by network quality (RTT relative to send
+                // interval). On fast networks, accepts brief extrapolation at the tail of each
+                // interval since the next packet confirms quickly. On slow networks, retains
+                // the full buffer.
+                const mean = ad.remoteSendInterval > 0 ? ad.remoteSendInterval : observedMean;
                 const rtt = this.rtt.estimatedRtt || 0;
                 const networkFactor = Math.min(1.0,
                     CONFIG.ADAPTIVE_DELAY_NET_FLOOR + rtt / (CONFIG.ADAPTIVE_DELAY_NET_SCALE * mean));
-                // Before: rawDelay was clamped by ADAPTIVE_DELAY_MAX, which was fixed to the
-                // base send rate (1000/10 = 100ms). When the adaptive send rate slowed under
-                // congestion (e.g., to 5Hz → mean=200ms), the max clamp truncated the delay
-                // to 100ms, forcing excessive extrapolation precisely when more buffer was needed.
-                // After: the upper bound is the mean send interval itself (networkFactor ≤ 1.0
-                // ensures delay ≤ mean + jitter), which naturally tracks the actual send rate.
-                // ADAPTIVE_DELAY_MIN still provides a hard floor.
                 const rawDelay = Math.max(CONFIG.ADAPTIVE_DELAY_MIN,
                     mean * networkFactor + CONFIG.ADAPTIVE_DELAY_JITTER_MULT * stddev);
 
-                // Before: applied rawDelay directly, causing discrete jumps in render timeline
-                // whenever the sliding window shifted (new sample in, old sample out).
-                // After: EMA smoothing converges gradually (1/SMOOTHING samples to settle),
-                // eliminating visible position stutters from abrupt delay changes.
                 ad.computedDelay += CONFIG.ADAPTIVE_DELAY_SMOOTHING * (rawDelay - ad.computedDelay);
             }
         },
@@ -1362,6 +1365,7 @@
             this.adaptiveDelay.packetIntervals = [];
             this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
             this.adaptiveDelay.lastServerTimestamp = 0;
+            this.adaptiveDelay.remoteSendInterval = 0;
             this.latency.minOneWay = Infinity;
             this.latency.estimatedLatency = 0;
             this.latency.samples = [];
@@ -4239,7 +4243,7 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
-                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp));
+                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs));
                 // Detect GameState creation (replaces onGameStarted event)
                 ObjectSync.on('onObjectCreated', (obj) => {
                     if (obj.data?.type === OBJECT_TYPES.GAME_STATE && sessionPicker.currentSessionId) {

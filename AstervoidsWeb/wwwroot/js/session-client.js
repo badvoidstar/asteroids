@@ -167,9 +167,9 @@ const SessionClient = (function() {
             }
         });
 
-        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp) => {
+        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
         });
 
@@ -351,7 +351,7 @@ const SessionClient = (function() {
     /**
      * Update multiple objects atomically.
      */
-    async function updateObjects(updates, senderSequence = null) {
+    async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
@@ -360,7 +360,7 @@ const SessionClient = (function() {
         }
 
         try {
-            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now());
+            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
             return response;
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);

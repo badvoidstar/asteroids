@@ -320,12 +320,12 @@ const ObjectSync = (function() {
     /**
      * Handle remote objects updated (from other members only — self-echo eliminated).
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
         trackMemberSequence(senderMemberId, memberSequence);
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived(serverTimestamp, null);
+            callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
@@ -749,7 +749,7 @@ const ObjectSync = (function() {
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
         try {
-            const response = await SessionClient.updateObjects(updates, currentSenderSequence);
+            const response = await SessionClient.updateObjects(updates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
             if (response) {
                 // Apply server-assigned versions to local objects
                 if (response.versions) {
