@@ -966,11 +966,11 @@
         DELTA_ENCODING_ENABLED: true, // Send only changed fields to reduce bandwidth
         INTERPOLATION_ENABLED: true,   // Enable/disable interpolation for remote objects
         INTERPOLATION_DELAY: 1000/30,  // Render delay for smooth interpolation (ms)
-        ADAPTIVE_DELAY_ENABLED: false,  // Auto-tune interpolation delay based on jitter
-        ADAPTIVE_DELAY_MIN: 1000/60,   // Auto-tune interpolation max delay
-        ADAPTIVE_DELAY_MAX: 1000/5,   // Auto-tune interpolation max delay
+        ADAPTIVE_DELAY_ENABLED: true,   // Auto-tune interpolation delay based on jitter
+        ADAPTIVE_DELAY_MIN: 1000/60,   // Auto-tune interpolation min delay
+        ADAPTIVE_DELAY_MAX: 1000/10,   // Auto-tune interpolation max delay (matches target send rate)
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
-        MAX_EXTRAPOLATION: 0.15        // Max extrapolation time in seconds to prevent overshoot
+        MAX_EXTRAPOLATION: 0.5         // Max extrapolation time in seconds to prevent overshoot
     };
 
     // ============================================
@@ -1005,7 +1005,7 @@
             packetIntervals: [],   // recent inter-packet intervals (ms)
             maxSamples: 30,
             computedDelay: CONFIG.INTERPOLATION_DELAY,
-            lastPacketTime: 0
+            lastServerTimestamp: 0 // server-side timestamp of last packet (ms since epoch)
         },
         // One-way latency estimation (server→client)
         latency: {
@@ -1094,12 +1094,19 @@
                 ObjectSync.updateSendRate(r.estimatedRtt);
             }
             // Adaptive delay jitter tracking
+            // Before: used performance.now() to measure inter-arrival intervals on the client.
+            // This quantized intervals to ~16ms frame boundaries (event processing clusters
+            // around requestAnimationFrame), causing the computed delay to jump in frame-sized steps.
+            // After: use server timestamps (DateTimeOffset.UtcNow, millisecond precision) to measure
+            // inter-send intervals. Eliminates client-side frame quantization at the cost of not
+            // capturing network arrival jitter directly (the +2σ headroom still buffers variability).
             if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
-            const perfNow = performance.now();
-            if (this.adaptiveDelay.lastPacketTime > 0) {
-                this.recordPacketInterval(perfNow - this.adaptiveDelay.lastPacketTime);
+            if (serverTimestamp && this.adaptiveDelay.lastServerTimestamp > 0) {
+                this.recordPacketInterval(serverTimestamp - this.adaptiveDelay.lastServerTimestamp);
             }
-            this.adaptiveDelay.lastPacketTime = perfNow;
+            if (serverTimestamp) {
+                this.adaptiveDelay.lastServerTimestamp = serverTimestamp;
+            }
         },
 
         /**
@@ -1112,11 +1119,43 @@
                 ad.packetIntervals.shift();
             }
             if (ad.packetIntervals.length >= 5) {
-                // Adaptive delay = mean + 2 * stddev (covers ~95% of jitter)
                 const mean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - mean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
-                ad.computedDelay = Math.max(ADAPTIVE_DELAY_MIN, Math.min(ADAPTIVE_DELAY_MAX, mean + 2 * stddev));
+
+                // The adaptive delay has two components:
+                //   1. Send interval buffer (mean): keeps the render point within the interpolation
+                //      window between two received samples. Without this, we extrapolate.
+                //   2. Jitter buffer (2σ): covers ~95% of timing variance so late packets
+                //      don't push us into extrapolation unexpectedly.
+                //
+                // Evolution of the send interval component:
+                //
+                // V1: delay = mean + 2σ
+                //     Full send interval buffer — never extrapolates, but adds ~100ms of visual
+                //     lag at 10Hz even on a LAN where packets arrive in 2-3ms.
+                //
+                // V2 (current): delay = mean × networkFactor + 2σ
+                //     Scales the send interval component by network quality (RTT relative to
+                //     send interval). On fast networks, accepts brief extrapolation at the tail
+                //     of each interval since the next packet confirms quickly. On slow networks,
+                //     retains the full buffer.
+                //
+                //     networkFactor = clamp(0.5 + RTT / (2 × mean), 0.5, 1.0)
+                //       LAN (RTT ~5ms):   factor ≈ 0.53 → delay ≈ 55ms, extrapolates ~45ms
+                //       Regional (50ms):   factor ≈ 0.75 → delay ≈ 78ms, extrapolates ~22ms
+                //       Remote (100ms+):   factor = 1.0  → delay ≈ 105ms, no extrapolation
+                //     Floor of 0.5 bounds worst-case extrapolation to half a send interval.
+                const rtt = this.rtt.estimatedRtt || 0;
+                const networkFactor = Math.min(1.0, 0.5 + rtt / (2 * mean));
+                const rawDelay = Math.max(CONFIG.ADAPTIVE_DELAY_MIN,
+                    Math.min(CONFIG.ADAPTIVE_DELAY_MAX, mean * networkFactor + 2 * stddev));
+
+                // Before: applied rawDelay directly, causing discrete jumps in render timeline
+                // whenever the sliding window shifted (new sample in, old sample out).
+                // After: EMA smoothing converges gradually (~10 samples / ~1s at 10Hz send rate),
+                // eliminating visible position stutters from abrupt delay changes.
+                ad.computedDelay += 0.1 * (rawDelay - ad.computedDelay);
             }
         },
 
@@ -1300,7 +1339,7 @@
             this.lastVersions.clear();
             this.adaptiveDelay.packetIntervals = [];
             this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
-            this.adaptiveDelay.lastPacketTime = 0;
+            this.adaptiveDelay.lastServerTimestamp = 0;
             this.latency.minOneWay = Infinity;
             this.latency.estimatedLatency = 0;
             this.latency.samples = [];
