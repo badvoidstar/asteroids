@@ -1056,7 +1056,13 @@
                     current: { ...data },
                     previous: { ...data },
                     currentTime: now,
-                    previousTime: now - CONFIG.SYNC_NOMINAL_FRAME_TIME * 1000,
+                    // Seed previousTime one delay-interval behind so interpolation has a
+                    // time span to work with on the very first frame.
+                    // Before: used SYNC_NOMINAL_FRAME_TIME (base send rate), which was wrong
+                    // when adaptive send rate adjusted the actual interval.
+                    // After: uses getDelay() which tracks the actual send rate via adaptive
+                    // delay computation, or falls back to INTERPOLATION_DELAY when disabled.
+                    previousTime: now - this.getDelay(),
                     velocity: vel,
                     previousVelocity: vel,
                     rotationSpeed: rotSpd,
