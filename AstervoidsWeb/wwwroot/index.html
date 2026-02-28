@@ -975,7 +975,7 @@
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
-        MAX_EXTRAPOLATION: 0.5,        // Max extrapolation time in seconds to prevent overshoot
+        MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6        // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
     };
 
@@ -1019,7 +1019,7 @@
         // Uses EMA with asymmetric smoothing: rises fast, decays gradually
         rtt: {
             estimatedRtt: 0,
-            alphaUp: 0.3,    // fast reaction to congestion
+            alphaUp: 0.6,    // fast reaction to congestion
             alphaDown: 0.1,  // gradual recovery
             initialized: false
         },
@@ -1157,6 +1157,13 @@
                     mean * networkFactor + CONFIG.ADAPTIVE_DELAY_JITTER_MULT * stddev);
 
                 ad.computedDelay += CONFIG.ADAPTIVE_DELAY_SMOOTHING * (rawDelay - ad.computedDelay);
+
+                // DIAGNOSTIC: log BUF calculation internals (remove after debugging)
+                if (!ad._diagCount) ad._diagCount = 0;
+                if (++ad._diagCount % 20 === 0) {
+                    const sorted = [...ad.packetIntervals].sort((a, b) => a - b);
+                    // console.log(`[BUF] interval=${interval.toFixed(1)} mean=${mean.toFixed(1)} obsMean=${observedMean.toFixed(1)} σ=${stddev.toFixed(1)} nf=${networkFactor.toFixed(3)} raw=${rawDelay.toFixed(1)} buf=${ad.computedDelay.toFixed(1)} min=${sorted[0].toFixed(0)} max=${sorted[sorted.length-1].toFixed(0)} samples=${ad.packetIntervals.length}`);
+                }
             }
         },
 
@@ -1175,7 +1182,7 @@
          */
         getDelay() {
             if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return CONFIG.INTERPOLATION_DELAY;
-            let maxDelay = CONFIG.INTERPOLATION_DELAY;
+            let maxDelay = CONFIG.ADAPTIVE_DELAY_MIN;
             for (const ad of this.memberDelays.values()) {
                 if (ad.computedDelay > maxDelay) maxDelay = ad.computedDelay;
             }
@@ -1249,6 +1256,11 @@
                     const timeDiff = curr.time - prev.time;
                     if (timeDiff <= 0) return curr.data;
 
+                    // BUG RISK: when timeDiff is very small (burst arrivals), inflating
+                    // to minTimeDiff makes t artificially small, causing interpolation to
+                    // linger near prev even though targetTime is past both snapshots.
+                    // Fix: replace with `if (timeDiff < delay * 0.5) return curr.data;`
+                    // and use timeDiff directly instead of effectiveTimeDiff.
                     const minTimeDiff = delay * 0.5;
                     const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
                     const t = (targetTime - prev.time) / effectiveTimeDiff;
@@ -2982,7 +2994,7 @@
      * session creation and UI display.
      */
     function handleServerPromotion() {
-        console.log('[Multiplayer] This client promoted to Server');
+        // console.log('[Multiplayer] This client promoted to Server');
         game.multiplayer.isAuthority = true;
     }
 

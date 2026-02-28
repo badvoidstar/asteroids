@@ -219,7 +219,7 @@ const ObjectSync = (function() {
         SessionClient.on('onSessionJoined', handleSessionJoined);
         SessionClient.on('onSessionLeft', handleSessionLeft);
 
-        console.log('[ObjectSync] Initialized');
+        // console.log('[ObjectSync] Initialized');
     }
 
     /**
@@ -252,7 +252,7 @@ const ObjectSync = (function() {
             }
         }
 
-        console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
+        // console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
     }
 
     /**
@@ -268,14 +268,14 @@ const ObjectSync = (function() {
         memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
-        console.log('[ObjectSync] Cleared all objects');
+        // console.log('[ObjectSync] Cleared all objects');
     }
 
     /**
      * Handle role changed - update ownership for migrated objects.
      */
     function handleRoleChanged(newRole) {
-        console.log('[ObjectSync] Role changed to', newRole);
+        // console.log('[ObjectSync] Role changed to', newRole);
     }
 
     /**
@@ -453,7 +453,7 @@ const ObjectSync = (function() {
         reconciling = true;
         
         try {
-            console.log('[ObjectSync] Reconciling state...');
+            // console.log('[ObjectSync] Reconciling state...');
             const snapshot = await SessionClient.getSessionState();
             if (!snapshot) return;
             
@@ -511,7 +511,7 @@ const ObjectSync = (function() {
                 }
             }
             
-            console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
+            // console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
             reconciliationCount++;
         } catch (err) {
             console.error('[ObjectSync] Reconciliation failed:', err);
@@ -656,7 +656,7 @@ const ObjectSync = (function() {
     }
 
     let fullSyncCounter = 0;
-    let flushInProgress = false;
+    let inFlightCount = 0;
 
     /**
      * Called once per frame to drive frame-count-based sync.
@@ -707,12 +707,13 @@ const ObjectSync = (function() {
     /**
      * Flush all pending updates to the server.
      * Resolves expectedVersion at flush time from current object state to avoid
-     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
+     * stale versions from queue-time capture. Skipped when a prior flush is still
+     * in-flight (backpressure to avoid flooding a congested connection).
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
         if (!SessionClient.isInSession()) return;
-        if (flushInProgress) return;
+        if (inFlightCount > 0) return;
 
         let updates;
         if (deltaEncodingEnabled) {
@@ -745,7 +746,7 @@ const ObjectSync = (function() {
 
         if (updates.length === 0) return;
 
-        flushInProgress = true;
+        inFlightCount++;
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
         try {
@@ -778,7 +779,7 @@ const ObjectSync = (function() {
                 callbacks.onSyncError('update', err);
             }
         } finally {
-            flushInProgress = false;
+            inFlightCount--;
         }
     }
 
