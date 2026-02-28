@@ -35,13 +35,22 @@
  *
  * ## Self-Echo Elimination
  *
- * Object update broadcasts are sent to OthersInGroup only — the sender does NOT
- * receive their own updates as an echo. Instead, the UpdateObjects hub method
- * returns a response containing server-assigned versions, the sender's own
- * memberSequence, and serverTimestamp. flushUpdates() uses this response to:
- *   - Apply version progression to local objects (keeps optimistic concurrency in sync)
- *   - Track the sender's own member sequence (gap detection for own stream)
- *   - Compute RTT from request/response round-trip (more accurate than broadcast echo)
+ * Three event types use OthersInGroup (sender does NOT receive broadcast echo):
+ *   - UpdateObjects: sender gets versions, memberSequence, serverTimestamp from response
+ *   - CreateObject: sender registers object from invoke response (response-first)
+ *   - DeleteObject: sender removes object before invoking (local-first)
+ * For all three, the sender's own memberSequence is tracked from the invoke response.
+ *
+ * OnObjectReplaced still uses Group (sender DOES receive echo) because replaceObject
+ * is NOT local-first — the sender relies on the broadcast to mutate its object map
+ * (delete parent + add children, which may have different owners).
+ *
+ * Because the sender's own events arrive through invoke responses (not broadcasts),
+ * gap detection is skipped for the sender's own member stream. This avoids false
+ * reconciliations from: (a) mixed delivery channels racing at await boundaries,
+ * and (b) lost invoke responses leaving stale sequence values. A lost response is
+ * self-correcting — the next successful response or reconciliation snapshot will
+ * restore the correct sequence value.
  *
  * ## Reconciliation (Gap Recovery)
  *
@@ -210,7 +219,7 @@ const ObjectSync = (function() {
         SessionClient.on('onSessionJoined', handleSessionJoined);
         SessionClient.on('onSessionLeft', handleSessionLeft);
 
-        console.log('[ObjectSync] Initialized');
+        // console.log('[ObjectSync] Initialized');
     }
 
     /**
@@ -243,7 +252,7 @@ const ObjectSync = (function() {
             }
         }
 
-        console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
+        // console.log('[ObjectSync] Loaded', objects.size, 'objects from session');
     }
 
     /**
@@ -259,14 +268,14 @@ const ObjectSync = (function() {
         memberSequences.clear();
         reconciling = false;
         flushInProgress = false;
-        console.log('[ObjectSync] Cleared all objects');
+        // console.log('[ObjectSync] Cleared all objects');
     }
 
     /**
      * Handle role changed - update ownership for migrated objects.
      */
     function handleRoleChanged(newRole) {
-        console.log('[ObjectSync] Role changed to', newRole);
+        // console.log('[ObjectSync] Role changed to', newRole);
     }
 
     /**
@@ -311,12 +320,12 @@ const ObjectSync = (function() {
     /**
      * Handle remote objects updated (from other members only — self-echo eliminated).
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
         trackMemberSequence(senderMemberId, memberSequence);
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived(serverTimestamp, null);
+            callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
@@ -394,10 +403,25 @@ const ObjectSync = (function() {
 
     /**
      * Track per-member event sequence and trigger reconciliation on gaps.
-     * Only checks for gaps from OTHER members — the local member's own sequence
-     * is tracked without gap detection because the sender can't miss their own
-     * events (they initiated them), and the response/broadcast timing for own
-     * events can race due to await microtask boundaries.
+     *
+     * Gap detection is only performed for OTHER members' streams. The local member's
+     * own sequence is tracked (to keep the map current for reconciliation snapshots)
+     * but gaps are NOT flagged, for two reasons:
+     *
+     * 1. Self-echo elimination: UpdateObjects, CreateObject, and DeleteObject all use
+     *    OthersInGroup — the sender never receives broadcast echoes for these events.
+     *    The sender's own memberSequence is instead tracked from invoke responses
+     *    (flushUpdates, createObject, deleteObject). OnObjectReplaced still echoes.
+     *
+     * 2. Mixed delivery channels: even for OnObjectReplaced (which still uses Group),
+     *    the broadcast callback (synchronous) can race with invoke response processing
+     *    (await microtask), causing out-of-order sequence values for the sender's own
+     *    stream. This would trigger false reconciliations.
+     *
+     * If a sender's invoke response is lost, their own sequence map entry will be stale.
+     * This is harmless because: (a) gap detection is skipped, and (b) the next successful
+     * response or reconciliation snapshot will correct it.
+     *
      * @param {string} memberId - The member who triggered the event
      * @param {number} memberSequence - The member's monotonic sequence number
      */
@@ -429,7 +453,7 @@ const ObjectSync = (function() {
         reconciling = true;
         
         try {
-            console.log('[ObjectSync] Reconciling state...');
+            // console.log('[ObjectSync] Reconciling state...');
             const snapshot = await SessionClient.getSessionState();
             if (!snapshot) return;
             
@@ -487,7 +511,7 @@ const ObjectSync = (function() {
                 }
             }
             
-            console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
+            // console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
             reconciliationCount++;
         } catch (err) {
             console.error('[ObjectSync] Reconciliation failed:', err);
@@ -498,6 +522,16 @@ const ObjectSync = (function() {
 
     /**
      * Create a new synchronized object.
+     * Response-first: registers the object in the local map from the invoke response.
+     * Unlike deleteObject (which is local-first, removing before invoking), createObject
+     * cannot pre-register because it needs the server-assigned ID and version.
+     * The backend broadcasts OnObjectCreated to OthersInGroup only — the sender does
+     * NOT receive its own creation echo. This means the sender's memberSequence for
+     * this event is tracked from the response, not the broadcast. If the response is
+     * lost, the sender's sequence map will have a gap for their own member ID, but
+     * gap detection is skipped for own streams (see trackMemberSequence), so this
+     * won't trigger false reconciliation. The stale sequence value will be corrected
+     * on the next successful response or reconciliation snapshot.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session' (default: 'Member')
      * @param {string} ownerMemberId - Optional owner override
@@ -511,12 +545,45 @@ const ObjectSync = (function() {
         }
 
         try {
-            const objectInfo = await SessionClient.createObject(data, scope, ownerMemberId);
+            const response = await SessionClient.createObject(data, scope, ownerMemberId);
+            if (!response || !response.objectInfo) return null;
+
+            const objectInfo = response.objectInfo;
+
             // Auto-cleanup: if caller's object was destroyed during async creation
             if (isStillNeeded && !isStillNeeded()) {
                 deleteObject(objectInfo.id); // fire-and-forget server cleanup
                 return null;
             }
+
+            // Response-first: register the object from the invoke response (no broadcast echo)
+            const existing = objects.get(objectInfo.id);
+            if (!existing) {
+                const obj = {
+                    id: objectInfo.id,
+                    creatorMemberId: objectInfo.creatorMemberId,
+                    ownerMemberId: objectInfo.ownerMemberId,
+                    scope: objectInfo.scope,
+                    data: objectInfo.data || {},
+                    version: objectInfo.version,
+                    isLocal: objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id
+                };
+                objects.set(obj.id, obj);
+                addToTypeIndex(obj);
+
+                if (callbacks.onObjectCreated) {
+                    callbacks.onObjectCreated(obj);
+                }
+            }
+
+            // Track own member sequence from response (no broadcast echo to track it from)
+            if (response.memberSequence > 0) {
+                const myId = SessionClient.getCurrentMember()?.id;
+                if (myId) {
+                    trackMemberSequence(myId, response.memberSequence);
+                }
+            }
+
             return objectInfo;
         } catch (err) {
             console.error('[ObjectSync] Create object failed:', err);
@@ -589,7 +656,7 @@ const ObjectSync = (function() {
     }
 
     let fullSyncCounter = 0;
-    let flushInProgress = false;
+    let inFlightCount = 0;
 
     /**
      * Called once per frame to drive frame-count-based sync.
@@ -610,7 +677,10 @@ const ObjectSync = (function() {
     /**
      * Compute delta between current data and last-sent data for an object.
      * Returns only the fields that changed, or null if nothing changed.
-     * Always includes 'type' for receiver-side identification.
+     * Note: 'type' is NOT included in deltas — it never changes after creation and
+     * the backend preserves it in the stored object state. The broadcast to other
+     * members sends the full merged state from the backend, so receivers always
+     * have 'type' from the original OnObjectCreated event.
      */
     function computeDelta(objectId, data, forceFullSync) {
         const prev = lastSentData.get(objectId);
@@ -630,8 +700,6 @@ const ObjectSync = (function() {
 
         if (!hasChanges) return null;
 
-        // Always include type for receiver identification
-        if (data.type !== undefined) delta.type = data.type;
         Object.assign(prev, delta);
         return delta;
     }
@@ -639,12 +707,13 @@ const ObjectSync = (function() {
     /**
      * Flush all pending updates to the server.
      * Resolves expectedVersion at flush time from current object state to avoid
-     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
+     * stale versions from queue-time capture. Skipped when a prior flush is still
+     * in-flight (backpressure to avoid flooding a congested connection).
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
         if (!SessionClient.isInSession()) return;
-        if (flushInProgress) return;
+        if (inFlightCount > 0) return;
 
         let updates;
         if (deltaEncodingEnabled) {
@@ -677,11 +746,11 @@ const ObjectSync = (function() {
 
         if (updates.length === 0) return;
 
-        flushInProgress = true;
+        inFlightCount++;
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
         try {
-            const response = await SessionClient.updateObjects(updates, currentSenderSequence);
+            const response = await SessionClient.updateObjects(updates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
             if (response) {
                 // Apply server-assigned versions to local objects
                 if (response.versions) {
@@ -710,13 +779,24 @@ const ObjectSync = (function() {
                 callbacks.onSyncError('update', err);
             }
         } finally {
-            flushInProgress = false;
+            inFlightCount--;
         }
     }
 
     /**
      * Delete an object.
-     * Removes from local state immediately (local-first) before sending to server.
+     * Local-first: removes from local state immediately before sending to server.
+     * The backend broadcasts OnObjectDeleted to OthersInGroup only — the sender does
+     * NOT receive its own deletion echo. Same trade-off as createObject: sender's
+     * memberSequence is tracked from the response. See createObject comment for
+     * detailed rationale on lost-response recovery.
+     *
+     * Ownership safety: local-first deletion is safe because ownership only changes
+     * via HandleMemberDeparture (member leaving). A member actively deleting objects
+     * is not departing, so no concurrent ownership migration can occur. The hub
+     * rejects the delete if ownership has changed, but the local Map would already
+     * be stale until reconciliation. If voluntary ownership transfer is ever added,
+     * this would need a local ownership check before removing, or deferred removal.
      */
     async function deleteObject(objectId) {
         if (!SessionClient.isInSession()) {
@@ -735,8 +815,17 @@ const ObjectSync = (function() {
         pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
 
         try {
-            const success = await SessionClient.deleteObject(objectId);
-            return success;
+            const response = await SessionClient.deleteObject(objectId);
+
+            // Track own member sequence from response (no broadcast echo to track it from)
+            if (response && response.memberSequence > 0) {
+                const myId = SessionClient.getCurrentMember()?.id;
+                if (myId) {
+                    trackMemberSequence(myId, response.memberSequence);
+                }
+            }
+
+            return response?.success ?? false;
         } catch (err) {
             console.warn('[ObjectSync] Server delete failed (local deletion already applied):', objectId, err.message);
             if (callbacks.onSyncError) {
@@ -903,6 +992,7 @@ const ObjectSync = (function() {
         getSendThreshold,
         getSendRate,
         updateSendRate,
+        triggerReconciliation,
         handleOwnershipMigration,
         handleMemberDeparture,
         handleRoleChanged,

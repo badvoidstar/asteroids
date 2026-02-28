@@ -214,8 +214,15 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Creates a new synchronized object in the session.
+    /// Broadcast uses OthersInGroup — the sender registers the object from the
+    /// invoke response (response-first, since server-assigned ID is needed).
+    /// This means the sender's own memberSequence for this
+    /// event is not delivered via broadcast; it is returned in the response instead.
+    /// Trade-off: if the invoke response is lost (rare — TCP/WebSocket guarantees delivery,
+    /// but SignalR reconnection could cause this), the sender's local state would diverge
+    /// until reconciliation recovers it. See trackMemberSequence() in object-sync.js.
     /// </summary>
-    public async Task<ObjectInfo?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
+    public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -250,22 +257,21 @@ public class SessionHub : Hub
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        // Notify all members including sender
-        // Future optimization: Use OthersInGroup (like UpdateObjects) since sender already
-        // has ObjectInfo from invoke response. Would need to track own memberSequence from response.
-        await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectCreated",
+        // Broadcast to other members only — sender registers from invoke response (response-first).
+        // Sender's own memberSequence is returned in the response, not via broadcast echo.
+        await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectCreated",
             objectInfo, member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
 
-        return objectInfo;
+        return new CreateObjectResponse(objectInfo, memberSequence);
     }
 
     /// <summary>
     /// Updates multiple objects atomically.
     /// Only allows updates to objects owned by the caller.
     /// </summary>
-    public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null)
+    public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null, long? senderSendIntervalMs = null)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
@@ -303,7 +309,7 @@ public class SessionHub : Hub
             var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
             // Broadcast to other members only — sender gets versions/RTT from the response
             await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
-                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp);
+                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs);
         }
 
         var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
@@ -313,44 +319,57 @@ public class SessionHub : Hub
     /// <summary>
     /// Deletes an object from the session.
     /// Only allows deletion of objects owned by the caller.
+    /// Broadcast uses OthersInGroup — the sender deletes locally before invoking (local-first).
+    /// Same trade-off as CreateObject: sender's memberSequence comes from the response, not
+    /// a broadcast echo. Lost response would leave sender's sequence map stale until
+    /// reconciliation. See trackMemberSequence() in object-sync.js.
+    ///
+    /// Ownership safety: the local-first deletion is safe because ownership only changes
+    /// via HandleMemberDeparture (when a member leaves). A member that is actively deleting
+    /// objects is not departing, so no concurrent ownership migration can occur. The hub
+    /// enforces ownership (OwnerMemberId == member.Id) and rejects the delete if ownership
+    /// has changed, but the local Map would already be out of sync until reconciliation.
+    /// If voluntary ownership transfer is ever added, local-first deletion would need to
+    /// check ownership locally before removing, or defer removal until server confirms.
     /// </summary>
-    public async Task<bool> DeleteObject(Guid objectId)
+    public async Task<DeleteObjectResponse?> DeleteObject(Guid objectId)
     {
         var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
         if (member == null)
         {
             _logger.LogWarning("DeleteObject failed - member not found for connection {ConnectionId}", Context.ConnectionId);
-            return false;
+            return null;
         }
 
         var session = _sessionService.GetSession(member.SessionId);
         if (session == null)
-            return false;
+            return null;
 
         // Verify ownership before deleting
         var obj = _objectService.GetObject(member.SessionId, objectId);
         if (obj == null)
-            return false;
+            return null;
 
         if (obj.OwnerMemberId != member.Id)
         {
             _logger.LogWarning("DeleteObject rejected - member {MemberId} does not own object {ObjectId}", member.Id, objectId);
-            return false;
+            return null;
         }
 
         var deletedObj = _objectService.DeleteObject(member.SessionId, objectId);
-        if (deletedObj != null)
-        {
-            var memberSequence = NextMemberSequence(member);
-            var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (deletedObj == null)
+            return null;
 
-            // Future optimization: Use OthersInGroup since sender already deleted locally (local-first)
-            await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectDeleted",
-                objectId, member.Id, memberSequence, serverTimestamp);
-            _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, member.SessionId);
-        }
+        var memberSequence = NextMemberSequence(member);
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        return deletedObj != null;
+        // Broadcast to other members only — sender deleted locally before invoking (local-first).
+        // Sender's own memberSequence is returned in the response, not via broadcast echo.
+        await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectDeleted",
+            objectId, member.Id, memberSequence, serverTimestamp);
+        _logger.LogDebug("Object {ObjectId} deleted from session {SessionId}", objectId, member.SessionId);
+
+        return new DeleteObjectResponse(true, memberSequence);
     }
 
     /// <summary>
@@ -429,7 +448,9 @@ public class SessionHub : Hub
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Single atomic broadcast
-        // Future optimization: Use OthersInGroup since sender already has replacements from invoke response
+        // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
+        // update its local object map (replaceObject is not local-first). Would need
+        // to refactor replaceObject to process the invoke response locally first.
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
             new ObjectReplacedEvent(deleteObjectId, createdInfos),
             member.Id, memberSequence, serverTimestamp);
@@ -525,4 +546,6 @@ public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long V
 public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
 public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
 public record UpdateObjectsResponse(Dictionary<string, long> Versions, long MemberSequence, long ServerTimestamp);
+public record CreateObjectResponse(ObjectInfo ObjectInfo, long MemberSequence);
+public record DeleteObjectResponse(bool Success, long MemberSequence);
 public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, Dictionary<string, long> MemberSequences);

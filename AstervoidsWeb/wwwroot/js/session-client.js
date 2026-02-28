@@ -34,7 +34,7 @@ const SessionClient = (function() {
      */
     async function connect() {
         if (connection && connection.state === signalR.HubConnectionState.Connected) {
-            console.log('[SessionClient] Already connected');
+            // console.log('[SessionClient] Already connected');
             return true;
         }
 
@@ -56,7 +56,7 @@ const SessionClient = (function() {
             setupEventHandlers();
 
             await connection.start();
-            console.log('[SessionClient] Connected to session hub');
+            // console.log('[SessionClient] Connected to session hub');
             reconnectAttempts = 0;
 
             if (callbacks.onConnected) {
@@ -80,7 +80,7 @@ const SessionClient = (function() {
         if (connection) {
             try {
                 await connection.stop();
-                console.log('[SessionClient] Disconnected');
+                // console.log('[SessionClient] Disconnected');
             } catch (err) {
                 console.error('[SessionClient] Disconnect error:', err);
             }
@@ -95,19 +95,22 @@ const SessionClient = (function() {
      */
     function setupEventHandlers() {
         connection.onreconnecting(error => {
-            console.log('[SessionClient] Reconnecting...', error);
+            // console.log('[SessionClient] Reconnecting...', error);
         });
 
         connection.onreconnected(connectionId => {
-            console.log('[SessionClient] Reconnected:', connectionId);
+            // console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
+            // Reconcile state — invoke responses for Create/Delete/Update may have been
+            // lost during the reconnection window (OthersInGroup means no broadcast fallback)
+            ObjectSync.triggerReconciliation();
             if (callbacks.onConnected) {
                 callbacks.onConnected();
             }
         });
 
         connection.onclose(error => {
-            console.log('[SessionClient] Connection closed:', error);
+            // console.log('[SessionClient] Connection closed:', error);
             currentSession = null;
             currentMember = null;
             if (callbacks.onDisconnected) {
@@ -117,7 +120,7 @@ const SessionClient = (function() {
 
         // Session events
         connection.on('OnMemberJoined', (memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
-            console.log('[SessionClient] Member joined:', memberInfo);
+            // console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
                 currentSession.members.push(memberInfo);
@@ -128,7 +131,7 @@ const SessionClient = (function() {
         });
 
         connection.on('OnMemberLeft', (info, senderMemberId, memberSequence, serverTimestamp) => {
-            console.log('[SessionClient] Member left:', info);
+            // console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
             if (currentSession && currentSession.members) {
@@ -164,9 +167,9 @@ const SessionClient = (function() {
             }
         });
 
-        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp) => {
+        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
         });
 
@@ -184,7 +187,7 @@ const SessionClient = (function() {
 
         // Session list changed (signal only - fetch data separately)
         connection.on('OnSessionsChanged', () => {
-            console.log('[SessionClient] Sessions changed signal received');
+            // console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
             }
@@ -203,7 +206,7 @@ const SessionClient = (function() {
         try {
             const response = await connection.invoke('CreateSession', aspectRatio);
             if (!response) {
-                console.log('[SessionClient] CreateSession failed - server at capacity');
+                // console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
             }
             
@@ -220,7 +223,7 @@ const SessionClient = (function() {
                 aspectRatio: response.aspectRatio
             };
 
-            console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            // console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
 
             if (callbacks.onSessionCreated) {
                 callbacks.onSessionCreated(currentSession, currentMember);
@@ -247,7 +250,7 @@ const SessionClient = (function() {
         try {
             const response = await connection.invoke('JoinSession', sessionId);
             if (!response) {
-                console.log('[SessionClient] JoinSession failed - session full or already in a session');
+                // console.log('[SessionClient] JoinSession failed - session full or already in a session');
                 return null;
             }
 
@@ -263,7 +266,7 @@ const SessionClient = (function() {
                 role: response.role
             };
 
-            console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            // console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
 
             if (callbacks.onSessionJoined) {
                 callbacks.onSessionJoined(currentSession, currentMember);
@@ -293,7 +296,7 @@ const SessionClient = (function() {
             currentSession = null;
             currentMember = null;
 
-            console.log('[SessionClient] Left session');
+            // console.log('[SessionClient] Left session');
 
             if (callbacks.onSessionLeft) {
                 callbacks.onSessionLeft(leftSession);
@@ -348,7 +351,7 @@ const SessionClient = (function() {
     /**
      * Update multiple objects atomically.
      */
-    async function updateObjects(updates, senderSequence = null) {
+    async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null) {
         if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
             throw new Error('Not connected to session hub');
         }
@@ -357,7 +360,7 @@ const SessionClient = (function() {
         }
 
         try {
-            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now());
+            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
             return response;
         } catch (err) {
             console.error('[SessionClient] Update objects failed:', err);

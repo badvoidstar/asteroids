@@ -133,6 +133,15 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
+    /// <summary>
+    /// Handles object cleanup when a member departs. This is the ONLY path through which
+    /// object ownership changes. Member-scoped objects are deleted; session-scoped objects
+    /// are redistributed via round-robin to remaining members.
+    /// Frontend local-first patterns (deleteObject) and response-first patterns (createObject)
+    /// are safe because they cannot race with this: a member actively creating/deleting
+    /// objects is not departing. If voluntary ownership transfer is ever added, those
+    /// patterns would need to account for concurrent ownership changes.
+    /// </summary>
     public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
     {
         var session = _sessionService.GetSession(sessionId);
