@@ -656,7 +656,7 @@ const ObjectSync = (function() {
     }
 
     let fullSyncCounter = 0;
-    let inFlightCount = 0;
+    let flushInProgress = false;
 
     /**
      * Called once per frame to drive frame-count-based sync.
@@ -707,13 +707,12 @@ const ObjectSync = (function() {
     /**
      * Flush all pending updates to the server.
      * Resolves expectedVersion at flush time from current object state to avoid
-     * stale versions from queue-time capture. Skipped when a prior flush is still
-     * in-flight (backpressure to avoid flooding a congested connection).
+     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
         if (!SessionClient.isInSession()) return;
-        if (inFlightCount > 0) return;
+        if (flushInProgress) return;
 
         let updates;
         if (deltaEncodingEnabled) {
@@ -746,7 +745,7 @@ const ObjectSync = (function() {
 
         if (updates.length === 0) return;
 
-        inFlightCount++;
+        flushInProgress = true;
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
         try {
@@ -779,7 +778,7 @@ const ObjectSync = (function() {
                 callbacks.onSyncError('update', err);
             }
         } finally {
-            inFlightCount--;
+            flushInProgress = false;
         }
     }
 
