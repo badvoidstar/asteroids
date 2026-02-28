@@ -975,7 +975,8 @@
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
-        MAX_EXTRAPOLATION: 0.5         // Max extrapolation time in seconds to prevent overshoot
+        MAX_EXTRAPOLATION: 0.5,        // Max extrapolation time in seconds to prevent overshoot
+        SNAPSHOT_BUFFER_SIZE: 6        // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
     };
 
     // ============================================
@@ -1005,13 +1006,8 @@
         states: new Map(),
         // Map of objectId -> last version fed to interpolation
         lastVersions: new Map(),
-        // Adaptive delay state
-        adaptiveDelay: {
-            packetIntervals: [],   // recent inter-packet intervals (ms)
-            computedDelay: CONFIG.INTERPOLATION_DELAY,
-            lastServerTimestamp: 0, // server-side timestamp of last remote broadcast (ms since epoch)
-            remoteSendInterval: 0  // sender's stated send interval (ms), used as BUF mean term
-        },
+        // Per-member adaptive delay state: Map<memberId, AdaptiveDelayState>
+        memberDelays: new Map(),
         // One-way latency estimation (server→client)
         latency: {
             minOneWay: Infinity,
@@ -1027,47 +1023,58 @@
             alphaDown: 0.1,  // gradual recovery
             initialized: false
         },
+
+        /**
+         * Create a fresh adaptive delay state for a member
+         */
+        createMemberDelay() {
+            return {
+                packetIntervals: [],
+                computedDelay: CONFIG.INTERPOLATION_DELAY,
+                lastServerTimestamp: 0,
+                remoteSendInterval: 0
+            };
+        },
+
+        /**
+         * Get or create adaptive delay state for a member
+         */
+        getMemberDelay(memberId) {
+            let delay = this.memberDelays.get(memberId);
+            if (!delay) {
+                delay = this.createMemberDelay();
+                this.memberDelays.set(memberId, delay);
+            }
+            return delay;
+        },
         
         /**
-         * Update remote object state when sync data received
+         * Update remote object state when sync data received.
+         * Pushes a snapshot into the per-object ring buffer.
          * @param {string} objectId - Object ID
          * @param {object} data - New object data from ObjectSync
+         * @param {string} ownerMemberId - Owner member ID (for per-member delay lookup)
          */
-        updateState(objectId, data) {
+        updateState(objectId, data, ownerMemberId) {
             const now = performance.now();
             const existing = this.states.get(objectId);
+            const snapshot = {
+                data: { ...data },
+                time: now,
+                velocity: { x: data.velocityX || 0, y: data.velocityY || 0 },
+                rotationSpeed: data.rotationSpeed || 0
+            };
             
             if (existing) {
-                // Shift current to previous
-                existing.previous = existing.current;
-                existing.previousTime = existing.currentTime;
-                existing.previousVelocity = existing.velocity;
-                existing.previousRotationSpeed = existing.rotationSpeed;
-                existing.current = { ...data };
-                existing.currentTime = now;
-                existing.velocity = {
-                    x: data.velocityX || 0,
-                    y: data.velocityY || 0
-                };
-                existing.rotationSpeed = data.rotationSpeed || 0;
+                existing.ownerMemberId = ownerMemberId;
+                existing.snapshots.push(snapshot);
+                if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
+                    existing.snapshots.shift();
+                }
             } else {
-                const vel = { x: data.velocityX || 0, y: data.velocityY || 0 };
-                const rotSpd = data.rotationSpeed || 0;
                 this.states.set(objectId, {
-                    current: { ...data },
-                    previous: { ...data },
-                    currentTime: now,
-                    // Seed previousTime one delay-interval behind so interpolation has a
-                    // time span to work with on the very first frame.
-                    // Before: used SYNC_NOMINAL_FRAME_TIME (base send rate), which was wrong
-                    // when adaptive send rate adjusted the actual interval.
-                    // After: uses getDelay() which tracks the actual send rate via adaptive
-                    // delay computation, or falls back to INTERPOLATION_DELAY when disabled.
-                    previousTime: now - this.getDelay(),
-                    velocity: vel,
-                    previousVelocity: vel,
-                    rotationSpeed: rotSpd,
-                    previousRotationSpeed: rotSpd
+                    ownerMemberId: ownerMemberId,
+                    snapshots: [snapshot]
                 });
             }
         },
@@ -1076,7 +1083,7 @@
          * Record arrival of an update packet for adaptive delay calculation.
          * Call once per OnObjectsUpdated broadcast, not per object.
          */
-        recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs) {
+        recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId) {
             const now = Date.now();
             // Server→client latency estimation
             if (serverTimestamp) {
@@ -1104,47 +1111,35 @@
                 // Adapt send rate based on RTT
                 ObjectSync.updateSendRate(r.estimatedRtt);
             }
-            // Adaptive delay jitter tracking — remote broadcasts only.
-            // Own invoke responses (clientTimestamp set) are excluded so the interval
-            // tracker reflects the remote member's actual send cadence, not an
-            // interleaving of two streams at half the real interval.
-            //
-            // The sender's stated send interval (senderSendIntervalMs) is used as the
-            // mean term in the BUF formula. Observed intervals are only used for the
-            // jitter (σ) term. This eliminates the need to infer the send rate from
-            // noisy observations, and avoids idle-gap corruption from delta encoding
-            // suppressing sends when the remote player's objects haven't changed.
-            //
-            // Outlier filtering uses the stated interval as a tight reference: intervals
-            // exceeding 2× the stated interval are idle gaps and are skipped. Without a
-            // stated interval (backward compat), falls back to 3× observed mean or 1s.
+            // Per-member adaptive delay tracking — remote broadcasts only.
+            // Each member gets independent interval tracking, computedDelay, and
+            // remoteSendInterval. This prevents members at different send rates
+            // from contaminating each other's BUF calculations.
             if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
-            if (!clientTimestamp && serverTimestamp) {
-                // Store the sender's stated send interval for the BUF mean term
+            if (!clientTimestamp && serverTimestamp && senderMemberId) {
+                const ad = this.getMemberDelay(senderMemberId);
                 if (senderSendIntervalMs && senderSendIntervalMs > 0) {
-                    this.adaptiveDelay.remoteSendInterval = senderSendIntervalMs;
+                    ad.remoteSendInterval = senderSendIntervalMs;
                 }
-                if (this.adaptiveDelay.lastServerTimestamp > 0) {
-                    const interval = serverTimestamp - this.adaptiveDelay.lastServerTimestamp;
-                    const ad = this.adaptiveDelay;
+                if (ad.lastServerTimestamp > 0) {
+                    const interval = serverTimestamp - ad.lastServerTimestamp;
                     const maxInterval = ad.remoteSendInterval > 0
                         ? 2 * ad.remoteSendInterval
                         : (ad.packetIntervals.length >= CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES
                             ? 3 * (ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length)
                             : 1000);
                     if (interval <= maxInterval) {
-                        this.recordPacketInterval(interval);
+                        this.recordMemberPacketInterval(ad, interval);
                     }
                 }
-                this.adaptiveDelay.lastServerTimestamp = serverTimestamp;
+                ad.lastServerTimestamp = serverTimestamp;
             }
         },
 
         /**
-         * Record a packet interval for adaptive delay calculation
+         * Record a packet interval for a specific member's adaptive delay
          */
-        recordPacketInterval(interval) {
-            const ad = this.adaptiveDelay;
+        recordMemberPacketInterval(ad, interval) {
             ad.packetIntervals.push(interval);
             if (ad.packetIntervals.length > CONFIG.ADAPTIVE_DELAY_SAMPLES) {
                 ad.packetIntervals.shift();
@@ -1154,21 +1149,6 @@
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - observedMean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
 
-                // The adaptive delay has two components:
-                //   1. Send interval buffer (mean): keeps the render point within the interpolation
-                //      window between two received samples. Without this, we extrapolate.
-                //   2. Jitter buffer (JITTER_MULT × σ): covers timing variance so late packets
-                //      don't push us into extrapolation unexpectedly (2σ ≈ 95% coverage).
-                //
-                // The mean term uses the sender's stated send interval (remoteSendInterval)
-                // when available, falling back to the observed mean for backward compatibility.
-                // This decouples the send rate estimate from interval noise and idle gaps.
-                // The σ term always uses observed intervals to capture actual arrival jitter.
-                //
-                // networkFactor scales the mean term by network quality (RTT relative to send
-                // interval). On fast networks, accepts brief extrapolation at the tail of each
-                // interval since the next packet confirms quickly. On slow networks, retains
-                // the full buffer.
                 const mean = ad.remoteSendInterval > 0 ? ad.remoteSendInterval : observedMean;
                 const rtt = this.rtt.estimatedRtt || 0;
                 const networkFactor = Math.min(1.0,
@@ -1181,10 +1161,25 @@
         },
 
         /**
-         * Get the current interpolation delay (adaptive or fixed)
+         * Get interpolation delay for a specific member.
+         * Returns the member's computed delay, or INTERPOLATION_DELAY if unknown.
+         */
+        getDelayForMember(memberId) {
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return CONFIG.INTERPOLATION_DELAY;
+            const ad = memberId ? this.memberDelays.get(memberId) : null;
+            return ad ? ad.computedDelay : CONFIG.INTERPOLATION_DELAY;
+        },
+
+        /**
+         * Get the current interpolation delay (max across all members for HUD display)
          */
         getDelay() {
-            return CONFIG.ADAPTIVE_DELAY_ENABLED ? this.adaptiveDelay.computedDelay : CONFIG.INTERPOLATION_DELAY;
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return CONFIG.INTERPOLATION_DELAY;
+            let maxDelay = CONFIG.INTERPOLATION_DELAY;
+            for (const ad of this.memberDelays.values()) {
+                if (ad.computedDelay > maxDelay) maxDelay = ad.computedDelay;
+            }
+            return maxDelay;
         },
 
         /**
@@ -1202,53 +1197,80 @@
         },
         
         /**
-         * Get interpolated position for rendering
+         * Get interpolated position for rendering.
+         * Bracket-searches the ring buffer for the two snapshots surrounding targetTime,
+         * then Hermite-interpolates between them.
          * @param {string} objectId - Object ID
          * @param {number} renderTime - Current render timestamp
          * @returns {object|null} Interpolated state or null if not found
          */
         getInterpolated(objectId, renderTime) {
             const state = this.states.get(objectId);
-            if (!state) return null;
-            
+            if (!state || state.snapshots.length === 0) return null;
+
+            const snapshots = state.snapshots;
+            const latest = snapshots[snapshots.length - 1];
+
             if (!CONFIG.INTERPOLATION_ENABLED) {
-                return state.current;
+                return latest.data;
             }
-            
-            const timeDiff = state.currentTime - state.previousTime;
-            if (timeDiff <= 0) return state.current;
-            
-            // Clamp timeDiff to prevent burst arrivals from collapsing the interval.
-            // Before: used CONFIG.SYNC_NOMINAL_FRAME_TIME (the configured base send rate),
-            // which was wrong when adaptive send rate adjusted the actual send interval.
-            // After: uses the adaptive delay's computed value as proxy for actual send rate,
-            // falling back to nominal when adaptive delay is disabled.
-            const minTimeDiff = this.getDelay() * 0.5;
-            const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
-            
-            const targetTime = renderTime - this.getDelay();
-            const t = (targetTime - state.previousTime) / effectiveTimeDiff;
-            
-            if (t <= 0) {
-                return state.previous;
-            } else if (t <= 1) {
-                // Snap check: if positions are too far apart, skip interpolation
-                if (this.shouldSnap(state.previous, state.current)) {
-                    return state.current;
-                }
-                return this.hermite(state, t, effectiveTimeDiff);
-            } else {
-                // Extrapolate using velocity, capped to prevent overshoot
-                const extraTime = Math.min((targetTime - state.currentTime) / 1000, CONFIG.MAX_EXTRAPOLATION);
+
+            // Single snapshot — no interpolation possible yet
+            if (snapshots.length === 1) {
+                return latest.data;
+            }
+
+            const delay = this.getDelayForMember(state.ownerMemberId);
+            const targetTime = renderTime - delay;
+
+            // Before the oldest snapshot: return oldest (clamped)
+            if (targetTime <= snapshots[0].time) {
+                return snapshots[0].data;
+            }
+
+            // After the newest snapshot: extrapolate with velocity cap
+            if (targetTime >= latest.time) {
+                const extraTime = Math.min((targetTime - latest.time) / 1000, CONFIG.MAX_EXTRAPOLATION);
                 const refDim = getReferenceDimension();
-                const r = this.getBoundingRadius(state.current);
+                const r = this.getBoundingRadius(latest.data);
                 return {
-                    ...state.current,
-                    x: wrapNormalized(state.current.x + state.velocity.x * (refDim / getGameWidth()) * extraTime, wrapMarginX(r)),
-                    y: wrapNormalized(state.current.y + state.velocity.y * (refDim / getGameHeight()) * extraTime, wrapMarginY(r)),
-                    angle: state.current.angle + (state.current.rotationSpeed || 0) * CONFIG.TARGET_FPS * extraTime
+                    ...latest.data,
+                    x: wrapNormalized(latest.data.x + latest.velocity.x * (refDim / getGameWidth()) * extraTime, wrapMarginX(r)),
+                    y: wrapNormalized(latest.data.y + latest.velocity.y * (refDim / getGameHeight()) * extraTime, wrapMarginY(r)),
+                    angle: latest.data.angle + (latest.rotationSpeed || 0) * CONFIG.TARGET_FPS * extraTime
                 };
             }
+
+            // Bracket search: find [i, i+1] where snapshots[i].time <= targetTime < snapshots[i+1].time
+            for (let i = snapshots.length - 2; i >= 0; i--) {
+                if (targetTime >= snapshots[i].time) {
+                    const prev = snapshots[i];
+                    const curr = snapshots[i + 1];
+                    const timeDiff = curr.time - prev.time;
+                    if (timeDiff <= 0) return curr.data;
+
+                    const minTimeDiff = delay * 0.5;
+                    const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
+                    const t = (targetTime - prev.time) / effectiveTimeDiff;
+
+                    if (this.shouldSnap(prev.data, curr.data)) {
+                        return curr.data;
+                    }
+
+                    const pseudoState = {
+                        previous: prev.data,
+                        previousVelocity: prev.velocity,
+                        previousRotationSpeed: prev.rotationSpeed,
+                        current: curr.data,
+                        velocity: curr.velocity,
+                        rotationSpeed: curr.rotationSpeed
+                    };
+                    return this.hermite(pseudoState, Math.min(t, 1), effectiveTimeDiff);
+                }
+            }
+
+            // Fallback (should not reach given checks above)
+            return latest.data;
         },
 
         /**
@@ -1362,15 +1384,19 @@
         clear() {
             this.states.clear();
             this.lastVersions.clear();
-            this.adaptiveDelay.packetIntervals = [];
-            this.adaptiveDelay.computedDelay = CONFIG.INTERPOLATION_DELAY;
-            this.adaptiveDelay.lastServerTimestamp = 0;
-            this.adaptiveDelay.remoteSendInterval = 0;
+            this.memberDelays.clear();
             this.latency.minOneWay = Infinity;
             this.latency.estimatedLatency = 0;
             this.latency.samples = [];
             this.rtt.estimatedRtt = 0;
             this.rtt.initialized = false;
+        },
+
+        /**
+         * Remove a member's adaptive delay tracking (on member departure)
+         */
+        removeMember(memberId) {
+            this.memberDelays.delete(memberId);
         }
     };
 
@@ -2497,7 +2523,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -2667,7 +2693,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -2776,7 +2802,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -4243,7 +4269,7 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
-                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs));
+                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId));
                 // Detect GameState creation (replaces onGameStarted event)
                 ObjectSync.on('onObjectCreated', (obj) => {
                     if (obj.data?.type === OBJECT_TYPES.GAME_STATE && sessionPicker.currentSessionId) {
@@ -4613,6 +4639,8 @@
     // Handle member leaving - clean up their objects
     SessionClient.on('onMemberLeft', (info, senderMemberId, memberSequence) => {
         ObjectSync.trackEventSequence(senderMemberId, memberSequence);
+        // Clean up per-member adaptive delay tracking
+        RemoteObjects.removeMember(info.memberId);
         // Handle object cleanup from member departure
         if (info.deletedObjectIds && info.deletedObjectIds.length > 0) {
             ObjectSync.handleMemberDeparture(info.deletedObjectIds);

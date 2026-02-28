@@ -325,7 +325,7 @@ const ObjectSync = (function() {
         
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
-            callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs);
+            callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
