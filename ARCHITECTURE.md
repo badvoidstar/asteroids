@@ -163,7 +163,7 @@ flowchart TB
     L3 -->|Yes| L4
     L4 -->|No| L9
     L4 -->|Yes| L5 --> L6
-    L6 -->|No (race: already promoted)| L9
+    L6 -->|"No — race: already promoted"| L9
     L6 -->|Yes| L7 --> L8 --> L9
     L9 -->|Yes| L10 --> L11
     L9 -->|No| L11
