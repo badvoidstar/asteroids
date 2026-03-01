@@ -1082,9 +1082,15 @@
         /**
          * Record arrival of an update packet for adaptive delay calculation.
          * Call once per OnObjectsUpdated broadcast, not per object.
+         * @param {number} serverTimestamp - Server-side timestamp (ms since epoch)
+         * @param {number|null} clientTimestamp - Echoed client timestamp for RTT (null for remote broadcasts)
+         * @param {number} senderSendIntervalMs - Sender's current send interval (ms)
+         * @param {string} senderMemberId - Sender's member ID
+         * @param {number} [responseTimestamp] - Pre-captured Date.now() at response arrival
+         *   (excludes client-side processing from RTT sample). Falls back to Date.now().
          */
-        recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId) {
-            const now = Date.now();
+        recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp) {
+            const now = responseTimestamp || Date.now();
             // Server→client latency estimation
             if (serverTimestamp) {
                 const oneWay = now - serverTimestamp;
@@ -4281,7 +4287,7 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
-                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId));
+                ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp));
                 // Detect GameState creation (replaces onGameStarted event)
                 ObjectSync.on('onObjectCreated', (obj) => {
                     if (obj.data?.type === OBJECT_TYPES.GAME_STATE && sessionPicker.currentSessionId) {
