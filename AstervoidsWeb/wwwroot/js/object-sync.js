@@ -662,13 +662,20 @@ const ObjectSync = (function() {
      * Called once per frame to drive frame-count-based sync.
      * Recalculates the send threshold from the current frame time,
      * increments the frame counter, and flushes when threshold is reached.
+     *
+     * Backpressure: when flushInProgress the counter caps at sendThreshold
+     * instead of resetting. This way the very next tick after the in-flight
+     * invoke completes will trigger a flush, preventing the effective send
+     * rate from being halved when RTT ≈ nominalFrameTime.
      * @param {number} frameTimeSec - Elapsed time for this frame in seconds
      */
     function tick(frameTimeSec) {
         const clampedFrameTime = Math.max(frameTimeSec, minFrameTime);
         sendThreshold = Math.max(1, Math.round(nominalFrameTime / clampedFrameTime));
-        frameCounter++;
-        if (frameCounter >= sendThreshold) {
+        if (frameCounter < sendThreshold) {
+            frameCounter++;
+        }
+        if (frameCounter >= sendThreshold && !flushInProgress) {
             frameCounter = 0;
             flushUpdates();
         }
@@ -750,6 +757,10 @@ const ObjectSync = (function() {
         const clientTimestamp = Date.now();
         try {
             const response = await SessionClient.updateObjects(updates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
+            // Capture response timestamp immediately — before processing
+            // versions or sequences — so RTT reflects only the network
+            // round-trip and not client-side processing overhead.
+            const responseTimestamp = Date.now();
             if (response) {
                 // Apply server-assigned versions to local objects
                 if (response.versions) {
@@ -767,9 +778,10 @@ const ObjectSync = (function() {
                         trackMemberSequence(myId, response.memberSequence);
                     }
                 }
-                // RTT from request/response round-trip
+                // RTT from request/response round-trip (uses responseTimestamp
+                // captured above to exclude local processing from the sample)
                 if (response.serverTimestamp && callbacks.onBatchReceived) {
-                    callbacks.onBatchReceived(response.serverTimestamp, clientTimestamp);
+                    callbacks.onBatchReceived(response.serverTimestamp, clientTimestamp, undefined, undefined, responseTimestamp);
                 }
             }
         } catch (err) {

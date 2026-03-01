@@ -527,7 +527,7 @@ flowchart TB
 flowchart LR
     subgraph "RTT Estimation"
         SAMPLE["RTT sample =<br/>Date.now() - clientTimestamp"]
-        EMA["Asymmetric EMA:<br/>spike: α=0.6 (fast up)<br/>decay: α=0.1 (slow down)<br/>rtt += α × (sample - rtt)"]
+        EMA["Asymmetric EMA:<br/>spike: α=0.3 (fast up)<br/>decay: α=0.1 (slow down)<br/>rtt += α × (sample - rtt)"]
         SAMPLE --> EMA
     end
 
@@ -538,7 +538,7 @@ flowchart LR
     end
 
     subgraph "Backpressure"
-        BP["inFlightCount > 0?<br/>→ skip this flush<br/>(instant congestion signal)"]
+        BP["flushInProgress?<br/>→ cap frame counter at threshold<br/>→ flush on next tick after completion<br/>(instant congestion signal)"]
     end
 
     EMA --> FORMULA
