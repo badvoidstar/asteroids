@@ -306,7 +306,13 @@ public class SessionHub : Hub
         {
             memberSequence = NextMemberSequence(member);
             serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var updateInfos = updatedObjects.Select(o => new ObjectUpdateInfo(o.Id, o.Data, o.Version)).ToList();
+            var requestDataByObjectId = authorizedUpdates
+                .GroupBy(u => u.ObjectId)
+                .ToDictionary(g => g.Key, g => g.Last().Data);
+            var updateInfos = updatedObjects
+                .Where(o => requestDataByObjectId.ContainsKey(o.Id))
+                .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version))
+                .ToList();
             // Broadcast to other members only — sender gets versions/RTT from the response
             await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
                 updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs);
