@@ -686,7 +686,7 @@ const ObjectSync = (function() {
      * Returns only the fields that changed, or null if nothing changed.
      * Note: 'type' is NOT included in deltas — it never changes after creation and
      * the backend preserves it in the stored object state. The broadcast to other
-     * members sends the full merged state from the backend, so receivers always
+     * members forwards the client's delta data as-is, so receivers always
      * have 'type' from the original OnObjectCreated event.
      */
     function computeDelta(objectId, data, forceFullSync) {
