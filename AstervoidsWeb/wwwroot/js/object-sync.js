@@ -337,8 +337,10 @@ const ObjectSync = (function() {
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
                     
-                    // Update type index if type changed
-                    updateTypeIndex(existing, oldType, update.data?.type);
+                    // Update type index if type changed (only when type is present in delta)
+                    if (update.data?.type !== undefined) {
+                        updateTypeIndex(existing, oldType, update.data.type);
+                    }
 
                     if (callbacks.onObjectUpdated) {
                         callbacks.onObjectUpdated(existing);
