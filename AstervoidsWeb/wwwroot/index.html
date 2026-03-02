@@ -1008,10 +1008,10 @@
         lastVersions: new Map(),
         // Per-member adaptive delay state: Map<memberId, AdaptiveDelayState>
         memberDelays: new Map(),
-        // One-way latency estimation (server→client)
-        latency: {
+        // One-way jitter estimation (server→client)
+        jitter: {
             minOneWay: Infinity,
-            estimatedLatency: 0,
+            estimatedJitter: 0,
             samples: [],
             maxSamples: 30
         },
@@ -1091,17 +1091,17 @@
          */
         recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp) {
             const now = responseTimestamp || Date.now();
-            // Server→client latency estimation
+            // Server→client jitter estimation
             if (serverTimestamp) {
                 const oneWay = now - serverTimestamp;
-                const lat = this.latency;
-                lat.samples.push(oneWay);
-                if (lat.samples.length > lat.maxSamples) {
-                    lat.samples.shift();
+                const jit = this.jitter;
+                jit.samples.push(oneWay);
+                if (jit.samples.length > jit.maxSamples) {
+                    jit.samples.shift();
                 }
-                lat.minOneWay = Math.min(lat.minOneWay, oneWay);
-                const mean = lat.samples.reduce((s, v) => s + v, 0) / lat.samples.length;
-                lat.estimatedLatency = Math.max(0, mean - lat.minOneWay);
+                jit.minOneWay = Math.min(jit.minOneWay, oneWay);
+                const mean = jit.samples.reduce((s, v) => s + v, 0) / jit.samples.length;
+                jit.estimatedJitter = Math.max(0, mean - jit.minOneWay);
             }
             // RTT estimation (only for broadcasts echoing our own timestamp)
             if (clientTimestamp) {
@@ -1196,10 +1196,10 @@
         },
 
         /**
-         * Get the estimated network latency (queuing delay above baseline)
+         * Get the estimated network jitter (queuing delay above baseline)
          */
-        getLatency() {
-            return this.latency.estimatedLatency;
+        getJitter() {
+            return this.jitter.estimatedJitter;
         },
 
         /**
@@ -1403,9 +1403,9 @@
             this.states.clear();
             this.lastVersions.clear();
             this.memberDelays.clear();
-            this.latency.minOneWay = Infinity;
-            this.latency.estimatedLatency = 0;
-            this.latency.samples = [];
+            this.jitter.minOneWay = Infinity;
+            this.jitter.estimatedJitter = 0;
+            this.jitter.samples = [];
             this.rtt.estimatedRtt = 0;
             this.rtt.initialized = false;
         },
@@ -3581,7 +3581,7 @@
         if (netQuality) {
             if (isSessionMode()) {
                 const delayMs = Math.round(RemoteObjects.getDelay());
-                const latencyMs = Math.round(RemoteObjects.getLatency());
+                const jitterMs = Math.round(RemoteObjects.getJitter());
                 const rttMs = Math.round(RemoteObjects.getRtt());
                 let color;
                 if (rttMs <= 64) color = '#00ff00';
@@ -3591,7 +3591,7 @@
                 const myMemberId = SessionClient.getCurrentMember()?.id;
                 const allObjs = ObjectSync.getObjectCount();
                 const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
-                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | LAT ${latencyMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs} | REC ${ObjectSync.getReconciliationCount()}`;
+                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | JIT ${jitterMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs} | REC ${ObjectSync.getReconciliationCount()}`;
                 netQuality.style.color = color;
                 netQuality.style.display = '';
             } else {
