@@ -690,11 +690,14 @@ const ObjectSync = (function() {
      * the backend preserves it in the stored object state. The broadcast to other
      * members forwards the client's delta data as-is, so receivers always
      * have 'type' from the original OnObjectCreated event.
+     *
+     * IMPORTANT: lastSentData is NOT updated here. It is only updated after the
+     * server confirms the batch, so that rejected or failed deltas are re-included
+     * in the next flush. See confirmSentDeltas().
      */
     function computeDelta(objectId, data, forceFullSync) {
         const prev = lastSentData.get(objectId);
         if (!prev || forceFullSync) {
-            lastSentData.set(objectId, { ...data });
             return { ...data };
         }
 
@@ -709,14 +712,37 @@ const ObjectSync = (function() {
 
         if (!hasChanges) return null;
 
-        Object.assign(prev, delta);
         return delta;
+    }
+
+    /**
+     * Confirm that deltas were accepted by the server for the given object IDs.
+     * Updates lastSentData only for confirmed objects so that rejected fields
+     * are re-sent on the next flush.
+     * @param {Map<string, object>} sentDeltas - Map of objectId → delta data that was sent
+     * @param {Set<string>} confirmedIds - Set of object IDs confirmed by the server
+     */
+    function confirmSentDeltas(sentDeltas, confirmedIds) {
+        for (const [objectId, delta] of sentDeltas) {
+            if (!confirmedIds.has(objectId)) continue;
+            const prev = lastSentData.get(objectId);
+            if (prev) {
+                Object.assign(prev, delta);
+            } else {
+                lastSentData.set(objectId, { ...delta });
+            }
+        }
     }
 
     /**
      * Flush all pending updates to the server.
      * Resolves expectedVersion at flush time from current object state to avoid
      * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
+     *
+     * Delta encoding defers lastSentData updates until the server confirms the batch.
+     * On partial success, only confirmed objects update their delta baseline.
+     * On complete failure (network error), no baselines are updated, so all
+     * changed fields are re-included in the next flush.
      */
     async function flushUpdates() {
         if (pendingUpdates.length === 0) return;
@@ -724,11 +750,14 @@ const ObjectSync = (function() {
         if (flushInProgress) return;
 
         let updates;
+        // Track deltas sent per object for deferred confirmation
+        let sentDeltas = null;
         if (deltaEncodingEnabled) {
             const forceFullSync = (++fullSyncCounter >= FULL_SYNC_INTERVAL);
             if (forceFullSync) fullSyncCounter = 0;
 
             updates = [];
+            sentDeltas = new Map();
             for (const update of pendingUpdates) {
                 const delta = computeDelta(update.objectId, update.data, forceFullSync);
                 if (delta) {
@@ -738,6 +767,7 @@ const ObjectSync = (function() {
                         data: delta,
                         expectedVersion: obj ? obj.version : undefined
                     });
+                    sentDeltas.set(update.objectId, delta);
                 }
             }
         } else {
@@ -772,6 +802,11 @@ const ObjectSync = (function() {
                             obj.version = version;
                         }
                     }
+                    // Confirm delta baselines only for objects the server accepted
+                    if (sentDeltas) {
+                        const confirmedIds = new Set(Object.keys(response.versions));
+                        confirmSentDeltas(sentDeltas, confirmedIds);
+                    }
                 }
                 // Track own member sequence from response
                 if (response.memberSequence > 0) {
@@ -786,6 +821,8 @@ const ObjectSync = (function() {
                     callbacks.onBatchReceived(response.serverTimestamp, clientTimestamp, undefined, undefined, responseTimestamp);
                 }
             }
+            // If response is null/undefined (server returned null), sentDeltas are
+            // NOT confirmed — all fields will be re-sent on next flush.
         } catch (err) {
             console.error('[ObjectSync] Batch update failed:', err);
             if (callbacks.onSyncError) {
@@ -924,14 +961,20 @@ const ObjectSync = (function() {
 
     /**
      * Handle ownership migration for objects (called when a member leaves and objects are migrated).
-     * @param {Array<{objectId: string, newOwnerId: string}>} migratedObjects - Objects with their new owners
+     * Uses server-authoritative version to prevent drift from blind local increments.
+     * @param {Array<{objectId: string, newOwnerId: string, newVersion: number}>} migratedObjects - Objects with their new owners and versions
      */
     function handleOwnershipMigration(migratedObjects) {
         for (const migration of migratedObjects) {
             const obj = objects.get(migration.objectId);
             if (obj) {
                 obj.ownerMemberId = migration.newOwnerId;
-                obj.version++;
+                if (migration.newVersion != null) {
+                    obj.version = migration.newVersion;
+                } else {
+                    // Fallback for backward compatibility
+                    obj.version++;
+                }
             }
         }
     }

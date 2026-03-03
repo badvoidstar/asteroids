@@ -186,7 +186,7 @@ public class ObjectService : IObjectService
                 obj.OwnerMemberId = newOwnerId;
                 obj.Version++;
                 obj.UpdatedAt = DateTime.UtcNow;
-                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId));
+                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version));
             }
         }
 

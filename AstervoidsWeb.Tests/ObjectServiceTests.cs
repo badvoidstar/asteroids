@@ -460,4 +460,101 @@ public class ObjectServiceTests
         migratedObj!.OwnerMemberId.Should().Be(server.Id);
         _objectService.GetSessionObjects(session.Id).Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(1);
     }
+
+    [Fact]
+    public void HandleMemberDeparture_MigratedObjects_ShouldIncludeNewVersion()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var server = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+        var client = joinResult.Member!;
+
+        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid", ["x"] = 0.5
+        });
+
+        // Update the object a few times to advance the version
+        _objectService.UpdateObject(session.Id, asteroid!.Id, new Dictionary<string, object?> { ["x"] = 0.6 });
+        _objectService.UpdateObject(session.Id, asteroid.Id, new Dictionary<string, object?> { ["x"] = 0.7 });
+
+        // Act — client leaves
+        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+
+        // Assert — migration should include the version AFTER the migration increment
+        var migration = departure.MigratedObjects.First(m => m.ObjectId == asteroid.Id);
+        var serverObj = _objectService.GetObject(session.Id, asteroid.Id);
+        migration.NewVersion.Should().Be(serverObj!.Version);
+        migration.NewVersion.Should().Be(4); // v1 (create) + v2 (update1) + v3 (update2) + v4 (migration)
+    }
+
+    [Fact]
+    public void HandleMemberDeparture_MultipleObjectsMigrated_EachHasCorrectVersion()
+    {
+        // Arrange
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var server = result.Creator!;
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+        var client = joinResult.Member!;
+
+        var obj1 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid"
+        });
+        // Update obj1 twice → version 3
+        _objectService.UpdateObject(session.Id, obj1!.Id, new Dictionary<string, object?> { ["x"] = 1 });
+        _objectService.UpdateObject(session.Id, obj1.Id, new Dictionary<string, object?> { ["x"] = 2 });
+
+        var obj2 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid"
+        });
+        // obj2 stays at version 1 (no updates)
+
+        // Act
+        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+
+        // Assert — each migration carries the post-increment version
+        var m1 = departure.MigratedObjects.First(m => m.ObjectId == obj1.Id);
+        var m2 = departure.MigratedObjects.First(m => m.ObjectId == obj2.Id);
+        m1.NewVersion.Should().Be(4); // 1 (create) + 2 updates + 1 migration = 4
+        m2.NewVersion.Should().Be(2); // 1 (create) + 1 migration = 2
+    }
+
+    [Fact]
+    public void UpdateObjects_WithVersionMismatch_ShouldPartiallySucceed()
+    {
+        // Arrange — simulates version drift where one object's version has advanced
+        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var session = result.Session!;
+        var creator = result.Creator!;
+        var obj1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+        var obj2 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+
+        // Advance obj2's version by updating it directly
+        _objectService.UpdateObject(session.Id, obj2!.Id, new Dictionary<string, object?> { ["x"] = 50 });
+        // obj2 is now at version 2
+
+        var updates = new List<ObjectUpdate>
+        {
+            new(obj1!.Id, new Dictionary<string, object?> { ["x"] = 100 }, ExpectedVersion: 1), // correct version
+            new(obj2.Id, new Dictionary<string, object?> { ["x"] = 200 }, ExpectedVersion: 1)   // stale version (should be 2)
+        };
+
+        // Act
+        var results = _objectService.UpdateObjects(session.Id, updates).ToList();
+
+        // Assert — only obj1 should be updated; obj2 rejected due to version mismatch
+        results.Should().HaveCount(1);
+        results[0].Id.Should().Be(obj1.Id);
+        results[0].Data["x"].Should().Be(100);
+
+        // obj2 should remain unchanged
+        var obj2State = _objectService.GetObject(session.Id, obj2.Id);
+        obj2State!.Data["x"].Should().Be(50);
+        obj2State.Version.Should().Be(2);
+    }
 }
