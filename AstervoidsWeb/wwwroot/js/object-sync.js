@@ -720,11 +720,11 @@ const ObjectSync = (function() {
      * Updates lastSentData only for confirmed objects so that rejected fields
      * are re-sent on the next flush.
      * @param {Map<string, object>} sentDeltas - Map of objectId → delta data that was sent
-     * @param {Set<string>} confirmedIds - Set of object IDs confirmed by the server
+     * @param {object} confirmedVersions - Server response versions map (objectId → version)
      */
-    function confirmSentDeltas(sentDeltas, confirmedIds) {
+    function confirmSentDeltas(sentDeltas, confirmedVersions) {
         for (const [objectId, delta] of sentDeltas) {
-            if (!confirmedIds.has(objectId)) continue;
+            if (confirmedVersions[objectId] === undefined) continue;
             const prev = lastSentData.get(objectId);
             if (prev) {
                 Object.assign(prev, delta);
@@ -804,8 +804,7 @@ const ObjectSync = (function() {
                     }
                     // Confirm delta baselines only for objects the server accepted
                     if (sentDeltas) {
-                        const confirmedIds = new Set(Object.keys(response.versions));
-                        confirmSentDeltas(sentDeltas, confirmedIds);
+                        confirmSentDeltas(sentDeltas, response.versions);
                     }
                 }
                 // Track own member sequence from response
@@ -969,12 +968,7 @@ const ObjectSync = (function() {
             const obj = objects.get(migration.objectId);
             if (obj) {
                 obj.ownerMemberId = migration.newOwnerId;
-                if (migration.newVersion != null) {
-                    obj.version = migration.newVersion;
-                } else {
-                    // Fallback for backward compatibility
-                    obj.version++;
-                }
+                obj.version = migration.newVersion;
             }
         }
     }
