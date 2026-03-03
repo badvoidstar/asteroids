@@ -66,8 +66,11 @@ public record ObjectUpdate(
 
 /// <summary>
 /// Represents a single object migration (object reassigned to a new owner).
+/// Includes the new version so clients can set it directly rather than
+/// guessing with a local increment (which can drift if the client's
+/// version was already stale before the migration).
 /// </summary>
-public record ObjectMigration(Guid ObjectId, Guid NewOwnerId);
+public record ObjectMigration(Guid ObjectId, Guid NewOwnerId, long NewVersion);
 
 /// <summary>
 /// Result of handling a member's departure from a session.
