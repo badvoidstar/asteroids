@@ -85,7 +85,7 @@ const ObjectSync = (function() {
     let deltaEncodingEnabled = false;
     
     // Full-state sync interval (frames at nominal rate)
-    const FULL_SYNC_INTERVAL = 60;
+    const FULL_SYNC_INTERVAL = 6000;
     
     // Frame-count-based sync settings
     let nominalFrameTime = 1 / 30;  // target send interval in seconds
