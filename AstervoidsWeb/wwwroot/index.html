@@ -80,13 +80,6 @@
             pointer-events: none;
         }
 
-        /* Network quality indicator */
-        #net-quality {
-            position: absolute;
-            pointer-events: none;
-            font-family: 'Courier New', monospace;
-        }
-
         /* Pause menu overlay */
         #pause-menu {
             position: absolute;
@@ -491,9 +484,6 @@
             <span id="wave">Wave: 1</span>
             <span id="lives">Lives: 3</span>
         </div>
-        
-        <!-- Network quality indicator -->
-        <div id="net-quality" style="display: none;"></div>
         
         <!-- Instructions: control hints -->
         <div id="instructions">
@@ -1606,17 +1596,6 @@
             hud.style.fontSize = `${Math.round(Math.min(vp.width, vp.height) * 0.035)}px`;
         }
         
-        // Position network quality indicator at bottom of viewport
-        const netQuality = document.getElementById('net-quality');
-        if (netQuality) {
-            const vp = game.viewport;
-            const padding = Math.round(vp.height * 0.015);
-            const fontSize = Math.round(Math.min(vp.width, vp.height) * 0.025);
-            netQuality.style.bottom = `${(newHeight - vp.y - vp.height) + padding}px`;
-            netQuality.style.left = `${vp.x + padding}px`;
-            netQuality.style.fontSize = `${fontSize}px`;
-        }
-        
         // No need to scale entity positions - they use normalized coordinates (0-1)
         // The conversion functions (fromNormalizedX, etc.) handle the mapping to pixels
     }
@@ -2373,6 +2352,9 @@
     const scoreDisplay = document.getElementById('score');
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
+
+    // BroadcastChannel for sending debug metrics to /debug page
+    const debugChannel = new BroadcastChannel('astervoids-debug');
 
     // Game state object
     const game = {
@@ -3615,27 +3597,30 @@
             }
         }
         
-        // Update network quality indicator (bottom row)
-        const netQuality = document.getElementById('net-quality');
-        if (netQuality) {
-            if (isSessionMode()) {
-                const delayMs = Math.round(RemoteObjects.getDelay());
-                const jitterMs = Math.round(RemoteObjects.getJitter());
-                const rttMs = Math.round(RemoteObjects.getRtt());
-                let color;
-                if (rttMs <= 64) color = '#00ff00';
-                else if (rttMs <= 128) color = '#ffff00';
-                else color = '#ff0000';
-                const sendMs = Math.round(1000 / ObjectSync.getSendRate());
-                const myMemberId = SessionClient.getCurrentMember()?.id;
-                const allObjs = ObjectSync.getObjectCount();
-                const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
-                netQuality.textContent = `RTT ${rttMs}ms | TX ${sendMs}ms | JIT ${jitterMs}ms | BUF ${delayMs}ms | OBJs ${ownedObjs}/${allObjs} | REC ${ObjectSync.getReconciliationCount()}`;
-                netQuality.style.color = color;
-                netQuality.style.display = '';
-            } else {
-                netQuality.style.display = 'none';
+        // Broadcast debug metrics to /debug page via BroadcastChannel
+        if (isSessionMode()) {
+            const myMemberId = SessionClient.getCurrentMember()?.id;
+            const allObjs = ObjectSync.getObjectCount();
+            const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
+            const memberMetrics = {};
+            for (const [memberId, ad] of RemoteObjects.memberDelays) {
+                memberMetrics[memberId] = {
+                    remoteSendInterval: Math.round(ad.remoteSendInterval),
+                    computedDelay: Math.round(ad.computedDelay)
+                };
             }
+            debugChannel.postMessage({
+                rtt: Math.round(RemoteObjects.getRtt()),
+                tx: Math.round(1000 / ObjectSync.getSendRate()),
+                jitter: Math.round(RemoteObjects.getJitter()),
+                buf: Math.round(RemoteObjects.getDelay()),
+                ownedObjs,
+                totalObjs: allObjs,
+                reconciliationCount: ObjectSync.getReconciliationCount(),
+                sessionName: game.sessionInfo?.name || '',
+                myMemberId: myMemberId || '',
+                members: memberMetrics
+            });
         }
     }
 
