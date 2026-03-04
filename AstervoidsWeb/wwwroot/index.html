@@ -2904,8 +2904,10 @@
         if (!isSessionMode() || !isGameStateOwner() || !game.multiplayer.gameStateObjectId) return;
         
         const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
-        const processedHits = (gsObj?.data?.processedHits) || {};
-        const processedScores = (gsObj?.data?.processedScores) || {};
+        // Spread into new objects so delta encoding detects in-place mutations
+        // (computeDelta uses shallow reference comparison — same ref ≠ change detected)
+        const processedHits = { ...(gsObj?.data?.processedHits || {}) };
+        const processedScores = { ...(gsObj?.data?.processedScores || {}) };
         let groupScore = gsObj?.data?.groupScore || 0;
         
         // Accumulate score deltas from all ships (survives member departure)
@@ -2940,7 +2942,7 @@
         
         // Process new player entries — award an extra life for each new joiner
         // Done AFTER hit processing so that game-over (lives=0) takes priority
-        const processedEntries = (gsObj?.data?.processedEntries) || {};
+        const processedEntries = { ...(gsObj?.data?.processedEntries || {}) };
         for (const ship of shipObjects) {
             const shipId = ship.id;
             if (!processedEntries[shipId]) {
