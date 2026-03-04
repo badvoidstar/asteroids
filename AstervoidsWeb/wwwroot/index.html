@@ -2910,6 +2910,12 @@
         const processedScores = { ...(gsObj?.data?.processedScores || {}) };
         let groupScore = gsObj?.data?.groupScore || 0;
         
+        // Read lives from gsObj.data (same source as processedHits/processedEntries)
+        // so that they are always from the same sync point. Using game.lives would
+        // be stale if a remote delta arrived between the last updateGameStateFromSync()
+        // and an ownership migration — causing incorrect lives on the new owner.
+        let lives = gsObj?.data?.lives ?? game.lives;
+        
         // Accumulate score deltas from all ships (survives member departure)
         const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
         for (const ship of shipObjects) {
@@ -2931,10 +2937,10 @@
             const lastProcessed = processedHits[shipId] || 0;
             const newHits = hitCount - lastProcessed;
             if (newHits > 0) {
-                game.lives -= newHits;
+                lives -= newHits;
                 processedHits[shipId] = hitCount;
-                if (game.lives <= 0) {
-                    game.lives = 0;
+                if (lives <= 0) {
+                    lives = 0;
                     AudioSystem.beat.stop();
                 }
             }
@@ -2947,18 +2953,21 @@
             const shipId = ship.id;
             if (!processedEntries[shipId]) {
                 processedEntries[shipId] = true;
-                if (game.lives > 0) {
-                    game.lives += 1;
+                if (lives > 0) {
+                    lives += 1;
                 }
             }
         }
+        
+        // Write back to game.lives for local rendering/game-over checks
+        game.lives = lives;
         
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
             wave: game.wave,
             state: game.state,
-            lives: game.lives,
+            lives: lives,
             score: groupScore,
             groupScore: groupScore,
             speedMultiplier: game.speedMultiplier,
