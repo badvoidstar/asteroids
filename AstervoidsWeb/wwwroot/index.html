@@ -1432,30 +1432,12 @@
     }
 
     /**
-     * Convert pixel X to normalized X position (0-1)
-     * @param {number} pixelX - Pixel X coordinate
-     * @returns {number} Normalized X (0-1)
-     */
-    function toNormalizedX(pixelX) {
-        return pixelX / getGameWidth();
-    }
-
-    /**
      * Convert normalized Y position (0-1) to pixel Y within gameplay area
      * @param {number} normY - Normalized Y (0 = top, 1 = bottom)
      * @returns {number} Pixel Y coordinate
      */
     function fromNormalizedY(normY) {
         return normY * getGameHeight();
-    }
-
-    /**
-     * Convert pixel Y to normalized Y position (0-1)
-     * @param {number} pixelY - Pixel Y coordinate
-     * @returns {number} Normalized Y (0-1)
-     */
-    function toNormalizedY(pixelY) {
-        return pixelY / getGameHeight();
     }
 
     /**
@@ -1466,34 +1448,6 @@
      */
     function fromNormalizedSize(normSize) {
         return normSize * getReferenceDimension();
-    }
-
-    /**
-     * Convert pixel size to normalized size
-     * @param {number} pixelSize - Pixel size
-     * @returns {number} Normalized size
-     */
-    function toNormalizedSize(pixelSize) {
-        return pixelSize / getReferenceDimension();
-    }
-
-    /**
-     * Convert normalized velocity to pixel velocity for X axis
-     * Velocity is stored as "fraction of dimension per second"
-     * @param {number} normVelX - Normalized velocity (per second)
-     * @returns {number} Pixel velocity per frame (at 60fps)
-     */
-    function fromNormalizedVelocityX(normVelX) {
-        return normVelX * getGameWidth() / CONFIG.TARGET_FPS;
-    }
-
-    /**
-     * Convert normalized velocity to pixel velocity for Y axis
-     * @param {number} normVelY - Normalized velocity (per second)
-     * @returns {number} Pixel velocity per frame (at 60fps)
-     */
-    function fromNormalizedVelocityY(normVelY) {
-        return normVelY * getGameHeight() / CONFIG.TARGET_FPS;
     }
 
     /**
@@ -4671,8 +4625,6 @@
 
     // Handle role changes (e.g., promoted to server when server leaves)
     SessionClient.on('onRoleChanged', (newRole) => {
-        ObjectSync.handleRoleChanged(newRole);
-        
         if (game.sessionInfo) {
             game.sessionInfo.role = newRole;
         }

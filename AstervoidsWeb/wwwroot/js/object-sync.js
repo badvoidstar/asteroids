@@ -272,13 +272,6 @@ const ObjectSync = (function() {
     }
 
     /**
-     * Handle role changed - update ownership for migrated objects.
-     */
-    function handleRoleChanged(newRole) {
-        // console.log('[ObjectSync] Role changed to', newRole);
-    }
-
-    /**
      * Handle remote object created.
      */
     function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
@@ -1045,7 +1038,6 @@ const ObjectSync = (function() {
         triggerReconciliation,
         handleOwnershipMigration,
         handleMemberDeparture,
-        handleRoleChanged,
         trackEventSequence,
         on,
         clear

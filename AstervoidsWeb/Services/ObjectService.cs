@@ -146,11 +146,10 @@ public class ObjectService : IObjectService
     {
         var session = _sessionService.GetSession(sessionId);
         if (session == null)
-            return new MemberDepartureResult([], [], []);
+            return new MemberDepartureResult([], []);
 
         var deletedIds = new List<Guid>();
         var migratedObjects = new List<ObjectMigration>();
-        var affectedTypes = new HashSet<string>();
         var roundRobinIndex = 0;
 
         foreach (var obj in session.Objects.Values.ToList())
@@ -158,15 +157,12 @@ public class ObjectService : IObjectService
             if (obj.OwnerMemberId != departingMemberId)
                 continue;
 
-            var objectType = obj.Data.TryGetValue("type", out var t) ? t?.ToString() : null;
-
             if (obj.Scope == ObjectScope.Member)
             {
                 // Member-scoped: delete
                 if (session.Objects.TryRemove(obj.Id, out _))
                 {
                     deletedIds.Add(obj.Id);
-                    if (objectType != null) affectedTypes.Add(objectType);
                 }
             }
             else if (obj.Scope == ObjectScope.Session && remainingMemberIds.Count > 0)
@@ -190,6 +186,6 @@ public class ObjectService : IObjectService
             }
         }
 
-        return new MemberDepartureResult(deletedIds, migratedObjects, affectedTypes);
+        return new MemberDepartureResult(deletedIds, migratedObjects);
     }
 }

@@ -399,42 +399,6 @@ public class ObjectServiceTests
     }
 
     [Fact]
-    public void HandleMemberDeparture_AffectedTypes_ShouldIncludeDeletedTypes()
-    {
-        // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var server = result.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var client = joinResult.Member!;
-
-        // Client creates member-scoped objects (ship + bullet)
-        _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
-        {
-            ["type"] = "ship"
-        });
-        _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
-        {
-            ["type"] = "bullet"
-        });
-        // Server also has a bullet
-        _objectService.CreateObject(session.Id, server.Id, ObjectScope.Member, new Dictionary<string, object?>
-        {
-            ["type"] = "bullet"
-        });
-
-        // Act — client leaves, their member-scoped objects are deleted
-        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
-
-        // Assert — ship type becomes empty (only client had one), bullet does not (server still has one)
-        departure.AffectedTypes.Should().Contain("ship");
-        departure.AffectedTypes.Should().Contain("bullet");
-        var remainingObjects = _objectService.GetSessionObjects(session.Id).ToList();
-        remainingObjects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "ship").Should().Be(0);
-        remainingObjects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "bullet").Should().Be(1);
-    }
-
-    [Fact]
     public void HandleMemberDeparture_ClientLeaves_SessionScopedObjectsMigrated()
     {
         // Arrange
