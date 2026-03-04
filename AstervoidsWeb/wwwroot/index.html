@@ -959,7 +959,7 @@
         SPAWN_MIN_DISTANCE: 0.25,   // Minimum spawn distance from ship (normalized)
         
         // Multiplayer settings
-        MULTIPLAYER_LIVES: 6,          // Shared lives pool for multiplayer sessions
+        MULTIPLAYER_LIVES: 3,          // Shared lives pool for multiplayer sessions
         SYNC_NOMINAL_FRAME_TIME: 1/10, // Target send interval (seconds)
         SYNC_MIN_FRAME_TIME: 1/480,    // Min frame time clamp for threshold calc
         ADAPTIVE_SEND_RATE: true,      // Dynamically adjust send rate based on RTT
@@ -2369,6 +2369,7 @@
     const ctx = canvas.getContext('2d');
 
     // HUD element references
+    const hudRow = document.getElementById('hud');
     const scoreDisplay = document.getElementById('score');
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
@@ -3593,6 +3594,16 @@
      * Update HUD display elements
      */
     function updateHUD() {
+        // In multiplayer, only show the top-line HUD row when the game state object is available
+        if (hudRow) {
+            if (isSessionMode()) {
+                const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+                hudRow.style.display = gsObj ? 'flex' : 'none';
+            } else {
+                hudRow.style.display = 'flex';
+            }
+        }
+        
         scoreDisplay.textContent = `Score: ${game.score}`;
         waveDisplay.textContent = `Wave: ${game.wave}`;
         livesDisplay.textContent = `Lives: ${game.lives}`;
