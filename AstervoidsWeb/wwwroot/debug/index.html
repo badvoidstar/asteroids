@@ -109,6 +109,10 @@
         const noDataEl = document.getElementById('no-data');
         const sessionLabelEl = document.getElementById('session-label');
 
+        // Send periodic heartbeat so the game client knows we're listening
+        channel.postMessage('ping');
+        setInterval(() => channel.postMessage('ping'), 1000);
+
         function rttClass(rtt) {
             if (rtt <= 64) return 'rtt-good';
             if (rtt <= 128) return 'rtt-ok';

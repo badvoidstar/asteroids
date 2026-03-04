@@ -2353,8 +2353,17 @@
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
 
-    // BroadcastChannel for sending debug metrics to /debug page
+    // BroadcastChannel for sending debug metrics to /debug page.
+    // Uses a heartbeat pattern: the debug page sends periodic pings, and we
+    // only compute + broadcast metrics when a listener is active.
     const debugChannel = new BroadcastChannel('astervoids-debug');
+    let debugLastHeartbeat = 0;
+    const DEBUG_HEARTBEAT_TIMEOUT = 2000; // ms before we consider the listener gone
+    debugChannel.onmessage = (event) => {
+        if (event.data === 'ping') {
+            debugLastHeartbeat = Date.now();
+        }
+    };
 
     // Game state object
     const game = {
@@ -3597,8 +3606,9 @@
             }
         }
         
-        // Broadcast debug metrics to /debug page via BroadcastChannel
-        if (isSessionMode()) {
+        // Broadcast debug metrics to /debug page via BroadcastChannel.
+        // Early-out: skip all metric computation when no debug page is listening.
+        if (isSessionMode() && (Date.now() - debugLastHeartbeat) < DEBUG_HEARTBEAT_TIMEOUT) {
             const myMemberId = SessionClient.getCurrentMember()?.id;
             const allObjs = ObjectSync.getObjectCount();
             const ownedObjs = myMemberId ? ObjectSync.getObjectsByOwner(myMemberId).length : 0;
