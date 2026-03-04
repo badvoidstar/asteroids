@@ -484,8 +484,8 @@
     <div id="game-container">
         <canvas id="game" width="800" height="600"></canvas>
         
-        <!-- HUD: displays game stats -->
-        <div id="hud">
+        <!-- HUD: displays game stats (hidden on start screen, shown by updateHUD) -->
+        <div id="hud" style="display: none;">
             <span id="score">Score: 0</span>
             <span id="session-indicator"></span>
             <span id="wave">Wave: 1</span>
@@ -2369,7 +2369,7 @@
     const ctx = canvas.getContext('2d');
 
     // HUD element references
-    const hudRow = document.getElementById('hud');
+    const hudDisplay = document.getElementById('hud');
     const scoreDisplay = document.getElementById('score');
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
@@ -3594,14 +3594,9 @@
      * Update HUD display elements
      */
     function updateHUD() {
-        // In multiplayer, only show the top-line HUD row when the game state object is available
-        if (hudRow) {
-            if (isSessionMode()) {
-                const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
-                hudRow.style.display = gsObj ? 'flex' : 'none';
-            } else {
-                hudRow.style.display = 'flex';
-            }
+        // Show HUD row only when content is relevant (not on start screen)
+        if (hudDisplay) {
+            hudDisplay.style.display = game.state !== 'start' ? 'flex' : 'none';
         }
         
         scoreDisplay.textContent = `Score: ${game.score}`;
@@ -4530,6 +4525,8 @@
         // Recalculate viewport for solo mode
         resizeCanvas(true);
         
+        updateHUD();
+        
         await refreshSessionList();
         if (message) {
             setPickerStatus(message, 'error');
@@ -4611,6 +4608,8 @@
         if (errorMessage) {
             setPickerStatus(errorMessage, 'error');
         }
+
+        updateHUD();
 
         // Reconnect and refresh if needed
         if (!SessionClient.isConnected()) {
