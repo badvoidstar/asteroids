@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Astervoids – Debug</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: #0a0a0a;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            padding: 24px;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 8px;
+            color: #00ff00;
+        }
+
+        #session-label {
+            font-size: 0.9rem;
+            color: #888;
+            margin-bottom: 20px;
+        }
+
+        #no-data {
+            color: #888;
+            font-style: italic;
+        }
+
+        .columns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+        }
+
+        .column h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 6px;
+        }
+
+        .metric-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .metric-list li {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1a1a;
+            font-size: 0.95rem;
+        }
+
+        .metric-label {
+            color: #888;
+        }
+
+        .metric-value {
+            text-align: right;
+            min-width: 80px;
+        }
+
+        .section-heading {
+            font-size: 0.95rem;
+            color: #ffff00;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+
+        .rtt-good { color: #00ff00; }
+        .rtt-ok { color: #ffff00; }
+        .rtt-bad { color: #ff0000; }
+
+        .placeholder-text {
+            color: #555;
+            font-style: italic;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Astervoids Debug</h1>
+    <div id="session-label"></div>
+    <div id="no-data">Waiting for game data…</div>
+
+    <div class="columns" id="columns" style="display: none;">
+        <div class="column" id="runtime-column">
+            <h2>Runtime Metrics</h2>
+            <ul class="metric-list" id="core-metrics"></ul>
+            <div id="member-section"></div>
+        </div>
+        <div class="column">
+            <h2>Configuration</h2>
+            <p class="placeholder-text">Editable values will appear here in a future update.</p>
+        </div>
+    </div>
+
+    <script>
+        const channel = new BroadcastChannel('astervoids-debug');
+        const coreMetricsEl = document.getElementById('core-metrics');
+        const memberSectionEl = document.getElementById('member-section');
+        const columnsEl = document.getElementById('columns');
+        const noDataEl = document.getElementById('no-data');
+        const sessionLabelEl = document.getElementById('session-label');
+
+        // Send periodic heartbeat so the game client knows we're listening
+        channel.postMessage('ping');
+        setInterval(() => channel.postMessage('ping'), 1000);
+
+        function rttClass(rtt) {
+            if (rtt <= 64) return 'rtt-good';
+            if (rtt <= 128) return 'rtt-ok';
+            return 'rtt-bad';
+        }
+
+        function renderCoreMetrics(data) {
+            const items = [
+                { label: 'RTT', value: `${data.rtt} ms`, cls: rttClass(data.rtt) },
+                { label: 'TX (send interval)', value: `${data.tx} ms` },
+                { label: 'Jitter', value: `${data.jitter} ms` },
+                { label: 'Buffer delay', value: `${data.buf} ms` },
+                { label: 'Objects (owned / total)', value: `${data.ownedObjs} / ${data.totalObjs}` },
+                { label: 'Reconciliations', value: `${data.reconciliationCount}` }
+            ];
+            coreMetricsEl.innerHTML = items.map(item => {
+                const cls = item.cls ? ` class="${item.cls}"` : '';
+                return `<li><span class="metric-label">${item.label}</span><span class="metric-value"${cls}>${item.value}</span></li>`;
+            }).join('');
+        }
+
+        function renderMemberMetrics(members, myMemberId) {
+            const ids = Object.keys(members);
+            if (ids.length === 0) {
+                memberSectionEl.innerHTML = '';
+                return;
+            }
+            let html = '<div class="section-heading">Per-Member Metrics</div>';
+            for (const memberId of ids) {
+                const m = members[memberId];
+                const label = memberId === myMemberId ? `${memberId} (you)` : memberId;
+                const shortId = label.length > 12 ? label.substring(0, 12) + '…' : label;
+                html += `<div class="section-heading" style="font-size:0.85rem; color:#aaa; margin-top:10px;">${shortId}</div>`;
+                html += '<ul class="metric-list">';
+                html += `<li><span class="metric-label">Send interval</span><span class="metric-value">${m.remoteSendInterval} ms</span></li>`;
+                html += `<li><span class="metric-label">Computed delay</span><span class="metric-value">${m.computedDelay} ms</span></li>`;
+                html += '</ul>';
+            }
+            memberSectionEl.innerHTML = html;
+        }
+
+        channel.onmessage = (event) => {
+            const data = event.data;
+            noDataEl.style.display = 'none';
+            columnsEl.style.display = '';
+            if (data.sessionName) {
+                sessionLabelEl.textContent = `Session: ${data.sessionName}`;
+            }
+            renderCoreMetrics(data);
+            renderMemberMetrics(data.members || {}, data.myMemberId || '');
+        };
+    </script>
+</body>
+</html>
