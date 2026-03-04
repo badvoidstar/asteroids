@@ -2866,6 +2866,13 @@
         if (!isSessionMode()) return;
         
         try {
+            // Track which ships already exist at game start so they don't get entry bonuses
+            const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
+            const processedEntries = {};
+            for (const ship of shipObjects) {
+                processedEntries[ship.id] = true;
+            }
+            
             const gameStateData = {
                 type: OBJECT_TYPES.GAME_STATE,
                 gameStarted: true,
@@ -2875,7 +2882,8 @@
                 score: game.score,
                 speedMultiplier: game.speedMultiplier,
                 waveDelayTimer: game.waveDelayTimer,
-                processedHits: {}
+                processedHits: {},
+                processedEntries: processedEntries
             };
             
             const objectInfo = await ObjectSync.createObject(
@@ -2930,6 +2938,19 @@
             }
         }
         
+        // Process new player entries — award an extra life for each new joiner
+        // Done AFTER hit processing so that game-over (lives=0) takes priority
+        const processedEntries = (gsObj?.data?.processedEntries) || {};
+        for (const ship of shipObjects) {
+            const shipId = ship.id;
+            if (!processedEntries[shipId]) {
+                processedEntries[shipId] = true;
+                if (game.lives > 0) {
+                    game.lives += 1;
+                }
+            }
+        }
+        
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
@@ -2941,7 +2962,8 @@
             speedMultiplier: game.speedMultiplier,
             waveDelayTimer: game.waveDelayTimer,
             processedHits: processedHits,
-            processedScores: processedScores
+            processedScores: processedScores,
+            processedEntries: processedEntries
         };
         
         // Note: this queues into pendingUpdates (same batch as ship/asteroid/bullet updates).
