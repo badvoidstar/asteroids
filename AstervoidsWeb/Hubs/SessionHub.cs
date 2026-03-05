@@ -1,8 +1,6 @@
-using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.Extensions.Options;
 
 namespace AstervoidsWeb.Hubs;
 
@@ -16,7 +14,6 @@ public class SessionHub : Hub
     private readonly ISessionService _sessionService;
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
-    private readonly SessionSettings _settings;
 
     // Group name for all connected clients to receive session list updates
     private const string AllClientsGroup = "AllClients";
@@ -24,13 +21,11 @@ public class SessionHub : Hub
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
-        ILogger<SessionHub> logger,
-        IOptions<SessionSettings> settings)
+        ILogger<SessionHub> logger)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
-        _settings = settings.Value;
     }
 
     /// <summary>

@@ -77,6 +77,5 @@ public record ObjectMigration(Guid ObjectId, Guid NewOwnerId, long NewVersion);
 /// </summary>
 public record MemberDepartureResult(
     IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<ObjectMigration> MigratedObjects,
-    IEnumerable<string> AffectedTypes
+    IEnumerable<ObjectMigration> MigratedObjects
 );
