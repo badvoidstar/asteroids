@@ -1,4 +1,3 @@
-using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 
 namespace AstervoidsWeb.Hubs;
