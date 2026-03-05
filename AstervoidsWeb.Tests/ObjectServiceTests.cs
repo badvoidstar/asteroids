@@ -74,6 +74,19 @@ public class ObjectServiceTests
     }
 
     [Fact]
+    public void CreateObject_InvalidCreatorMemberId_ShouldReturnNull()
+    {
+        // Arrange
+        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+
+        // Act
+        var obj = _objectService.CreateObject(session.Id, Guid.NewGuid(), ObjectScope.Member);
+
+        // Assert
+        obj.Should().BeNull();
+    }
+
+    [Fact]
     public void CreateObject_WithOwnerMemberId_ShouldSetDifferentOwner()
     {
         // Arrange

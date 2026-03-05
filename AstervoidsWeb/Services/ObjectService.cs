@@ -1,6 +1,7 @@
 using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Models;
 using Microsoft.Extensions.Options;
+using System.Diagnostics.CodeAnalysis;
 
 namespace AstervoidsWeb.Services;
 
@@ -26,15 +27,11 @@ public class ObjectService : IObjectService
 
     public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
-            return null;
-
-        if (!session.Members.TryGetValue(creatorMemberId, out _))
+        if (!TryGetSession(sessionId, out var session))
             return null;
 
         var effectiveOwner = ownerMemberId ?? creatorMemberId;
-        if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
+        if (!AllMembersExist(session, creatorMemberId, effectiveOwner))
             return null;
 
         var obj = new SessionObject
@@ -52,8 +49,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return null;
 
         if (!session.Objects.TryGetValue(objectId, out var obj))
@@ -77,8 +73,7 @@ public class ObjectService : IObjectService
 
     public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return Enumerable.Empty<SessionObject>();
 
         var results = new List<SessionObject>();
@@ -108,8 +103,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return null;
 
         return session.Objects.TryRemove(objectId, out var obj) ? obj : null;
@@ -117,8 +111,7 @@ public class ObjectService : IObjectService
 
     public IEnumerable<SessionObject> GetSessionObjects(Guid sessionId)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return Enumerable.Empty<SessionObject>();
 
         return session.Objects.Values.ToList();
@@ -126,8 +119,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? GetObject(Guid sessionId, Guid objectId)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return null;
 
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
@@ -144,8 +136,7 @@ public class ObjectService : IObjectService
     /// </summary>
     public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
     {
-        var session = _sessionService.GetSession(sessionId);
-        if (session == null)
+        if (!TryGetSession(sessionId, out var session))
             return new MemberDepartureResult([], []);
 
         var deletedIds = new List<Guid>();
@@ -188,4 +179,13 @@ public class ObjectService : IObjectService
 
         return new MemberDepartureResult(deletedIds, migratedObjects);
     }
+
+    private bool TryGetSession(Guid sessionId, [NotNullWhen(true)] out Session? session)
+    {
+        session = _sessionService.GetSession(sessionId);
+        return session != null;
+    }
+
+    private static bool AllMembersExist(Session session, params Guid[] memberIds) =>
+        memberIds.All(session.Members.ContainsKey);
 }
