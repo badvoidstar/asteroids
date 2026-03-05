@@ -215,14 +215,7 @@ const SessionUI = (function() {
             if (sessions && sessions.length > 0) {
                 html += '<div class="divider">— or join existing —</div>';
                 html += '<div class="session-list">';
-                for (const session of sessions) {
-                    html += `
-                        <div class="session-item" data-session-id="${session.id}">
-                            <span class="session-name">🍎 ${session.name}</span>
-                            <span class="session-members">${session.memberCount} player${session.memberCount !== 1 ? 's' : ''}</span>
-                        </div>
-                    `;
-                }
+                html += renderSessionItems(sessions);
                 html += '</div>';
             } else {
                 html += '<div class="no-sessions">No active sessions</div>';
@@ -232,13 +225,7 @@ const SessionUI = (function() {
 
             // Bind events
             document.getElementById('create-session-btn').addEventListener('click', handleCreateSession);
-            
-            const sessionItems = contentEl.querySelectorAll('.session-item');
-            sessionItems.forEach(item => {
-                item.addEventListener('click', () => {
-                    handleJoinSession(item.dataset.sessionId);
-                });
-            });
+            bindSessionItemClicks(contentEl);
 
             // Auto-refresh session list
             startAutoRefresh();
@@ -369,6 +356,33 @@ const SessionUI = (function() {
     }
 
     /**
+     * Render session items HTML from a sessions array.
+     */
+    function renderSessionItems(sessions) {
+        let html = '';
+        for (const session of sessions) {
+            html += `
+                <div class="session-item" data-session-id="${session.id}">
+                    <span class="session-name">🍎 ${session.name}</span>
+                    <span class="session-members">${session.memberCount} player${session.memberCount !== 1 ? 's' : ''}</span>
+                </div>
+            `;
+        }
+        return html;
+    }
+
+    /**
+     * Bind click handlers on all .session-item elements within a container.
+     */
+    function bindSessionItemClicks(container) {
+        container.querySelectorAll('.session-item').forEach(item => {
+            item.addEventListener('click', () => {
+                handleJoinSession(item.dataset.sessionId);
+            });
+        });
+    }
+
+    /**
      * Update the session list without full re-render.
      */
     function updateSessionList(sessions) {
@@ -376,24 +390,8 @@ const SessionUI = (function() {
         if (!listEl) return;
 
         if (sessions && sessions.length > 0) {
-            let html = '';
-            for (const session of sessions) {
-                html += `
-                    <div class="session-item" data-session-id="${session.id}">
-                        <span class="session-name">🍎 ${session.name}</span>
-                        <span class="session-members">${session.memberCount} player${session.memberCount !== 1 ? 's' : ''}</span>
-                    </div>
-                `;
-            }
-            listEl.innerHTML = html;
-
-            // Re-bind events
-            const sessionItems = listEl.querySelectorAll('.session-item');
-            sessionItems.forEach(item => {
-                item.addEventListener('click', () => {
-                    handleJoinSession(item.dataset.sessionId);
-                });
-            });
+            listEl.innerHTML = renderSessionItems(sessions);
+            bindSessionItemClicks(listEl);
         }
     }
 

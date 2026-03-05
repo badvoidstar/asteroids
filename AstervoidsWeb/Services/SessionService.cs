@@ -15,7 +15,6 @@ public class SessionService : ISessionService
     private readonly ConcurrentDictionary<string, Guid> _connectionToMember = new();
     private readonly ConcurrentDictionary<Guid, Guid> _memberToSession = new();
     private readonly Random _random = new();
-    private readonly object _nameLock = new();
     private readonly object _sessionLock = new();
     private readonly ILogger<SessionService>? _logger;
     private readonly int _maxSessions;
@@ -248,25 +247,23 @@ public class SessionService : ISessionService
 
     private string GenerateUniqueFruitName()
     {
-        lock (_nameLock)
+        // Called within _sessionLock, no additional lock needed
+        var usedNames = _sessions.Values.Select(s => s.Name).ToHashSet();
+        var availableNames = FruitNames.Where(n => !usedNames.Contains(n)).ToList();
+
+        if (availableNames.Count == 0)
         {
-            var usedNames = _sessions.Values.Select(s => s.Name).ToHashSet();
-            var availableNames = FruitNames.Where(n => !usedNames.Contains(n)).ToList();
-
-            if (availableNames.Count == 0)
+            // All fruit names used, append a number
+            var counter = 2;
+            while (true)
             {
-                // All fruit names used, append a number
-                var counter = 2;
-                while (true)
-                {
-                    var candidateName = $"{FruitNames[_random.Next(FruitNames.Length)]}{counter}";
-                    if (!usedNames.Contains(candidateName))
-                        return candidateName;
-                    counter++;
-                }
+                var candidateName = $"{FruitNames[_random.Next(FruitNames.Length)]}{counter}";
+                if (!usedNames.Contains(candidateName))
+                    return candidateName;
+                counter++;
             }
-
-            return availableNames[_random.Next(availableNames.Count)];
         }
+
+        return availableNames[_random.Next(availableNames.Count)];
     }
 }

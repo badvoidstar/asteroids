@@ -28,6 +28,32 @@ public class SessionHub : Hub
         _logger = logger;
     }
 
+    // ── Helper methods ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Looks up the calling member and their session in one step.
+    /// Returns null if either is missing (caller should return null/early-exit).
+    /// </summary>
+    private (Member Member, Session Session)? GetCallerContext()
+    {
+        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
+        if (member == null) return null;
+
+        var session = _sessionService.GetSession(member.SessionId);
+        if (session == null) return null;
+
+        return (member, session);
+    }
+
+    private static ObjectInfo ToObjectInfo(SessionObject o) =>
+        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version);
+
+    private static ObjectScope ParseScope(string scope) =>
+        scope.Equals("Session", StringComparison.OrdinalIgnoreCase) ? ObjectScope.Session : ObjectScope.Member;
+
+    private static Guid? ParseOwnerGuid(string? ownerMemberId) =>
+        ownerMemberId != null && Guid.TryParse(ownerMemberId, out var parsed) ? parsed : null;
+
     /// <summary>
     /// Called when a client connects - add them to the AllClients group for broadcasts.
     /// </summary>
@@ -106,8 +132,7 @@ public class SessionHub : Hub
 
         // Return session state including existing objects
         var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
-        var objects = session.Objects.Values.Select(o => new ObjectInfo(
-            o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version));
+        var objects = session.Objects.Values.Select(ToObjectInfo);
 
         return new JoinSessionResponse(
             session.Id,
@@ -219,35 +244,22 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null)
+        var ctx = GetCallerContext();
+        if (ctx == null)
         {
             _logger.LogWarning("CreateObject failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
+        var (member, session) = ctx.Value;
 
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null)
-            return null;
-
-        var objectScope = scope.Equals("Session", StringComparison.OrdinalIgnoreCase) 
-            ? ObjectScope.Session 
-            : ObjectScope.Member;
-
-        Guid? ownerGuid = null;
-        if (ownerMemberId != null && Guid.TryParse(ownerMemberId, out var parsed))
-        {
-            ownerGuid = parsed;
-        }
-
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data, ownerGuid);
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId));
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
             return null;
         }
 
-        var objectInfo = new ObjectInfo(obj.Id, obj.CreatorMemberId, obj.OwnerMemberId, obj.Scope.ToString(), obj.Data, obj.Version);
+        var objectInfo = ToObjectInfo(obj);
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -257,7 +269,7 @@ public class SessionHub : Hub
         await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectCreated",
             objectInfo, member.Id, memberSequence, serverTimestamp);
 
-        _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, objectScope);
+        _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, obj.Scope);
 
         return new CreateObjectResponse(objectInfo, memberSequence);
     }
@@ -268,16 +280,13 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null, long? senderSendIntervalMs = null)
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null)
+        var ctx = GetCallerContext();
+        if (ctx == null)
         {
             _logger.LogWarning("UpdateObjects failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null)
-            return null;
+        var (member, session) = ctx.Value;
 
         // Filter to only objects owned by the caller
         var authorizedUpdates = new List<ObjectUpdate>();
@@ -292,8 +301,7 @@ public class SessionHub : Hub
 
         var updatedObjects = _objectService.UpdateObjects(member.SessionId, authorizedUpdates);
 
-        var objectInfos = updatedObjects.Select(o => new ObjectInfo(
-            o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
+        var objectInfos = updatedObjects.Select(ToObjectInfo).ToList();
 
         long memberSequence = 0;
         long serverTimestamp = 0;
@@ -335,16 +343,13 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<DeleteObjectResponse?> DeleteObject(Guid objectId)
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null)
+        var ctx = GetCallerContext();
+        if (ctx == null)
         {
             _logger.LogWarning("DeleteObject failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null)
-            return null;
+        var (member, _) = ctx.Value;
 
         // Verify ownership before deleting
         var obj = _objectService.GetObject(member.SessionId, objectId);
@@ -379,16 +384,13 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null)
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null)
+        var ctx = GetCallerContext();
+        if (ctx == null)
         {
             _logger.LogWarning("ReplaceObject failed - member not found");
             return null;
         }
-
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null)
-            return null;
+        var (member, _) = ctx.Value;
 
         // Verify ownership of the object being replaced
         var existingObj = _objectService.GetObject(member.SessionId, deleteObjectId);
@@ -401,15 +403,8 @@ public class SessionHub : Hub
             return null;
         }
 
-        var objectScope = scope.Equals("Session", StringComparison.OrdinalIgnoreCase)
-            ? ObjectScope.Session
-            : ObjectScope.Member;
-
-        Guid? ownerGuid = null;
-        if (ownerMemberId != null && Guid.TryParse(ownerMemberId, out var parsed))
-        {
-            ownerGuid = parsed;
-        }
+        var objectScope = ParseScope(scope);
+        var ownerGuid = ParseOwnerGuid(ownerMemberId);
 
         // Create all replacements first (so we can roll back if any fail)
         var createdObjects = new List<SessionObject>();
@@ -442,8 +437,7 @@ public class SessionHub : Hub
             return null;
         }
 
-        var createdInfos = createdObjects.Select(o =>
-            new ObjectInfo(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version)).ToList();
+        var createdInfos = createdObjects.Select(ToObjectInfo).ToList();
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -468,20 +462,16 @@ public class SessionHub : Hub
     /// </summary>
     public SessionStateSnapshot? GetSessionState()
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null)
+        var ctx = GetCallerContext();
+        if (ctx == null)
         {
             _logger.LogWarning("GetSessionState failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null)
-            return null;
+        var (_, session) = ctx.Value;
 
         var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
-        var objects = session.Objects.Values.Select(o => new ObjectInfo(
-            o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version));
+        var objects = session.Objects.Values.Select(ToObjectInfo);
 
         var memberSequences = session.Members.Values.ToDictionary(
             m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
@@ -520,33 +510,3 @@ public class SessionHub : Hub
         return Interlocked.Increment(ref member.EventSequence);
     }
 }
-
-// Response DTOs
-public record CreateSessionResponse(Guid SessionId, string SessionName, Guid MemberId, string Role, double AspectRatio);
-public record JoinSessionResponse(
-    Guid SessionId,
-    string SessionName,
-    Guid MemberId,
-    string Role,
-    IEnumerable<MemberInfo> Members,
-    IEnumerable<ObjectInfo> Objects,
-    double AspectRatio
-);
-public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
-public record MemberLeftInfo(
-    Guid MemberId,
-    Guid? PromotedMemberId,
-    string? PromotedRole,
-    IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<ObjectMigration> MigratedObjects
-);
-public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt);
-public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
-public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
-public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long Version);
-public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
-public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
-public record UpdateObjectsResponse(Dictionary<string, long> Versions, long MemberSequence, long ServerTimestamp);
-public record CreateObjectResponse(ObjectInfo ObjectInfo, long MemberSequence);
-public record DeleteObjectResponse(bool Success, long MemberSequence);
-public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, Dictionary<string, long> MemberSequences);

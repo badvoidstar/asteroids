@@ -59,20 +59,7 @@ public class ObjectService : IObjectService
         if (!session.Objects.TryGetValue(objectId, out var obj))
             return null;
 
-        // Optimistic concurrency check
-        if (expectedVersion.HasValue && obj.Version != expectedVersion.Value)
-            return null;
-
-        // Merge data
-        foreach (var kvp in data)
-        {
-            obj.Data[kvp.Key] = kvp.Value;
-        }
-
-        obj.Version++;
-        obj.UpdatedAt = DateTime.UtcNow;
-
-        return obj;
+        return ApplyUpdate(obj, data, expectedVersion) ? obj : null;
     }
 
     public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates)
@@ -88,22 +75,31 @@ public class ObjectService : IObjectService
             if (!session.Objects.TryGetValue(update.ObjectId, out var obj))
                 continue;
 
-            // Optimistic concurrency check
-            if (update.ExpectedVersion.HasValue && obj.Version != update.ExpectedVersion.Value)
-                continue;
-
-            // Merge data
-            foreach (var kvp in update.Data)
+            if (ApplyUpdate(obj, update.Data, update.ExpectedVersion))
             {
-                obj.Data[kvp.Key] = kvp.Value;
+                results.Add(obj);
             }
-
-            obj.Version++;
-            obj.UpdatedAt = DateTime.UtcNow;
-            results.Add(obj);
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Applies a data merge + version bump to a single object if the optimistic concurrency check passes.
+    /// </summary>
+    private static bool ApplyUpdate(SessionObject obj, Dictionary<string, object?> data, long? expectedVersion)
+    {
+        if (expectedVersion.HasValue && obj.Version != expectedVersion.Value)
+            return false;
+
+        foreach (var kvp in data)
+        {
+            obj.Data[kvp.Key] = kvp.Value;
+        }
+
+        obj.Version++;
+        obj.UpdatedAt = DateTime.UtcNow;
+        return true;
     }
 
     public SessionObject? DeleteObject(Guid sessionId, Guid objectId)

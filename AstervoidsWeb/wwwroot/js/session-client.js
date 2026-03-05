@@ -194,14 +194,33 @@ const SessionClient = (function() {
         });
     }
 
+    // ── Internal helpers ────────────────────────────────────────────────
+
+    /**
+     * Throws if not connected to the SignalR hub.
+     */
+    function ensureConnected() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            throw new Error('Not connected to session hub');
+        }
+    }
+
+    /**
+     * Throws if not connected or not in a session.
+     */
+    function ensureInSession() {
+        ensureConnected();
+        if (!currentSession) {
+            throw new Error('Not in a session');
+        }
+    }
+
     /**
      * Create a new session.
      * @param {number} aspectRatio - The aspect ratio (width/height) to lock for this session.
      */
     async function createSession(aspectRatio) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
+        ensureConnected();
 
         try {
             const response = await connection.invoke('CreateSession', aspectRatio);
@@ -243,9 +262,7 @@ const SessionClient = (function() {
      * Join an existing session.
      */
     async function joinSession(sessionId) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
+        ensureConnected();
 
         try {
             const response = await connection.invoke('JoinSession', sessionId);
@@ -310,9 +327,7 @@ const SessionClient = (function() {
      * Get list of active sessions.
      */
     async function getActiveSessions() {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
+        ensureConnected();
 
         try {
             const response = await connection.invoke('GetActiveSessions');
@@ -333,12 +348,7 @@ const SessionClient = (function() {
      * @param {string} scope - 'Member' or 'Session'
      */
     async function createObject(data, scope = 'Member', ownerMemberId = null) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
+        ensureInSession();
 
         try {
             return await connection.invoke('CreateObject', data, scope, ownerMemberId);
@@ -352,12 +362,7 @@ const SessionClient = (function() {
      * Update multiple objects atomically.
      */
     async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
+        ensureInSession();
 
         try {
             const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
@@ -372,12 +377,7 @@ const SessionClient = (function() {
      * Atomically delete an object and create replacements in a single broadcast.
      */
     async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
+        ensureInSession();
 
         try {
             return await connection.invoke('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId);
@@ -391,12 +391,7 @@ const SessionClient = (function() {
      * Delete an object from the session.
      */
     async function deleteObject(objectId) {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
+        ensureInSession();
 
         try {
             return await connection.invoke('DeleteObject', objectId);
@@ -407,12 +402,7 @@ const SessionClient = (function() {
     }
 
     async function getSessionState() {
-        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
-            throw new Error('Not connected to session hub');
-        }
-        if (!currentSession) {
-            throw new Error('Not in a session');
-        }
+        ensureInSession();
         try {
             return await connection.invoke('GetSessionState');
         } catch (err) {
