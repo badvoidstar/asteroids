@@ -222,31 +222,62 @@ const ObjectSync = (function() {
         // console.log('[ObjectSync] Initialized');
     }
 
+    // ── Internal helpers ────────────────────────────────────────────────
+
     /**
-     * Handle session joined - load existing objects.
+     * Reset all sync state to initial values.
      */
-    function handleSessionJoined(session, member) {
+    function resetState() {
         objects.clear();
         typeIndex.clear();
         lastSentData.clear();
         pendingUpdates = [];
         frameCounter = 0;
+        fullSyncCounter = 0;
         senderSequence = 0;
         memberSequences.clear();
         reconciling = false;
         reconciliationCount = 0;
+        flushInProgress = false;
+    }
+
+    /**
+     * Build a local object representation from server ObjectInfo.
+     */
+    function toLocalObject(objectInfo, isLocal) {
+        return {
+            id: objectInfo.id,
+            creatorMemberId: objectInfo.creatorMemberId,
+            ownerMemberId: objectInfo.ownerMemberId,
+            scope: objectInfo.scope,
+            data: objectInfo.data || {},
+            version: objectInfo.version,
+            isLocal: isLocal ?? false
+        };
+    }
+
+    /**
+     * Track the local member's own sequence from an invoke response.
+     * Used by createObject, deleteObject, and flushUpdates which all
+     * use OthersInGroup (no broadcast echo for own events).
+     */
+    function trackOwnMemberSequence(memberSequence) {
+        if (!memberSequence || memberSequence <= 0) return;
+        const myId = SessionClient.getCurrentMember()?.id;
+        if (myId) {
+            trackMemberSequence(myId, memberSequence);
+        }
+    }
+
+    /**
+     * Handle session joined - load existing objects.
+     */
+    function handleSessionJoined(session, member) {
+        resetState();
 
         if (session.objects) {
             for (const obj of session.objects) {
-                const localObj = {
-                    id: obj.id,
-                    creatorMemberId: obj.creatorMemberId,
-                    ownerMemberId: obj.ownerMemberId,
-                    scope: obj.scope,
-                    data: obj.data || {},
-                    version: obj.version,
-                    isLocal: false
-                };
+                const localObj = toLocalObject(obj, false);
                 objects.set(obj.id, localObj);
                 addToTypeIndex(localObj);
             }
@@ -259,15 +290,7 @@ const ObjectSync = (function() {
      * Handle session left - clear objects.
      */
     function handleSessionLeft() {
-        objects.clear();
-        typeIndex.clear();
-        lastSentData.clear();
-        pendingUpdates = [];
-        frameCounter = 0;
-        senderSequence = 0;
-        memberSequences.clear();
-        reconciling = false;
-        flushInProgress = false;
+        resetState();
         // console.log('[ObjectSync] Cleared all objects');
     }
 
@@ -292,15 +315,8 @@ const ObjectSync = (function() {
             return;
         }
 
-        const obj = {
-            id: objectInfo.id,
-            creatorMemberId: objectInfo.creatorMemberId,
-            ownerMemberId: objectInfo.ownerMemberId,
-            scope: objectInfo.scope,
-            data: objectInfo.data || {},
-            version: objectInfo.version,
-            isLocal: objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id
-        };
+        const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
+        const obj = toLocalObject(objectInfo, isLocal);
 
         objects.set(obj.id, obj);
         addToTypeIndex(obj);
@@ -477,15 +493,7 @@ const ObjectSync = (function() {
                     }
                 } else {
                     // Add missing object
-                    const localObj = {
-                        id: obj.id,
-                        creatorMemberId: obj.creatorMemberId,
-                        ownerMemberId: obj.ownerMemberId,
-                        scope: obj.scope,
-                        data: obj.data || {},
-                        version: obj.version,
-                        isLocal: false
-                    };
+                    const localObj = toLocalObject(obj, false);
                     objects.set(obj.id, localObj);
                     addToTypeIndex(localObj);
                     if (callbacks.onObjectCreated) {
@@ -554,15 +562,8 @@ const ObjectSync = (function() {
             // Response-first: register the object from the invoke response (no broadcast echo)
             const existing = objects.get(objectInfo.id);
             if (!existing) {
-                const obj = {
-                    id: objectInfo.id,
-                    creatorMemberId: objectInfo.creatorMemberId,
-                    ownerMemberId: objectInfo.ownerMemberId,
-                    scope: objectInfo.scope,
-                    data: objectInfo.data || {},
-                    version: objectInfo.version,
-                    isLocal: objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id
-                };
+                const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
+                const obj = toLocalObject(objectInfo, isLocal);
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
 
@@ -572,12 +573,7 @@ const ObjectSync = (function() {
             }
 
             // Track own member sequence from response (no broadcast echo to track it from)
-            if (response.memberSequence > 0) {
-                const myId = SessionClient.getCurrentMember()?.id;
-                if (myId) {
-                    trackMemberSequence(myId, response.memberSequence);
-                }
-            }
+            trackOwnMemberSequence(response.memberSequence);
 
             return objectInfo;
         } catch (err) {
@@ -801,12 +797,7 @@ const ObjectSync = (function() {
                     }
                 }
                 // Track own member sequence from response
-                if (response.memberSequence > 0) {
-                    const myId = SessionClient.getCurrentMember()?.id;
-                    if (myId) {
-                        trackMemberSequence(myId, response.memberSequence);
-                    }
-                }
+                trackOwnMemberSequence(response.memberSequence);
                 // RTT from request/response round-trip (uses responseTimestamp
                 // captured above to exclude local processing from the sample)
                 if (response.serverTimestamp && callbacks.onBatchReceived) {
@@ -860,11 +851,8 @@ const ObjectSync = (function() {
             const response = await SessionClient.deleteObject(objectId);
 
             // Track own member sequence from response (no broadcast echo to track it from)
-            if (response && response.memberSequence > 0) {
-                const myId = SessionClient.getCurrentMember()?.id;
-                if (myId) {
-                    trackMemberSequence(myId, response.memberSequence);
-                }
+            if (response) {
+                trackOwnMemberSequence(response.memberSequence);
             }
 
             return response?.success ?? false;
@@ -1003,15 +991,7 @@ const ObjectSync = (function() {
      * Clear all local objects (for testing).
      */
     function clear() {
-        objects.clear();
-        typeIndex.clear();
-        lastSentData.clear();
-        pendingUpdates = [];
-        fullSyncCounter = 0;
-        senderSequence = 0;
-        memberSequences.clear();
-        reconciling = false;
-        flushInProgress = false;
+        resetState();
     }
 
     // Public API
