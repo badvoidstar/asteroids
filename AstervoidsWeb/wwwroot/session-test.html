@@ -242,8 +242,13 @@
         </div>
     </div>
 
-    <!-- SignalR -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <!-- SignalR (local copy with CDN fallback) -->
+    <script src="/js/signalr.min.js"></script>
+    <script>
+        if (typeof signalR === 'undefined') {
+            document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"><\/script>');
+        }
+    </script>
     
     <!-- Session modules -->
     <script src="/js/session-client.js"></script>
@@ -481,7 +486,7 @@
             }
             try {
                 log('Creating new session...');
-                const result = await SessionClient.createSession();
+                const result = await SessionClient.createSession(16 / 9);
                 if (!result) {
                     log('Failed to create session - server may be at capacity or you are already in a session', 'error');
                     await refreshSessions();
@@ -615,6 +620,7 @@
                 }
                 await ObjectSync.flushUpdates();
                 log(`Updated ${objects.length} object(s)`, 'info');
+                updateObjectList(ObjectSync.getAllObjects());
             } catch (err) {
                 log('Error updating objects: ' + err.message, 'error');
             }
@@ -631,6 +637,8 @@
                 const lastObj = objects[objects.length - 1];
                 log(`Deleting object ${lastObj.id.substring(0, 8)}...`);
                 await ObjectSync.deleteObject(lastObj.id);
+                log(`Object deleted: ${lastObj.id.substring(0, 8)}...`, 'event');
+                updateObjectList(ObjectSync.getAllObjects());
             } catch (err) {
                 log('Error deleting object: ' + err.message, 'error');
             }
@@ -703,6 +711,11 @@
 
         SessionClient.on('onError', (error) => {
             log('Error: ' + error, 'error');
+        });
+
+        SessionClient.on('onSessionsChanged', () => {
+            log('Session list changed (server notification)', 'event');
+            refreshSessions();
         });
 
         // Object sync handlers
