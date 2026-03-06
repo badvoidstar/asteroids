@@ -966,7 +966,8 @@
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
-        SNAPSHOT_BUFFER_SIZE: 6        // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
+        SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
+        IMPACT_SPIN_FACTOR: 0.02       // Tunable scaling for bullet impact torque on asteroid split
     };
 
     // ============================================
@@ -2176,6 +2177,7 @@
             this.ownerMemberId = ownerMemberId;  // Member ID who fired this bullet
             this.syncObjectId = null;      // ObjectSync ID when in session
             this.pendingHit = false;       // True when awaiting hit confirmation from asteroid owner
+            this.hitImpactTorque = 0;      // Impact torque for angular momentum transfer on split
         }
 
         /**
@@ -2193,7 +2195,8 @@
                 colorIndex: this.colorIndex,
                 ownerMemberId: this.ownerMemberId,
                 pendingHit: this.pendingHit,
-                hitTargetId: this.hitTargetId || null
+                hitTargetId: this.hitTargetId || null,
+                hitImpactTorque: this.hitImpactTorque || 0
             };
         }
 
@@ -2208,7 +2211,8 @@
                 y: this.y,
                 lifetime: this.lifetime,
                 pendingHit: this.pendingHit,
-                hitTargetId: this.hitTargetId || null
+                hitTargetId: this.hitTargetId || null,
+                hitImpactTorque: this.hitImpactTorque || 0
             };
         }
 
@@ -2224,6 +2228,7 @@
             if (data.lifetime !== undefined) this.lifetime = data.lifetime;
             if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
             if (data.pendingHit !== undefined) this.pendingHit = data.pendingHit;
+            if (data.hitImpactTorque !== undefined) this.hitImpactTorque = data.hitImpactTorque;
         }
 
         /**
@@ -3145,14 +3150,16 @@
 
     /**
      * Split an asteroid into two smaller pieces
-     * Implements conservation of area (mass) and energy
+     * Implements conservation of area (mass), energy, and angular momentum
      * All values are in normalized coordinates
      * Called by the asteroid owner to process a hit.
      * In session mode, computes split and sends to server — all local state changes
      * come back through OnObjectReplaced for atomic processing on all clients.
      * @param {Asteroid} asteroid - The asteroid to split
+     * @param {string|null} childOwnerMemberId - Member ID to own the child asteroids (null = session default)
+     * @param {number} impactTorque - 2D cross product of (bullet offset) × (bullet velocity) at impact point
      */
-    function splitAsteroid(asteroid, childOwnerMemberId = null) {
+    function splitAsteroid(asteroid, childOwnerMemberId = null, impactTorque = 0) {
         // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
             if (isSessionMode() && asteroid.syncObjectId) {
@@ -3187,6 +3194,16 @@
         
         // Calculate total mass of surviving children for energy distribution
         const totalChildMass = children.reduce((sum, r) => sum + r ** 2, 0);
+
+        // Angular momentum conservation (Option 2 + 3):
+        // Moment of inertia ∝ r⁴, so L = I × ω = r⁴ × rotationSpeed
+        const parentAngularMomentum = asteroid.radius ** 4 * asteroid.rotationSpeed;
+        // impactTorque has units [normalized²/s]; parentAngularMomentum has units [normalized⁴ × rad/frame].
+        // Multiply by asteroid.radius² to scale to the same spatial dimension, and divide by TARGET_FPS
+        // to convert from per-second to per-frame, yielding consistent [normalized⁴ × rad/frame] units.
+        const bulletAngularMomentum = impactTorque * asteroid.radius ** 2 / CONFIG.TARGET_FPS * CONFIG.IMPACT_SPIN_FACTOR;
+        const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
+        const totalChildInertia = children.reduce((sum, r) => sum + r ** 4, 0);
         
         // Build child asteroid data
         const childAsteroids = [];
@@ -3211,6 +3228,12 @@
                 Math.cos(angle) * childSpeed,
                 Math.sin(angle) * childSpeed
             );
+
+            // Override random spin: distribute angular momentum proportional to child inertia
+            if (totalChildInertia > 0) {
+                childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia;
+            }
+            childAsteroid.angle = asteroid.angle;
             
             childAsteroids.push(childAsteroid);
         }
@@ -3385,8 +3408,11 @@
                             if (removedBullet.syncObjectId) {
                                 deleteSyncedBullet(removedBullet);
                             }
+                            const offsetX = bullet.x - asteroid.x;
+                            const offsetY = bullet.y - asteroid.y;
+                            const impactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
                             // Split sends to server — OnObjectReplaced handles asteroid state for all clients
-                            splitAsteroid(asteroid);
+                            splitAsteroid(asteroid, null, impactTorque);
                             // Self-award score on own ship
                             if (game.ship) {
                                 game.ship.score = (game.ship.score || 0) + points;
@@ -3396,6 +3422,9 @@
                             bullet.pendingHit = true;
                             bullet.hitTargetId = asteroid.syncObjectId;
                             bullet.pendingPoints = asteroid.getPoints();
+                            const offsetX = bullet.x - asteroid.x;
+                            const offsetY = bullet.y - asteroid.y;
+                            bullet.hitImpactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
                             if (bullet.syncObjectId) {
                                 ObjectSync.updateObject(bullet.syncObjectId, bullet.toUpdateData(), true);
                             }
@@ -3408,7 +3437,10 @@
                         const explosionSize = asteroid.radius >= CONFIG.ASTEROID_LARGE_THRESHOLD ? 'large' : 
                                               asteroid.radius >= CONFIG.ASTEROID_MEDIUM_THRESHOLD ? 'medium' : 'small';
                         AudioSystem.playExplosion(explosionSize);
-                        splitAsteroid(asteroid);
+                        const offsetX = bullet.x - asteroid.x;
+                        const offsetY = bullet.y - asteroid.y;
+                        const impactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
+                        splitAsteroid(asteroid, null, impactTorque);
                     }
                     
                     break;  // Bullet can only hit one asteroid
@@ -3443,7 +3475,8 @@
                 game.multiplayer.processedPendingBullets.add(bulletObj.id);
                 
                 // Split asteroid with split attribution for bullet owner confirmation
-                splitAsteroid(asteroid, bulletObj.data.ownerMemberId);
+                const impactTorque = bulletObj.data.hitImpactTorque || 0;
+                splitAsteroid(asteroid, bulletObj.data.ownerMemberId, impactTorque);
             }
             
             // Clean up processed bullets that no longer exist
