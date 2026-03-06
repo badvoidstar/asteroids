@@ -8,7 +8,7 @@ graph TB
         UI["index.html<br/>Single-file frontend<br/>Game loop · Rendering · Input"]
         OS["ObjectSync<br/>object-sync.js"]
         SC["SessionClient<br/>session-client.js"]
-        RO["RemoteObjects<br/>Interpolation · BUF · RTT · LAT"]
+        RO["RemoteObjects<br/>Interpolation · BUF · RTT · JIT"]
     end
 
     subgraph "ASP.NET Core Server"
@@ -82,7 +82,7 @@ graph TB
 
     subgraph "ObjectService"
         direction TB
-        OS_OPS["Operations:<br/>CreateObject → Id, Version=0, Owner<br/>UpdateObject → Version check, merge, Version++<br/>UpdateObjects → Batch (skip failures, partial success)<br/>DeleteObject → TryRemove (no ownership check)<br/>HandleMemberDeparture → Delete/Migrate"]
+        OS_OPS["Operations:<br/>CreateObject → Id, Version=1, Owner<br/>UpdateObject → Version check, merge, Version++<br/>UpdateObjects → Batch (skip failures, partial success)<br/>DeleteObject → TryRemove (no ownership check)<br/>HandleMemberDeparture → Delete/Migrate"]
         OS_CFG["Config:<br/>DistributeOrphanedObjects: true<br/>(round-robin vs first-member)"]
     end
 ```
@@ -156,7 +156,7 @@ flowchart TB
     L8["Set Role = Server<br/>session.Version++"]
     L9{"session.Members<br/>empty?"}
     L10["Destroy session:<br/>TryRemove from _sessions"]
-    L11["Return LeaveSessionResult<br/>{SessionId, MemberId,<br/>SessionDestroyed, PromotedMember?}"]
+    L11["Return LeaveSessionResult<br/>{SessionId, SessionName, MemberId,<br/>SessionDestroyed, PromotedMember?}"]
 
     L1 --> L2 --> L3
     L3 -->|No| L9
@@ -225,7 +225,7 @@ flowchart TB
         end
     end
 
-    RES["Return MemberDepartureResult<br/>{deletedIds[], migratedObjects[],<br/>affectedTypes[]}"]
+    RES["Return MemberDepartureResult<br/>{deletedIds[], migratedObjects[]}"]
 
     HD --> ITER --> CHK
     CHK -->|Member| DEL
@@ -398,7 +398,7 @@ stateDiagram-v2
     Creating --> InSession: Response (memberId, sessionId, role=Server)
     Joining --> InSession: Response (memberId, sessionId, role=Client, objects[], members[])
     InSession --> Lobby: LeaveSession()
-    InSession --> InSession: Server leaves → oldest Client promoted
+    InSession --> InSession: Server leaves → random Client promoted
 
     state InSession {
         [*] --> Playing
@@ -647,3 +647,294 @@ sequenceDiagram
 
     Note over A: A sees asteroid replaced → confirms hit, awards points
 ```
+
+## Response-First vs Local-First Patterns
+
+```mermaid
+flowchart TB
+    subgraph "CreateObject (Response-First)"
+        direction TB
+        C1["Caller invokes CreateObject"]
+        C2["Wait for server response<br/>(server assigns Id, Version=1)"]
+        C3["Register object in local Map<br/>from response"]
+        C4["Broadcast: OthersInGroup<br/>(sender excluded)"]
+        C5["If isStillNeeded callback returns false:<br/>auto-delete server object"]
+        C1 --> C2 --> C3
+        C2 --> C4
+        C3 --> C5
+    end
+
+    subgraph "DeleteObject (Local-First)"
+        direction TB
+        D1["Remove from local Map immediately<br/>(before server call)"]
+        D2["Remove from pendingUpdates"]
+        D3["Invoke server DeleteObject"]
+        D4["Server verifies ownership<br/>(rejects if not owner)"]
+        D5["Broadcast: OthersInGroup<br/>(sender excluded)"]
+        D1 --> D2 --> D3 --> D4 --> D5
+    end
+
+    subgraph "ReplaceObject (Broadcast-Dependent)"
+        direction TB
+        R1["Invoke server ReplaceObject"]
+        R2["Server creates children,<br/>deletes parent"]
+        R3["Broadcast: Group (ALL)<br/>sender included"]
+        R4["Sender updates local Map<br/>from broadcast echo"]
+        R1 --> R2 --> R3 --> R4
+    end
+```
+
+## Delta Encoding & Deferred Confirmation
+
+```mermaid
+sequenceDiagram
+    participant OS as ObjectSync
+    participant SC as SessionClient
+    participant SRV as Server
+
+    Note over OS: computeDelta(): compare current data vs lastSentData<br/>Uses shallow reference comparison (===)<br/>Nested objects must be spread into new refs
+
+    OS->>OS: delta = computeDelta(objectId, data)<br/>lastSentData NOT updated yet
+
+    OS->>SC: updateObjects(deltas, senderSeq, sendIntervalMs)
+    SC->>SRV: Invoke UpdateObjects(deltas, ...)
+
+    alt Server accepts batch
+        SRV-->>SC: Response {versions: {id→ver}, ...}
+        SC-->>OS: confirmSentDeltas(sentDeltas, versions)
+        OS->>OS: Update lastSentData only for<br/>confirmed objects
+    else Network error / null response
+        Note over OS: sentDeltas NOT confirmed<br/>→ all changed fields re-sent next flush
+    end
+
+    Note over OS: Full sync forced every 6000 frames<br/>(FULL_SYNC_INTERVAL) — bypasses delta,<br/>sends complete object state
+```
+
+## Type Index (ObjectSync)
+
+```mermaid
+flowchart TB
+    subgraph "Type Index (Map<string, Set<objectId>>)"
+        direction TB
+        IDX["typeIndex: Map<br/>e.g. 'ship' → {id1, id2}<br/>'asteroid' → {id3, id4, id5}<br/>'gameState' → {id6}"]
+    end
+
+    subgraph "Index Maintenance"
+        ADD["addToTypeIndex(obj)<br/>On: createObject, handleRemoteObjectCreated"]
+        REM["removeFromTypeIndex(obj)<br/>On: deleteObject, handleRemoteObjectDeleted"]
+        UPD["updateTypeIndex(obj, oldType, newType)<br/>On: updateObject, handleRemoteObjectsUpdated<br/>(only when data.type changes)"]
+    end
+
+    subgraph "Efficient Queries"
+        QT["getObjectsByType(type) → O(n) for n = matching<br/>vs O(N) scanning all objects"]
+        QS["getObjectByType(type) → O(1) singleton lookup<br/>e.g. GameState"]
+    end
+
+    ADD --> IDX
+    REM --> IDX
+    UPD --> IDX
+    IDX --> QT
+    IDX --> QS
+```
+
+## SignalR Reconnection & Reconciliation
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant SR as SignalR
+    participant HUB as SessionHub
+
+    Note over C,SR: Connection lost (network interruption)
+
+    SR->>SR: withAutomaticReconnect<br/>Exponential backoff: 1s, 2s, 4s, 8s, 16s<br/>Max 5 attempts, cap at 30s
+
+    SR->>C: onreconnecting(error)
+
+    alt Reconnection succeeds
+        SR->>C: onreconnected(connectionId)
+        C->>C: ObjectSync.triggerReconciliation()
+        C->>HUB: GetSessionState()
+        HUB-->>C: Full snapshot + memberSequences
+        C->>C: Sync local objects:<br/>• Add missing<br/>• Update stale<br/>• Remove ghosts<br/>• Reset sequences
+    else Max retries exceeded
+        SR->>C: onclose(error)
+        C->>C: Clear session & member state
+    end
+
+    Note over C: Reconciliation recovers from lost<br/>invoke responses during reconnection window
+```
+
+## SessionService: Thread Safety
+
+```mermaid
+flowchart TB
+    subgraph "Serialization Strategy"
+        direction TB
+        LOCK["_sessionLock (object)<br/>Serializes CreateSession & JoinSession<br/>Prevents TOCTOU races on:<br/>• connection-already-in-session check<br/>• max sessions count check<br/>• concurrent join + full check"]
+        PROMO["session.PromotionLock (object)<br/>Per-session lock for server promotion<br/>Double-check pattern: verify no server<br/>exists before promoting"]
+        CONC["ConcurrentDictionary (4 instances)<br/>_sessions, _connectionToMember,<br/>_memberToSession, session.Members<br/>Thread-safe individual operations"]
+    end
+
+    subgraph "Why _sessionLock is needed"
+        direction TB
+        RACE["Without _sessionLock, concurrent CreateSession calls<br/>could both pass the maxSessions check<br/>before either adds to _sessions"]
+    end
+
+    LOCK --> CONC
+    PROMO --> CONC
+```
+
+## Hub: Ownership Enforcement
+
+```mermaid
+flowchart TB
+    subgraph "ObjectService (no ownership check)"
+        OS_DEL["DeleteObject: TryRemove by id<br/>(trusts caller)"]
+        OS_UPD["UpdateObject: version check only<br/>(trusts caller)"]
+    end
+
+    subgraph "SessionHub (enforces ownership)"
+        HUB_UPD["UpdateObjects:<br/>Filter to obj.OwnerMemberId == caller.Id<br/>Only authorized updates reach ObjectService"]
+        HUB_DEL["DeleteObject:<br/>Verify obj.OwnerMemberId == caller.Id<br/>Reject with warning if not owner"]
+        HUB_REP["ReplaceObject:<br/>Verify obj.OwnerMemberId == caller.Id<br/>Reject + rollback if not owner"]
+    end
+
+    HUB_UPD --> OS_UPD
+    HUB_DEL --> OS_DEL
+    HUB_REP --> OS_DEL
+```
+
+## Project Structure
+
+```
+astervoids/
+├── ARCHITECTURE.md              # This document
+├── README.md                    # Project overview and setup
+├── CICD_SETUP.md               # CI/CD pipeline documentation
+├── DEV_NOTES.md                # Developer notes
+├── astervoids.sln              # .NET solution file
+├── azure.yaml                  # Azure Developer CLI config
+├── index.html                  # Root redirect page
+│
+├── AstervoidsWeb/              # Main web application
+│   ├── AstervoidsWeb.csproj    # .NET 10.0 Web SDK project
+│   ├── Program.cs              # App startup, DI, middleware, SignalR mapping
+│   ├── Dockerfile              # Multi-stage Docker build (SDK → aspnet runtime)
+│   ├── docker-compose.yml      # Local Docker orchestration
+│   ├── appsettings.json        # Configuration (Session section)
+│   ├── manifest.json           # PWA manifest
+│   │
+│   ├── Configuration/
+│   │   └── SessionSettings.cs  # MaxSessions, MaxMembersPerSession, DistributeOrphanedObjects
+│   │
+│   ├── Models/
+│   │   ├── Session.cs          # Session entity (Members, Objects, PromotionLock)
+│   │   ├── Member.cs           # Member entity (Role, EventSequence)
+│   │   ├── SessionObject.cs    # Synced object (Scope, Version, Data dictionary)
+│   │   ├── MemberRole.cs       # Enum: Server, Client
+│   │   └── ObjectScope.cs      # Enum: Member, Session
+│   │
+│   ├── Services/
+│   │   ├── ISessionService.cs  # Interface + result records (Create/Join/Leave/ActiveSessions)
+│   │   ├── SessionService.cs   # In-memory session management (ConcurrentDictionary)
+│   │   ├── IObjectService.cs   # Interface + ObjectUpdate/ObjectMigration/MemberDepartureResult
+│   │   └── ObjectService.cs    # Object CRUD, version control, member departure handling
+│   │
+│   ├── Hubs/
+│   │   ├── SessionHub.cs       # SignalR hub: game-agnostic session/object API
+│   │   └── HubDtos.cs          # Request/response DTOs for hub methods
+│   │
+│   └── wwwroot/
+│       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~4800 lines)
+│       ├── session-test.html   # Session management test harness
+│       ├── debug/
+│       │   └── index.html      # Real-time network metrics debug page
+│       └── js/
+│           ├── session-client.js  # SignalR connection & session API wrapper
+│           ├── object-sync.js     # Object registry, delta encoding, sync timing
+│           └── signalr.min.js     # SignalR client library (local copy)
+│
+├── AstervoidsWeb.Tests/        # xUnit test project (45 tests)
+│   ├── AstervoidsWeb.Tests.csproj  # Test dependencies: xUnit, FluentAssertions, Moq
+│   ├── SessionServiceTests.cs      # Session create/join/leave/naming (18 tests)
+│   ├── ObjectServiceTests.cs       # Object CRUD/versioning/departure (20 tests)
+│   └── ServerPromotionTests.cs     # Server role promotion scenarios (7 tests)
+│
+├── infra/                      # Azure infrastructure (Bicep IaC)
+│   ├── main.bicep              # Three deployment paths: production, branch, standalone
+│   ├── main.parameters.json    # Environment parameters
+│   ├── enable-custom-domain.ps1 # Custom domain setup script
+│   ├── CUSTOM_DOMAIN_SETUP.md  # Custom domain documentation
+│   └── core/
+│       ├── host/
+│       │   ├── container-apps.bicep  # Container Apps Environment + ACR
+│       │   └── container-app.bicep   # Individual Container App module
+│       └── dns/
+│           ├── dns-zone.bicep        # Azure DNS zone
+│           └── dns-records.bicep     # CNAME + TXT verification records
+│
+└── .github/
+    ├── copilot-instructions.md     # AI coding assistant instructions
+    ├── scripts/
+    │   └── sanitize-branch-name.sh # Branch name sanitization for deployments
+    └── workflows/
+        ├── azure-deploy.yml        # CI/CD: build, test, provision, deploy
+        └── cleanup-orphans.yml     # Cleanup orphaned branch deployments
+```
+
+## Infrastructure & Deployment
+
+```mermaid
+flowchart TB
+    subgraph "Three Deployment Paths"
+        direction TB
+        PROD["Production<br/>environmentName = 'production'<br/>Creates own resource group: rg-production<br/>Full infra: ACR + CAE + Container App<br/>Optional: DNS zone + custom domain"]
+        BRANCH["Branch (CI/CD)<br/>useSharedInfra = true<br/>Uses production's resource group<br/>Shares ACR + CAE<br/>Creates new Container App per branch"]
+        STANDALONE["Standalone (local dev)<br/>Creates own resource group: rg-{env}<br/>Full infra: own ACR + CAE + Container App"]
+    end
+
+    subgraph "CI/CD Pipeline (azure-deploy.yml)"
+        direction TB
+        TRIGGER["Trigger: push to main or PR branches"]
+        BUILD["Build & Test: dotnet build/test"]
+        DOCKER["Docker: build + push to ACR"]
+        DEPLOY["Deploy: azd provision + deploy"]
+        CLEANUP["cleanup-orphans.yml:<br/>Remove Container Apps for<br/>deleted/merged branches"]
+    end
+
+    subgraph "Runtime"
+        direction TB
+        CA["Azure Container App<br/>Port 8080, 0-1 replicas<br/>.NET 10.0 runtime"]
+        WS["WebSocket: /sessionHub<br/>SignalR with auto-reconnect"]
+        COMP["Response Compression:<br/>Brotli + Gzip (EnableForHttps=true)"]
+    end
+
+    TRIGGER --> BUILD --> DOCKER --> DEPLOY
+    DEPLOY --> PROD
+    DEPLOY --> BRANCH
+```
+
+## Game Configuration (CONFIG)
+
+The frontend `CONFIG` object in `index.html` defines all game constants (normalized to shorter canvas dimension):
+
+| Category | Key Constants |
+|----------|-------------|
+| **Physics** | `TARGET_FPS: 60`, `SHIP_THRUST: 0.009`, `SHIP_FRICTION: 0.99`, `SHIP_MAX_SPEED: 0.8` |
+| **Weapons** | `BULLET_SPEED: 1.0`, `BULLET_LIFETIME: 60 frames`, `MAX_BULLETS: 10`, `SHOOT_COOLDOWN: 10 frames` |
+| **Asteroids** | `INITIAL_ASTEROID_RADIUS: 0.083`, `MIN_ASTEROID_RADIUS: 0.025`, `SPLIT_COUNT: 2`, `IMPACT_SPIN_FACTOR: 0.02` |
+| **Scoring** | `POINTS_LARGE: 20`, `POINTS_MEDIUM: 50`, `POINTS_SMALL: 100` (smaller = more points) |
+| **Game** | `STARTING_LIVES: 3`, `MULTIPLAYER_LIVES: 3`, `INVULNERABILITY_TIME: 180 frames`, `WAVE_DELAY: 120 frames` |
+| **Sync** | `SYNC_NOMINAL_FRAME_TIME: 1/10 (10Hz)`, `ADAPTIVE_SEND_RATE: true`, `DELTA_ENCODING_ENABLED: true` |
+| **Interpolation** | `INTERPOLATION_DELAY: 33ms`, `ADAPTIVE_DELAY_ENABLED: true`, `SNAPSHOT_BUFFER_SIZE: 6`, `MAX_EXTRAPOLATION: 1.0s` |
+| **Adaptive Delay** | `ADAPTIVE_DELAY_NET_FLOOR: 0.25`, `ADAPTIVE_DELAY_JITTER_MULT: 2`, `ADAPTIVE_DELAY_SMOOTHING: 0.1`, `ADAPTIVE_DELAY_SAMPLES: 30` |
+
+Object types: `ship`, `asteroid`, `bullet`, `gameState`. Ship colors: Green, Cyan, Magenta, Yellow (up to 4 players).
+
+## Debug & Test Pages
+
+| Page | Path | Purpose |
+|------|------|---------|
+| **Debug** | `/debug/index.html` | Real-time network metrics display using BroadcastChannel. Shows per-member BUF, RTT, jitter, send rate, reconciliation count. Auto-connects to the game page's metrics broadcast. |
+| **Session Test** | `/session-test.html` | Interactive test harness for session management. Tests create/join/leave sessions, object CRUD, and SignalR events. Uses local `signalr.min.js`. |
