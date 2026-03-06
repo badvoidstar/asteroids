@@ -967,7 +967,7 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
-        IMPACT_SPIN_FACTOR: 0.5        // Tunable scaling for bullet impact torque on asteroid split
+        IMPACT_SPIN_FACTOR: 0.02       // Tunable scaling for bullet impact torque on asteroid split
     };
 
     // ============================================
@@ -3198,7 +3198,10 @@
         // Angular momentum conservation (Option 2 + 3):
         // Moment of inertia ∝ r⁴, so L = I × ω = r⁴ × rotationSpeed
         const parentAngularMomentum = asteroid.radius ** 4 * asteroid.rotationSpeed;
-        const bulletAngularMomentum = impactTorque * CONFIG.IMPACT_SPIN_FACTOR;
+        // impactTorque has units [normalized²/s]; parentAngularMomentum has units [normalized⁴ × rad/frame].
+        // Multiply by asteroid.radius² to scale to the same spatial dimension, and divide by TARGET_FPS
+        // to convert from per-second to per-frame, yielding consistent [normalized⁴ × rad/frame] units.
+        const bulletAngularMomentum = impactTorque * asteroid.radius ** 2 / CONFIG.TARGET_FPS * CONFIG.IMPACT_SPIN_FACTOR;
         const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
         const totalChildInertia = children.reduce((sum, r) => sum + r ** 4, 0);
         
