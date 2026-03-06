@@ -158,9 +158,6 @@
             gap: 10px;
             margin: 10px 0;
         }
-        #session-ui-container {
-            margin: 20px 0;
-        }
         .full-width {
             grid-column: 1 / -1;
         }
@@ -233,13 +230,6 @@
                 <div id="event-log" class="log"></div>
             </div>
         </div>
-
-        <!-- Built-in Session UI (optional test) -->
-        <div class="panel" style="margin-top: 20px;">
-            <h3>Built-in Session UI Component</h3>
-            <button onclick="toggleSessionUI()">Toggle Session UI</button>
-            <div id="session-ui-container" style="display: none;"></div>
-        </div>
     </div>
 
     <!-- SignalR (local copy with CDN fallback) -->
@@ -252,7 +242,6 @@
     
     <!-- Session modules -->
     <script src="/js/session-client.js"></script>
-    <script src="/js/session-ui.js"></script>
     <script src="/js/object-sync.js"></script>
 
     <script>
@@ -641,23 +630,6 @@
                 updateObjectList(ObjectSync.getAllObjects());
             } catch (err) {
                 log('Error deleting object: ' + err.message, 'error');
-            }
-        }
-
-        // Session UI toggle
-        function toggleSessionUI() {
-            const container = document.getElementById('session-ui-container');
-            if (container.style.display === 'none') {
-                container.style.display = 'block';
-                SessionUI.init('#session-ui-container', (session, member, action) => {
-                    log(`Session UI: ${action}`, 'event');
-                    if (session && member) {
-                        updateSessionUI(session, member);
-                    }
-                });
-            } else {
-                container.style.display = 'none';
-                SessionUI.destroy();
             }
         }
 
