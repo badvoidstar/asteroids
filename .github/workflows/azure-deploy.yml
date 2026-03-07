@@ -420,18 +420,94 @@ jobs:
             fi
           fi
 
+      - name: Verify Deployment Availability
+        id: verify
+        run: |
+          AZURE_URL="${{ steps.deploy.outputs.url }}"
+          AZURE_STATUS="unknown"
+          DOMAIN_STATUS="none"
+          
+          # Verify Azure Container Apps URL is accessible
+          echo "Verifying Azure URL: $AZURE_URL"
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$AZURE_URL" 2>/dev/null || echo "000")
+            echo "  Attempt $i: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+              AZURE_STATUS="accessible"
+              break
+            fi
+            sleep 5
+          done
+          
+          if [ "$AZURE_STATUS" != "accessible" ]; then
+            AZURE_STATUS="unavailable"
+            echo "::warning::Azure URL not yet responding (HTTP $HTTP_CODE). The container may still be starting."
+          fi
+          echo "azure_status=$AZURE_STATUS" >> $GITHUB_OUTPUT
+          
+          # Verify custom domain (if configured)
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo ""
+            echo "Verifying custom domain: https://$CUSTOM_DOMAIN"
+            
+            # Check DNS resolution
+            DNS_RESOLVED=false
+            RESOLVED_IP=$(dig +short "$CUSTOM_DOMAIN" 2>/dev/null | head -1)
+            if [ -n "$RESOLVED_IP" ]; then
+              DNS_RESOLVED=true
+              echo "  DNS resolves to: $RESOLVED_IP"
+            else
+              echo "  DNS not resolving yet"
+            fi
+            
+            # Check HTTPS accessibility
+            if [ "$DNS_RESOLVED" = "true" ]; then
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$CUSTOM_DOMAIN" 2>/dev/null || echo "000")
+              echo "  HTTPS response: HTTP $HTTP_CODE"
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+                DOMAIN_STATUS="accessible"
+              else
+                DOMAIN_STATUS="dns_ok_not_serving"
+              fi
+            else
+              DOMAIN_STATUS="pending_dns"
+            fi
+          fi
+          echo "domain_status=$DOMAIN_STATUS" >> $GITHUB_OUTPUT
+
       - name: Deployment Summary
         run: |
-          echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.vars.outputs.is_production }}" = "true" ]; then
             echo "**Environment:** production" >> $GITHUB_STEP_SUMMARY
           else
             echo "**Environment:** preview (${{ steps.vars.outputs.branch_name }})" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "**Application URL:** ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
-          if [ -n "$CUSTOM_DOMAIN" ]; then
-            echo "**Custom Domain:** https://$CUSTOM_DOMAIN" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Azure URL status
+          AZURE_URL="${{ steps.deploy.outputs.url }}"
+          if [ "${{ steps.verify.outputs.azure_status }}" = "accessible" ]; then
+            echo "✅ **Azure URL:** $AZURE_URL" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏳ **Azure URL:** $AZURE_URL *(container still starting)*" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          # Custom domain status
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            case "${{ steps.verify.outputs.domain_status }}" in
+              accessible)
+                echo "✅ **Custom Domain:** https://$CUSTOM_DOMAIN" >> $GITHUB_STEP_SUMMARY
+                ;;
+              dns_ok_not_serving)
+                echo "⏳ **Custom Domain:** https://$CUSTOM_DOMAIN *(DNS resolves but HTTPS not yet serving — certificate may still be provisioning)*" >> $GITHUB_STEP_SUMMARY
+                ;;
+              pending_dns)
+                echo "⏳ **Custom Domain:** https://$CUSTOM_DOMAIN *(waiting for DNS propagation)*" >> $GITHUB_STEP_SUMMARY
+                ;;
+            esac
+          fi
+          
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "View your deployment in the [Azure Portal](https://portal.azure.com)" >> $GITHUB_STEP_SUMMARY

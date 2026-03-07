@@ -41,6 +41,15 @@ After the base deployment, the workflow attempts to:
 ### Branch Deployments
 Branch deployments (e.g., `feature-login.app.yourdomain.com`) reuse the shared wildcard certificate created during production deployment. No per-branch certificate is created — the workflow simply adds the hostname and binds it to the wildcard cert.
 
+### Deployment Verification
+After custom domain setup, the workflow verifies that all URLs are actually accessible:
+- **Azure URL** (`*.azurecontainerapps.io`): Verified with HTTP request (retries up to 5 times)
+- **Custom domain**: Checked for DNS resolution and HTTPS accessibility
+
+The deployment summary uses status indicators to show what is ready:
+- ✅ URL is accessible right now
+- ⏳ URL is not yet accessible (DNS propagation or certificate provisioning in progress)
+
 ## DNS Configuration
 
 ### If Using Azure DNS (Recommended)
@@ -79,7 +88,24 @@ If the automated setup fails (e.g., DNS not propagated yet), run manually:
     -CustomDomain "app.yourdomain.com"
 ```
 
-Or using Azure CLI:
+The script will:
+1. **Pre-check DNS** — verifies CNAME and TXT records resolve before proceeding
+2. Add the custom hostname
+3. Create and bind a managed certificate
+4. **Post-verify** — confirms `https://app.yourdomain.com` is actually accessible
+
+If DNS is hosted in Azure DNS (same subscription), you can skip the DNS pre-check since Azure Container Apps can verify its own DNS directly:
+
+```powershell
+.\infra\enable-custom-domain.ps1 `
+    -ResourceGroup "rg-production" `
+    -ContainerAppName "ca-web-production" `
+    -EnvironmentName "cae-production" `
+    -CustomDomain "app.yourdomain.com" `
+    -SkipDnsCheck
+```
+
+Or using Azure CLI directly:
 
 ```bash
 # 1. Add hostname
@@ -112,6 +138,12 @@ This means DNS verification records haven't propagated yet. Solutions:
 - Wait 5-15 minutes and re-run the deployment
 - Verify DNS records are correctly configured at your registrar
 - Check if you're using Azure DNS name servers
+
+### Deployment Summary Shows ⏳ for Custom Domain
+This means the deployment succeeded but the custom domain is not yet publicly accessible:
+- **"waiting for DNS propagation"**: Your domain registrar's NS records may not point to Azure DNS yet, or DNS caches haven't expired. Typically resolves in 5-30 minutes (up to 48 hours for NS changes).
+- **"certificate may still be provisioning"**: DNS resolves but the TLS certificate isn't ready. Usually resolves in 1-5 minutes.
+- The Azure URL (`*.azurecontainerapps.io`) is always immediately accessible — use it in the meantime.
 
 ### Check DNS Propagation
 ```bash
