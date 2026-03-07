@@ -39,7 +39,7 @@ After the base deployment, the workflow attempts to:
 **Note**: This step uses `continue-on-error: true` because DNS propagation may not be complete on the first deployment. Subsequent deployments will succeed once DNS has propagated.
 
 ### Branch Deployments
-Branch deployments (e.g., `feature-login.app.yourdomain.com`) reuse the shared wildcard certificate created during production deployment. No per-branch certificate is created — the workflow simply adds the hostname and binds it to the wildcard cert.
+Branch deployments (e.g., `feature-login.app.yourdomain.com`) use a shared wildcard certificate. If the wildcard cert doesn't exist yet (e.g., first deployment after infrastructure provisioning, or after an `azd down`/`azd up` cycle), the branch deployment will automatically create it. No per-branch certificate is created — the workflow adds the hostname and binds it to the wildcard cert.
 
 ### Deployment Verification
 After custom domain setup, the workflow verifies that all URLs are actually accessible:
@@ -214,7 +214,7 @@ No orphaned resources are left behind.
 
 ## Wildcard Certificate for Branch Deployments
 
-Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. The workflow attempts to create this automatically during production deployment.
+Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. The workflow automatically creates this certificate during either the production deployment or the first branch deployment — whichever runs first after infrastructure is provisioned.
 
 ### Certificate Naming Convention
 

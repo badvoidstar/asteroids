@@ -379,28 +379,41 @@ jobs:
           else
             # ============================================================
             # BRANCH: Use shared wildcard certificate (no per-branch cert)
-            # No DNS wait — Azure DNS records were just created by Bicep
-            # during azd provision, so Azure can verify them immediately.
+            # Creates the wildcard cert automatically if it doesn't exist
+            # (e.g., first branch deploy after infra was provisioned, or
+            # after azd down/up cycle). No DNS wait — Azure DNS records
+            # were just created by Bicep during azd provision, so Azure
+            # can verify them immediately.
             # ============================================================
             BASE_DOMAIN="${{ secrets.CUSTOM_DOMAIN_NAME }}"
             BASE_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}"
             WILDCARD_CERT="cert-wildcard-${BASE_SUBDOMAIN}-${BASE_DOMAIN//./-}"
             
-            # Check that the wildcard cert exists
+            # Check that the wildcard cert exists; create it if not
+            WILDCARD_HOST="*.${BASE_SUBDOMAIN}.${BASE_DOMAIN}"
             WILDCARD_EXISTS=$(az containerapp env certificate list \
               --resource-group "$RESOURCE_GROUP" \
               --name "$CONTAINER_APPS_ENVIRONMENT" \
               --query "[?name=='$WILDCARD_CERT'].name" -o tsv 2>/dev/null || echo "")
             
             if [ -z "$WILDCARD_EXISTS" ]; then
-              echo "::warning::Wildcard certificate '$WILDCARD_CERT' not found."
-              echo "Deploy the 'main' branch first or upload a wildcard certificate"
-              echo "for '*.${BASE_SUBDOMAIN}.${BASE_DOMAIN}' to enable HTTPS for branch deployments."
-              echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
-              exit 0
+              echo "Wildcard certificate '$WILDCARD_CERT' not found. Creating it now..."
+              if az containerapp env certificate create \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APPS_ENVIRONMENT" \
+                --certificate-name "$WILDCARD_CERT" \
+                --hostname "$WILDCARD_HOST" \
+                --validation-method CNAME 2>&1; then
+                echo "✅ Wildcard certificate created: $WILDCARD_CERT"
+              else
+                echo "::warning::Could not create wildcard managed certificate '$WILDCARD_CERT'."
+                echo "Upload a wildcard certificate for '$WILDCARD_HOST' manually."
+                echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
+                exit 0
+              fi
             fi
             
-            # Wait for wildcard cert to be fully provisioned (may still be provisioning from production deploy)
+            # Wait for wildcard cert to be fully provisioned (may still be provisioning)
             CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$WILDCARD_CERT"
             CERT_STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
             
