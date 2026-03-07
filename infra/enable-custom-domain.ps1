@@ -29,11 +29,21 @@
 .PARAMETER SkipDnsCheck
     Skip the DNS pre-check (use if you know DNS is configured via Azure DNS).
 
+.PARAMETER CreateWildcard
+    Also create a wildcard certificate (*.CustomDomain) for branch deployments.
+
 .EXAMPLE
     .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
         -ContainerAppName "ca-web-production" `
         -EnvironmentName "cae-production" `
         -CustomDomain "app.yourdomain.com"
+
+.EXAMPLE
+    .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
+        -ContainerAppName "ca-web-production" `
+        -EnvironmentName "cae-production" `
+        -CustomDomain "app.yourdomain.com" `
+        -CreateWildcard
 #>
 
 param(
@@ -49,7 +59,9 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$CustomDomain,
 
-    [switch]$SkipDnsCheck
+    [switch]$SkipDnsCheck,
+
+    [switch]$CreateWildcard
 )
 
 $ErrorActionPreference = "Stop"
@@ -177,4 +189,40 @@ if ($accessible) {
     Write-Host "⚠ Certificate bound but https://$CustomDomain is not yet responding." -ForegroundColor Yellow
     Write-Host "  This is normal if DNS hasn't fully propagated to all resolvers." -ForegroundColor Yellow
     Write-Host "  The domain should become accessible within a few minutes." -ForegroundColor Yellow
+}
+
+# Optional: Create wildcard certificate for branch deployments
+if ($CreateWildcard) {
+    Write-Host "`n=== Wildcard Certificate for Branch Deployments ===" -ForegroundColor Cyan
+    $wildcardHost = "*.$CustomDomain"
+    $wildcardCertName = "cert-wildcard-$($CustomDomain -replace '\.', '-')"
+
+    Write-Host "  Hostname: $wildcardHost"
+    Write-Host "  Certificate name: $wildcardCertName"
+
+    $existingWildcard = az containerapp env certificate list `
+        --resource-group $ResourceGroup `
+        --name $EnvironmentName `
+        --query "[?name=='$wildcardCertName'].name" -o tsv 2>$null
+
+    if ($existingWildcard) {
+        Write-Host "✅ Wildcard certificate already exists: $wildcardCertName" -ForegroundColor Green
+    } else {
+        Write-Host "Creating wildcard managed certificate..." -ForegroundColor Yellow
+        az containerapp env certificate create `
+            --resource-group $ResourceGroup `
+            --name $EnvironmentName `
+            --certificate-name $wildcardCertName `
+            --hostname $wildcardHost `
+            --validation-method CNAME 2>&1 | Out-Null
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ Wildcard certificate created: $wildcardCertName" -ForegroundColor Green
+            Write-Host "  Branch deployments (e.g., feature-login.$CustomDomain) will use this certificate." -ForegroundColor Green
+        } else {
+            Write-Host "⚠ Could not create managed wildcard certificate." -ForegroundColor Yellow
+            Write-Host "  Upload a wildcard certificate for '$wildcardHost' manually." -ForegroundColor Yellow
+            Write-Host "  See infra/CUSTOM_DOMAIN_SETUP.md for instructions." -ForegroundColor Yellow
+        }
+    }
 }

@@ -400,6 +400,32 @@ jobs:
               exit 0
             fi
             
+            # Wait for wildcard cert to be fully provisioned (may still be provisioning from production deploy)
+            CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$WILDCARD_CERT"
+            CERT_STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+            
+            if [ "$CERT_STATE" != "Succeeded" ]; then
+              echo "Wildcard certificate exists but is $CERT_STATE, waiting for provisioning..."
+              for i in $(seq 1 30); do
+                CERT_STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+                echo "  Certificate state: $CERT_STATE (check $i/30)"
+                if [ "$CERT_STATE" = "Succeeded" ]; then
+                  break
+                elif [ "$CERT_STATE" = "Failed" ]; then
+                  echo "::warning::Wildcard certificate provisioning failed."
+                  echo "See infra/CUSTOM_DOMAIN_SETUP.md for manual certificate instructions."
+                  exit 0
+                fi
+                sleep 10
+              done
+              
+              if [ "$CERT_STATE" != "Succeeded" ]; then
+                echo "::warning::Wildcard certificate still provisioning after 5 minutes."
+                echo "Try deploying again later."
+                exit 0
+              fi
+            fi
+            
             # Add hostname and bind with wildcard cert (no DNS wait needed)
             echo "Adding custom hostname..."
             az containerapp hostname add \

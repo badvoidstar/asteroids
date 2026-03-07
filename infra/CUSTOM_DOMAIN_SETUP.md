@@ -94,6 +94,17 @@ The script will:
 3. Create and bind a managed certificate
 4. **Post-verify** — confirms `https://app.yourdomain.com` is actually accessible
 
+To also create the shared wildcard certificate for branch deployments, add `-CreateWildcard`:
+
+```powershell
+.\infra\enable-custom-domain.ps1 `
+    -ResourceGroup "rg-production" `
+    -ContainerAppName "ca-web-production" `
+    -EnvironmentName "cae-production" `
+    -CustomDomain "app.yourdomain.com" `
+    -CreateWildcard
+```
+
 If DNS is hosted in Azure DNS (same subscription), you can skip the DNS pre-check since Azure Container Apps can verify its own DNS directly:
 
 ```powershell
@@ -166,6 +177,38 @@ az containerapp env certificate list \
     --resource-group rg-production \
     --name cae-production
 ```
+
+## Manual Deployments with `azd`
+
+When deploying manually with `azd` (instead of through the GitHub Actions workflow):
+
+### `azd up` (Create)
+
+`azd up` provisions all infrastructure via Bicep templates and deploys the application:
+- **Standalone** (`azd up` with any non-production environment name): Creates its own resource group, Container Apps Environment, Container Registry, and Container App. No custom domain configuration.
+- **Production** (`azd up` with `AZURE_ENV_NAME=production`): Creates `rg-production` with all shared infrastructure plus DNS zone and records.
+
+Custom domain and certificates are **not** configured by `azd up` — they are handled by the GitHub Actions workflow. For manual deployments, run `enable-custom-domain.ps1` after `azd up`:
+
+```powershell
+azd up                                    # Creates infrastructure + deploys app
+.\infra\enable-custom-domain.ps1 `        # Configures custom domain + certificates
+    -ResourceGroup "rg-production" `
+    -ContainerAppName "ca-web-production" `
+    -EnvironmentName "cae-production" `
+    -CustomDomain "app.yourdomain.com" `
+    -CreateWildcard -SkipDnsCheck
+```
+
+### `azd down` (Destroy)
+
+`azd down` deletes the resource group and all resources within it:
+- All Container Apps (including any branch deployments sharing the resource group)
+- Container Apps Environment (including all certificates — both production and wildcard)
+- Container Registry
+- DNS Zone (including all DNS records)
+
+No orphaned resources are left behind.
 
 ## Wildcard Certificate for Branch Deployments
 
