@@ -188,6 +188,8 @@ When deploying manually with `azd` (instead of through the GitHub Actions workfl
 - **Standalone** (`azd up` with any non-production environment name): Creates its own resource group, Container Apps Environment, Container Registry, and Container App. No custom domain configuration.
 - **Production** (`azd up` with `AZURE_ENV_NAME=production`): Creates `rg-production` with all shared infrastructure plus DNS zone and records.
 
+The environment name determines the deployment path — see `isProduction = environmentName == 'production'` in `infra/main.bicep`.
+
 Custom domain and certificates are **not** configured by `azd up` — they are handled by the GitHub Actions workflow. For manual deployments, run `enable-custom-domain.ps1` after `azd up`:
 
 ```powershell

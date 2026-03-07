@@ -209,12 +209,12 @@ if ($CreateWildcard) {
         Write-Host "✅ Wildcard certificate already exists: $wildcardCertName" -ForegroundColor Green
     } else {
         Write-Host "Creating wildcard managed certificate..." -ForegroundColor Yellow
-        az containerapp env certificate create `
+        $certOutput = az containerapp env certificate create `
             --resource-group $ResourceGroup `
             --name $EnvironmentName `
             --certificate-name $wildcardCertName `
             --hostname $wildcardHost `
-            --validation-method CNAME 2>&1 | Out-Null
+            --validation-method CNAME 2>&1
 
         if ($LASTEXITCODE -eq 0) {
             Write-Host "✅ Wildcard certificate created: $wildcardCertName" -ForegroundColor Green
