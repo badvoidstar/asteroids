@@ -441,7 +441,11 @@ jobs:
           
           if [ "$AZURE_STATUS" != "accessible" ]; then
             AZURE_STATUS="unavailable"
-            echo "::warning::Azure URL not yet responding (HTTP $HTTP_CODE). The container may still be starting."
+            if [ "$HTTP_CODE" = "000" ]; then
+              echo "::warning::Azure URL not reachable (connection failed or timed out). The container may still be starting."
+            else
+              echo "::warning::Azure URL returned HTTP $HTTP_CODE. The container may still be starting."
+            fi
           fi
           echo "azure_status=$AZURE_STATUS" >> $GITHUB_OUTPUT
           
@@ -452,10 +456,10 @@ jobs:
             
             # Check DNS resolution
             DNS_RESOLVED=false
-            RESOLVED_IP=$(dig +short "$CUSTOM_DOMAIN" 2>/dev/null | head -1)
-            if [ -n "$RESOLVED_IP" ]; then
+            RESOLVED_ADDR=$(nslookup "$CUSTOM_DOMAIN" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | head -1 || echo "")
+            if [ -n "$RESOLVED_ADDR" ]; then
               DNS_RESOLVED=true
-              echo "  DNS resolves to: $RESOLVED_IP"
+              echo "  DNS resolves: $RESOLVED_ADDR"
             else
               echo "  DNS not resolving yet"
             fi

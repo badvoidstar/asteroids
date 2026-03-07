@@ -141,7 +141,7 @@ This means DNS verification records haven't propagated yet. Solutions:
 
 ### Deployment Summary Shows ⏳ for Custom Domain
 This means the deployment succeeded but the custom domain is not yet publicly accessible:
-- **"waiting for DNS propagation"**: Your domain registrar's NS records may not point to Azure DNS yet, or DNS caches haven't expired. Typically resolves in 5-30 minutes (up to 48 hours for NS changes).
+- **"waiting for DNS propagation"**: DNS record changes (CNAME/TXT) typically propagate in 5-30 minutes. If this is a first-time setup requiring NS record changes at your domain registrar, propagation can take up to 48 hours.
 - **"certificate may still be provisioning"**: DNS resolves but the TLS certificate isn't ready. Usually resolves in 1-5 minutes.
 - The Azure URL (`*.azurecontainerapps.io`) is always immediately accessible — use it in the meantime.
 
