@@ -114,7 +114,7 @@ jobs:
               # Delete DNS records if custom domain is configured
               if [ -n "${{ secrets.CUSTOM_DOMAIN_NAME }}" ] && [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
                 DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
-                BRANCH_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}-$SANITIZED_BRANCH"
+                BRANCH_SUBDOMAIN="$SANITIZED_BRANCH.${{ secrets.CUSTOM_SUBDOMAIN }}"
                 
                 echo "  -> Deleting DNS records for: $BRANCH_SUBDOMAIN.$DOMAIN_NAME"
                 
@@ -133,7 +133,7 @@ jobs:
                   --yes 2>/dev/null || echo "  -> TXT not found"
                 
                 # Delete managed certificate
-                CERT_NAME="cert-${BRANCH_SUBDOMAIN}-${DOMAIN_NAME//./-}"
+                CERT_NAME="cert-${BRANCH_SUBDOMAIN//./-}-${DOMAIN_NAME//./-}"
                 az containerapp env certificate delete \
                   --resource-group "${{ env.PRODUCTION_RG }}" \
                   --name "${{ env.CONTAINER_ENV_NAME }}" \
@@ -185,12 +185,12 @@ jobs:
           CNAME_RECORDS=$(az network dns record-set cname list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
             --zone-name "$DOMAIN_NAME" \
-            --query "[?starts_with(name, '${SUBDOMAIN_PREFIX}-')].name" \
+            --query "[?ends_with(name, '.${SUBDOMAIN_PREFIX}')].name" \
             -o tsv 2>/dev/null || echo "")
           
           for CNAME in $CNAME_RECORDS; do
-            # Extract suffix (e.g., "astervoids-feature-test" -> "feature-test")
-            SUFFIX="${CNAME#${SUBDOMAIN_PREFIX}-}"
+            # Extract suffix (e.g., "feature-login.app" -> "feature-login")
+            SUFFIX="${CNAME%.${SUBDOMAIN_PREFIX}}"
             
             # Check if this suffix matches an active container app
             IS_ACTIVE=false
@@ -217,12 +217,13 @@ jobs:
           TXT_RECORDS=$(az network dns record-set txt list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
             --zone-name "$DOMAIN_NAME" \
-            --query "[?starts_with(name, 'asuid.${SUBDOMAIN_PREFIX}-')].name" \
+            --query "[?ends_with(name, '.${SUBDOMAIN_PREFIX}') && starts_with(name, 'asuid.')].name" \
             -o tsv 2>/dev/null || echo "")
           
           for TXT in $TXT_RECORDS; do
-            # Extract suffix (e.g., "asuid.astervoids-feature-test" -> "feature-test")
-            SUFFIX="${TXT#asuid.${SUBDOMAIN_PREFIX}-}"
+            # Extract suffix (e.g., "asuid.feature-test.app" -> "feature-test")
+            TEMP="${TXT#asuid.}"
+            SUFFIX="${TEMP%.${SUBDOMAIN_PREFIX}}"
             
             IS_ACTIVE=false
             for ACTIVE in $ACTIVE_SUFFIXES; do
@@ -245,19 +246,20 @@ jobs:
           # Scan certificates for orphans
           echo ""
           echo "Scanning certificates..."
+          DOMAIN_SUFFIX="${DOMAIN_NAME//./-}"
+          PROD_CERT="cert-${SUBDOMAIN_PREFIX}-${DOMAIN_SUFFIX}"
           CERTS=$(az containerapp env certificate list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
             --name "${{ env.CONTAINER_ENV_NAME }}" \
-            --query "[?starts_with(name, 'cert-${SUBDOMAIN_PREFIX}-') && name != 'cert-${SUBDOMAIN_PREFIX}-${DOMAIN_NAME//./-}'].name" \
+            --query "[?ends_with(name, '-${SUBDOMAIN_PREFIX}-${DOMAIN_SUFFIX}') && name != '${PROD_CERT}'].name" \
             -o tsv 2>/dev/null || echo "")
           
           for CERT in $CERTS; do
             [ -z "$CERT" ] && continue
             
-            # Extract suffix from cert name
-            DOMAIN_SUFFIX="${DOMAIN_NAME//./-}"
-            TEMP="${CERT#cert-${SUBDOMAIN_PREFIX}-}"
-            SUFFIX="${TEMP%-${DOMAIN_SUFFIX}}"
+            # Extract suffix from cert name (e.g., "cert-feature-login-app-domain-com" -> "feature-login")
+            TEMP="${CERT#cert-}"
+            SUFFIX="${TEMP%-${SUBDOMAIN_PREFIX}-${DOMAIN_SUFFIX}}"
             
             IS_ACTIVE=false
             for ACTIVE in $ACTIVE_SUFFIXES; do

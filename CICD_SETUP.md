@@ -128,7 +128,7 @@ When you push to any branch, the workflow automatically:
 
 Branch deployments get subdomains following this pattern:
 - **Production (main):** `{subdomain}.{domain}` (e.g., `app.yourdomain.com`)
-- **Feature branches:** `{subdomain}-{branch}.{domain}` (e.g., `app-feature-login.yourdomain.com`)
+- **Feature branches:** `{branch}.{subdomain}.{domain}` (e.g., `feature-login.app.yourdomain.com`)
 
 Branch names are sanitized for DNS compatibility:
 - Converted to lowercase
@@ -141,7 +141,7 @@ Branch names are sanitized for DNS compatibility:
 | Resource | Production | Branch (feature/login) |
 |----------|------------|------------------------|
 | Container App | `ca-web-production` | `ca-web-feature-login` |
-| Subdomain | `app.domain.com` | `app-feature-login.domain.com` |
+| Subdomain | `app.domain.com` | `feature-login.app.domain.com` |
 
 ### Prerequisites for Branch Deployments
 

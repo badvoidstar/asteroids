@@ -138,12 +138,12 @@ jobs:
             azd env set CUSTOM_DOMAIN_NAME "${{ secrets.CUSTOM_DOMAIN_NAME }}"
           fi
           
-          # Set subdomain (with branch suffix for non-production)
+          # Set subdomain (with branch prefix as subdomain level for non-production)
           if [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
             if [ "${{ steps.vars.outputs.is_production }}" = "true" ]; then
               azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}"
             else
-              azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
+              azd env set CUSTOM_SUBDOMAIN "${{ steps.vars.outputs.sanitized_branch }}.${{ secrets.CUSTOM_SUBDOMAIN }}"
             fi
           fi
 
