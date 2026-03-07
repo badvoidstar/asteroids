@@ -217,7 +217,7 @@ jobs:
           TXT_RECORDS=$(az network dns record-set txt list \
             --resource-group "${{ env.PRODUCTION_RG }}" \
             --zone-name "$DOMAIN_NAME" \
-            --query "[?ends_with(name, '.${SUBDOMAIN_PREFIX}') && starts_with(name, 'asuid.')].name" \
+            --query "[?ends_with(name, '.${SUBDOMAIN_PREFIX}') && starts_with(name, 'asuid.') && name != 'asuid.${SUBDOMAIN_PREFIX}'].name" \
             -o tsv 2>/dev/null || echo "")
           
           for TXT in $TXT_RECORDS; do
