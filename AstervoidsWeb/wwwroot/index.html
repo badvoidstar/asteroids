@@ -4922,6 +4922,21 @@
                     attemptAutoRejoin(savedSessionId);
                 }
             }
+            // Deferred health check: the visibilitychange event can fire before
+            // the queued WebSocket close event is processed, making the connection
+            // appear alive when it's actually dead. Re-check after a short delay
+            // to catch this race condition and trigger reconnection promptly
+            // instead of waiting for SignalR's full retry cycle (15-25 seconds).
+            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+                setTimeout(() => {
+                    if (!SessionClient.isConnected() && !rejoinInProgress) {
+                        const savedSessionId = SessionClient.getLastSessionId();
+                        if (savedSessionId) {
+                            attemptAutoRejoin(savedSessionId);
+                        }
+                    }
+                }, 1000);
+            }
         }
     });
 

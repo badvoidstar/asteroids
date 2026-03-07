@@ -39,6 +39,17 @@ const SessionClient = (function() {
             return true;
         }
 
+        // Stop any existing connection to prevent stale event handlers from
+        // firing after we create a new connection. On mobile, the OS kills
+        // WebSocket connections when backgrounded. Without this cleanup, the
+        // old connection's onclose fires after the new connection is established
+        // and trashes the restored session state.
+        if (connection) {
+            const stale = connection;
+            connection = null; // Clear reference so stale handlers are ignored
+            try { stale.stop(); } catch (e) { /* ignore */ }
+        }
+
         try {
             connection = new signalR.HubConnectionBuilder()
                 .withUrl('/sessionHub')
@@ -99,13 +110,21 @@ const SessionClient = (function() {
 
     /**
      * Setup SignalR event handlers.
+     * Captures a reference to the current connection so that if connect()
+     * replaces it later (e.g., after a mobile background disconnect), the
+     * old connection's handlers are silently ignored instead of trashing
+     * the newly restored session state.
      */
     function setupEventHandlers() {
+        const thisConnection = connection;
+
         connection.onreconnecting(error => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Reconnecting...', error);
         });
 
         connection.onreconnected(connectionId => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
             // Reconcile state — invoke responses for Create/Delete/Update may have been
@@ -117,6 +136,7 @@ const SessionClient = (function() {
         });
 
         connection.onclose(error => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Connection closed:', error);
             currentSession = null;
             currentMember = null;
@@ -129,6 +149,7 @@ const SessionClient = (function() {
 
         // Session events
         connection.on('OnMemberJoined', (memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
@@ -140,6 +161,7 @@ const SessionClient = (function() {
         });
 
         connection.on('OnMemberLeft', (info, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
@@ -171,24 +193,28 @@ const SessionClient = (function() {
 
         // Object events
         connection.on('OnObjectCreated', (objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
             }
         });
 
         connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
         });
 
         connection.on('OnObjectDeleted', (objectId, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId, senderMemberId, memberSequence);
             }
         });
 
         connection.on('OnObjectReplaced', (event, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
             }
@@ -196,6 +222,7 @@ const SessionClient = (function() {
 
         // Session list changed (signal only - fetch data separately)
         connection.on('OnSessionsChanged', () => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
