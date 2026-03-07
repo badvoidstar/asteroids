@@ -1,7 +1,0 @@
-Test run for /home/runner/work/astervoids/astervoids/AstervoidsWeb.Tests/bin/Debug/net10.0/AstervoidsWeb.Tests.dll (.NETCoreApp,Version=v10.0)
-VSTest version 18.0.1 (x64)
-
-Starting test execution, please wait...
-A total of 1 test files matched the specified pattern.
-
-Passed!  - Failed:     0, Passed:    45, Skipped:     0, Total:    45, Duration: 83 ms - AstervoidsWeb.Tests.dll (net10.0)
