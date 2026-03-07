@@ -44,6 +44,13 @@ const SessionClient = (function() {
         // WebSocket connections when backgrounded. Without this cleanup, the
         // old connection's onclose fires after the new connection is established
         // and trashes the restored session state.
+        //
+        // The connection = null before stale.stop() is intentional: it ensures
+        // any synchronously-fired onclose from stop() sees connection !== thisConnection
+        // and skips. The null window between here and line where the new connection is
+        // assigned is safe because JavaScript is single-threaded — no other code can
+        // access `connection` until we yield at await connection.start() below, by
+        // which point `connection` is already set to the new connection.
         if (connection) {
             const stale = connection;
             connection = null; // Clear reference so stale handlers are ignored

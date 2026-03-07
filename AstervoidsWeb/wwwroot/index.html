@@ -4915,27 +4915,24 @@
                 }
             }
             // Mobile browsers may have killed the connection while backgrounded.
-            // If we were in a session and are now disconnected, attempt auto-rejoin.
-            if (!document.hidden && !SessionClient.isConnected()) {
-                const savedSessionId = SessionClient.getLastSessionId();
-                if (savedSessionId && !rejoinInProgress) {
-                    attemptAutoRejoin(savedSessionId);
+            // Check immediately, then again after a short delay (deferred health
+            // check) to catch the race where visibilitychange fires before the
+            // queued WebSocket close event is processed — without the deferred
+            // check, the connection appears alive and the user waits 15-25s for
+            // SignalR's full retry cycle before auto-rejoin triggers.
+            function checkAndRejoin() {
+                if (!SessionClient.isConnected() && !rejoinInProgress) {
+                    const savedSessionId = SessionClient.getLastSessionId();
+                    if (savedSessionId) {
+                        attemptAutoRejoin(savedSessionId);
+                    }
                 }
             }
-            // Deferred health check: the visibilitychange event can fire before
-            // the queued WebSocket close event is processed, making the connection
-            // appear alive when it's actually dead. Re-check after a short delay
-            // to catch this race condition and trigger reconnection promptly
-            // instead of waiting for SignalR's full retry cycle (15-25 seconds).
-            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
-                setTimeout(() => {
-                    if (!SessionClient.isConnected() && !rejoinInProgress) {
-                        const savedSessionId = SessionClient.getLastSessionId();
-                        if (savedSessionId) {
-                            attemptAutoRejoin(savedSessionId);
-                        }
-                    }
-                }, 1000);
+            if (!document.hidden) {
+                checkAndRejoin();
+                if (isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+                    setTimeout(checkAndRejoin, 1000);
+                }
             }
         }
     });
