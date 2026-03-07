@@ -4638,14 +4638,92 @@
     });
 
     // Session client event handlers
+    let rejoinInProgress = false;
+
+    /**
+     * Attempt to reconnect and rejoin a session after an unexpected disconnect.
+     * Used when mobile browsers kill WebSocket connections during background suspension.
+     * @param {string} sessionId - The session ID to rejoin
+     */
+    async function attemptAutoRejoin(sessionId) {
+        if (rejoinInProgress) return;
+        rejoinInProgress = true;
+        const wasPlaying = game.state === 'playing' || game.state === 'waveDelay';
+        setPickerStatus('Connection lost - reconnecting...', 'error');
+
+        const maxAttempts = 3;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                // Wait before retrying (except first attempt)
+                if (attempt > 0) {
+                    await new Promise(r => setTimeout(r, 2000 * attempt));
+                }
+
+                // Reconnect to hub
+                if (!SessionClient.isConnected()) {
+                    await connectToSessionHub();
+                }
+                if (!SessionClient.isConnected()) continue;
+
+                // Try to rejoin the same session
+                const result = await SessionClient.joinSession(sessionId);
+                if (result) {
+                    // Successfully rejoined — restore game/lobby state
+                    game.mode = 'session';
+                    game.sessionInfo = {
+                        id: result.session.id,
+                        name: result.session.name,
+                        memberId: result.member.id,
+                        role: result.member.role,
+                        aspectRatio: result.session.aspectRatio
+                    };
+                    sessionPicker.currentSessionId = result.session.id;
+                    sessionPicker.isServer = result.member.role === 'Server';
+                    sessionPicker.gameStarted = (result.session.objects || []).some(
+                        obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
+                    );
+                    sessionPicker.connected = true;
+                    resizeCanvas(true);
+
+                    if (wasPlaying && sessionPicker.gameStarted) {
+                        // Re-enter the in-progress game
+                        game.state = 'lobby'; // startGameFromPicker expects lobby or start
+                        await startGameFromPicker();
+                    } else {
+                        // Return to lobby
+                        game.state = 'lobby';
+                        updatePickerButtons();
+                        startScreen.classList.remove('hidden');
+                    }
+
+                    await refreshSessionList();
+                    rejoinInProgress = false;
+                    return;
+                } else {
+                    // Session no longer exists or is full
+                    break;
+                }
+            } catch (err) {
+                console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
+            }
+        }
+
+        // All attempts failed — return to start screen
+        rejoinInProgress = false;
+        returnToStartScreen('Session ended');
+    }
+
     SessionClient.on('onDisconnected', (error) => {
         sessionPicker.connected = false;
+        const lostSessionId = sessionPicker.currentSessionId;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.gameStarted = false;
         
-        if (game.state !== 'start' && game.state !== 'lobby') {
-            // Mid-game disconnect - return to start screen
+        if (lostSessionId) {
+            // Lost connection while in a session — attempt auto-rejoin
+            attemptAutoRejoin(lostSessionId);
+        } else if (game.state !== 'start') {
             returnToStartScreen('Disconnected from server');
         } else {
             game.state = 'start';
@@ -4829,7 +4907,17 @@
             // runs when hidden but isSessionMode()/state conditions don't match.
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
-                ObjectSync.triggerReconciliation();
+                if (SessionClient.isConnected()) {
+                    ObjectSync.triggerReconciliation();
+                }
+            }
+            // Mobile browsers may have killed the connection while backgrounded.
+            // If we were in a session and are now disconnected, attempt auto-rejoin.
+            if (!document.hidden && !SessionClient.isConnected()) {
+                const savedSessionId = SessionClient.getLastSessionId();
+                if (savedSessionId && !rejoinInProgress) {
+                    attemptAutoRejoin(savedSessionId);
+                }
             }
         }
     });

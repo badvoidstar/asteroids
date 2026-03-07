@@ -35,7 +35,15 @@ builder.Services.AddResponseCompression(options =>
 //   Current delta encoding + static/dynamic split already reduces payloads significantly,
 //   making MessagePack a diminishing-returns optimization at current payload sizes (~700
 //   bytes per flush).
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+{
+    // Mobile browsers aggressively suspend WebSocket connections when backgrounded.
+    // Longer timeouts give clients more time to resume before the server declares
+    // the connection dead and removes the player from the session.
+    // Defaults: ClientTimeoutInterval=30s, KeepAliveInterval=15s
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(90);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(45);
+});
 
 var app = builder.Build();
 

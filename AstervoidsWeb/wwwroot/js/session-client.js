@@ -7,6 +7,7 @@ const SessionClient = (function() {
     let connection = null;
     let currentSession = null;
     let currentMember = null;
+    let lastSessionId = null; // Track for auto-rejoin after unexpected disconnect
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 5;
     const baseReconnectDelay = 1000;
@@ -55,6 +56,11 @@ const SessionClient = (function() {
             // Register event handlers
             setupEventHandlers();
 
+            // Mobile browsers suspend connections when backgrounded.
+            // Match server-side timeouts: ClientTimeoutInterval=90s, KeepAliveInterval=45s.
+            connection.serverTimeoutInMilliseconds = 90000;
+            connection.keepAliveIntervalInMilliseconds = 45000;
+
             await connection.start();
             // console.log('[SessionClient] Connected to session hub');
             reconnectAttempts = 0;
@@ -87,6 +93,7 @@ const SessionClient = (function() {
             connection = null;
             currentSession = null;
             currentMember = null;
+            lastSessionId = null; // Intentional disconnect
         }
     }
 
@@ -113,6 +120,8 @@ const SessionClient = (function() {
             // console.log('[SessionClient] Connection closed:', error);
             currentSession = null;
             currentMember = null;
+            // Note: lastSessionId is intentionally NOT cleared here.
+            // It is preserved so the game can attempt auto-rejoin after reconnecting.
             if (callbacks.onDisconnected) {
                 callbacks.onDisconnected(error);
             }
@@ -243,6 +252,7 @@ const SessionClient = (function() {
             };
 
             // console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            lastSessionId = currentSession.id;
 
             if (callbacks.onSessionCreated) {
                 callbacks.onSessionCreated(currentSession, currentMember);
@@ -284,6 +294,7 @@ const SessionClient = (function() {
             };
 
             // console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            lastSessionId = currentSession.id;
 
             if (callbacks.onSessionJoined) {
                 callbacks.onSessionJoined(currentSession, currentMember);
@@ -312,6 +323,7 @@ const SessionClient = (function() {
             const leftSession = currentSession;
             currentSession = null;
             currentMember = null;
+            lastSessionId = null; // Intentional leave
 
             // console.log('[SessionClient] Left session');
 
@@ -450,6 +462,13 @@ const SessionClient = (function() {
         return currentSession !== null;
     }
 
+    /**
+     * Get the last session ID (preserved after unexpected disconnect for auto-rejoin).
+     */
+    function getLastSessionId() {
+        return lastSessionId;
+    }
+
     // Public API
     return {
         connect,
@@ -467,7 +486,8 @@ const SessionClient = (function() {
         getCurrentSession,
         getCurrentMember,
         isConnected,
-        isInSession
+        isInSession,
+        getLastSessionId
     };
 })();
 
