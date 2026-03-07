@@ -122,7 +122,15 @@ When you push to any branch, the workflow automatically:
 1. Builds and tests the application
 2. Deploys to a branch-specific Container App
 3. Creates DNS records for a branch-specific subdomain
-4. Configures HTTPS with a managed certificate
+4. Binds the shared wildcard certificate for HTTPS
+
+### Wildcard Certificate
+
+Branch deployments use a shared wildcard certificate (`*.{subdomain}.{domain}`) instead of creating individual certificates per branch. This makes branch deployments faster and simpler.
+
+- The wildcard certificate is created automatically during the first production deployment
+- If Azure managed wildcard certificates are not supported, you can upload a custom wildcard certificate — see [Custom Domain Setup](infra/CUSTOM_DOMAIN_SETUP.md)
+- The naming convention is `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
 
 ### Subdomain Naming
 
@@ -154,7 +162,8 @@ When a branch is deleted from GitHub:
 1. The cleanup workflow triggers automatically
 2. Deletes the branch's Container App
 3. Removes DNS records (CNAME and TXT)
-4. Removes the managed certificate
+
+The shared wildcard certificate is never deleted — it remains in the Container Apps Environment for reuse by future branch deployments.
 
 **Note:** The main branch cleanup is blocked to prevent accidental deletion of production.
 

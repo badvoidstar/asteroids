@@ -32,10 +32,14 @@ When you deploy to the `production` environment with secrets configured, the wor
 ### Custom Domain Setup
 After the base deployment, the workflow attempts to:
 1. Add the custom hostname to the Container App
-2. Create a managed SSL certificate
+2. Create a managed SSL certificate for the production domain
 3. Bind the certificate to enable HTTPS
+4. Create a shared wildcard certificate (`*.<subdomain>.<yourdomain.com>`) for branch deployments
 
 **Note**: This step uses `continue-on-error: true` because DNS propagation may not be complete on the first deployment. Subsequent deployments will succeed once DNS has propagated.
+
+### Branch Deployments
+Branch deployments (e.g., `feature-login.app.yourdomain.com`) reuse the shared wildcard certificate created during production deployment. No per-branch certificate is created — the workflow simply adds the hostname and binds it to the wildcard cert.
 
 ## DNS Configuration
 
@@ -130,3 +134,60 @@ az containerapp env certificate list \
     --resource-group rg-production \
     --name cae-production
 ```
+
+## Wildcard Certificate for Branch Deployments
+
+Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. The workflow attempts to create this automatically during production deployment.
+
+### Certificate Naming Convention
+
+The wildcard certificate follows this naming pattern:
+- **Name:** `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
+- **Hostname:** `*.{subdomain}.{domain}` (e.g., `*.app.yourdomain.com`)
+
+### Manual Wildcard Certificate Upload
+
+If Azure managed wildcard certificates are not supported in your region, you can upload a custom wildcard certificate:
+
+1. **Obtain a wildcard certificate** for `*.{subdomain}.{domain}` (e.g., from Let's Encrypt, DigiCert, or another CA)
+
+2. **Upload to Container Apps Environment:**
+   ```bash
+   az containerapp env certificate upload \
+       --resource-group rg-production \
+       --name cae-production \
+       --certificate-name cert-wildcard-app-yourdomain-com \
+       --certificate-file /path/to/wildcard.pfx \
+       --password "<pfx-password>"
+   ```
+
+3. **Verify the certificate:**
+   ```bash
+   az containerapp env certificate list \
+       --resource-group rg-production \
+       --name cae-production \
+       --query "[?name=='cert-wildcard-app-yourdomain-com']"
+   ```
+
+Once uploaded, all subsequent branch deployments will automatically use the wildcard certificate for HTTPS.
+
+### Let's Encrypt Wildcard Certificate
+
+To obtain a free wildcard certificate from Let's Encrypt:
+
+```bash
+# Using certbot with DNS challenge
+certbot certonly \
+    --manual \
+    --preferred-challenges dns \
+    -d "*.app.yourdomain.com"
+
+# Convert to PFX format
+openssl pkcs12 -export \
+    -out wildcard.pfx \
+    -inkey privkey.pem \
+    -in fullchain.pem \
+    -password pass:your-password
+```
+
+**Note:** Let's Encrypt certificates expire every 90 days and must be renewed and re-uploaded.
