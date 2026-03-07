@@ -7,6 +7,7 @@ const SessionClient = (function() {
     let connection = null;
     let currentSession = null;
     let currentMember = null;
+    let lastSessionId = null; // Track for auto-rejoin after unexpected disconnect
     let reconnectAttempts = 0;
     const maxReconnectAttempts = 5;
     const baseReconnectDelay = 1000;
@@ -38,6 +39,24 @@ const SessionClient = (function() {
             return true;
         }
 
+        // Stop any existing connection to prevent stale event handlers from
+        // firing after we create a new connection. On mobile, the OS kills
+        // WebSocket connections when backgrounded. Without this cleanup, the
+        // old connection's onclose fires after the new connection is established
+        // and trashes the restored session state.
+        //
+        // The connection = null before stale.stop() is intentional: it ensures
+        // any synchronously-fired onclose from stop() sees connection !== thisConnection
+        // and skips. The null window between here and line where the new connection is
+        // assigned is safe because JavaScript is single-threaded — no other code can
+        // access `connection` until we yield at await connection.start() below, by
+        // which point `connection` is already set to the new connection.
+        if (connection) {
+            const stale = connection;
+            connection = null; // Clear reference so stale handlers are ignored
+            try { stale.stop(); } catch (e) { /* ignore */ }
+        }
+
         try {
             connection = new signalR.HubConnectionBuilder()
                 .withUrl('/sessionHub')
@@ -54,6 +73,11 @@ const SessionClient = (function() {
 
             // Register event handlers
             setupEventHandlers();
+
+            // Mobile browsers suspend connections when backgrounded.
+            // Match server-side timeouts: ClientTimeoutInterval=90s, KeepAliveInterval=45s.
+            connection.serverTimeoutInMilliseconds = 90000;
+            connection.keepAliveIntervalInMilliseconds = 45000;
 
             await connection.start();
             // console.log('[SessionClient] Connected to session hub');
@@ -87,18 +111,27 @@ const SessionClient = (function() {
             connection = null;
             currentSession = null;
             currentMember = null;
+            lastSessionId = null; // Intentional disconnect
         }
     }
 
     /**
      * Setup SignalR event handlers.
+     * Captures a reference to the current connection so that if connect()
+     * replaces it later (e.g., after a mobile background disconnect), the
+     * old connection's handlers are silently ignored instead of trashing
+     * the newly restored session state.
      */
     function setupEventHandlers() {
+        const thisConnection = connection;
+
         connection.onreconnecting(error => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Reconnecting...', error);
         });
 
         connection.onreconnected(connectionId => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
             // Reconcile state — invoke responses for Create/Delete/Update may have been
@@ -110,9 +143,12 @@ const SessionClient = (function() {
         });
 
         connection.onclose(error => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Connection closed:', error);
             currentSession = null;
             currentMember = null;
+            // Note: lastSessionId is intentionally NOT cleared here.
+            // It is preserved so the game can attempt auto-rejoin after reconnecting.
             if (callbacks.onDisconnected) {
                 callbacks.onDisconnected(error);
             }
@@ -120,6 +156,7 @@ const SessionClient = (function() {
 
         // Session events
         connection.on('OnMemberJoined', (memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
@@ -131,6 +168,7 @@ const SessionClient = (function() {
         });
 
         connection.on('OnMemberLeft', (info, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
@@ -162,24 +200,28 @@ const SessionClient = (function() {
 
         // Object events
         connection.on('OnObjectCreated', (objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
             }
         });
 
         connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
         });
 
         connection.on('OnObjectDeleted', (objectId, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId, senderMemberId, memberSequence);
             }
         });
 
         connection.on('OnObjectReplaced', (event, senderMemberId, memberSequence, serverTimestamp) => {
+            if (connection !== thisConnection) return;
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
             }
@@ -187,6 +229,7 @@ const SessionClient = (function() {
 
         // Session list changed (signal only - fetch data separately)
         connection.on('OnSessionsChanged', () => {
+            if (connection !== thisConnection) return;
             // console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
@@ -243,6 +286,7 @@ const SessionClient = (function() {
             };
 
             // console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            lastSessionId = currentSession.id;
 
             if (callbacks.onSessionCreated) {
                 callbacks.onSessionCreated(currentSession, currentMember);
@@ -284,6 +328,7 @@ const SessionClient = (function() {
             };
 
             // console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            lastSessionId = currentSession.id;
 
             if (callbacks.onSessionJoined) {
                 callbacks.onSessionJoined(currentSession, currentMember);
@@ -312,6 +357,7 @@ const SessionClient = (function() {
             const leftSession = currentSession;
             currentSession = null;
             currentMember = null;
+            lastSessionId = null; // Intentional leave
 
             // console.log('[SessionClient] Left session');
 
@@ -450,6 +496,13 @@ const SessionClient = (function() {
         return currentSession !== null;
     }
 
+    /**
+     * Get the last session ID (preserved after unexpected disconnect for auto-rejoin).
+     */
+    function getLastSessionId() {
+        return lastSessionId;
+    }
+
     // Public API
     return {
         connect,
@@ -467,7 +520,8 @@ const SessionClient = (function() {
         getCurrentSession,
         getCurrentMember,
         isConnected,
-        isInSession
+        isInSession,
+        getLastSessionId
     };
 })();
 

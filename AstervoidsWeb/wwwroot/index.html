@@ -3911,15 +3911,16 @@
         keys[e.code] = false;
     });
 
-    // Prevent focus loss from affecting input - auto pause
+    // Prevent focus loss from affecting input - auto pause (solo only)
     window.addEventListener('blur', () => {
         // Clear all keys when window loses focus
         Object.keys(keys).forEach(key => keys[key] = false);
         if (game.ship) game.ship.thrusting = false;
         AudioSystem.thrustSound.stop();
         
-        // Auto-pause when window loses focus (only on desktop)
-        if (!touchControlsEnabled && (game.state === 'playing' || game.state === 'waveDelay')) {
+        // Auto-pause when window loses focus (solo desktop only)
+        // In session mode, the visibilitychange handler manages background updates
+        if (!isSessionMode() && !touchControlsEnabled && (game.state === 'playing' || game.state === 'waveDelay')) {
             togglePause();
         }
     });
@@ -4637,14 +4638,95 @@
     });
 
     // Session client event handlers
+    let rejoinInProgress = false;
+
+    /**
+     * Attempt to reconnect and rejoin a session after an unexpected disconnect.
+     * Used when mobile browsers kill WebSocket connections during background suspension.
+     * @param {string} sessionId - The session ID to rejoin
+     */
+    async function attemptAutoRejoin(sessionId) {
+        if (rejoinInProgress) return;
+        rejoinInProgress = true;
+        const wasPlaying = game.state === 'playing' || game.state === 'waveDelay';
+        setPickerStatus('Connection lost - reconnecting...', 'error');
+
+        const maxAttempts = 3;
+        try {
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                try {
+                    // Wait before retrying (except first attempt)
+                    if (attempt > 0) {
+                        await new Promise(r => setTimeout(r, 2000 * attempt));
+                    }
+
+                    // Reconnect to hub
+                    if (!SessionClient.isConnected()) {
+                        await connectToSessionHub();
+                    }
+                    if (!SessionClient.isConnected()) continue;
+
+                    // Try to rejoin the same session
+                    const result = await SessionClient.joinSession(sessionId);
+                    if (result) {
+                        // Successfully rejoined — restore game/lobby state
+                        game.mode = 'session';
+                        game.sessionInfo = {
+                            id: result.session.id,
+                            name: result.session.name,
+                            memberId: result.member.id,
+                            role: result.member.role,
+                            aspectRatio: result.session.aspectRatio
+                        };
+                        sessionPicker.currentSessionId = result.session.id;
+                        sessionPicker.isServer = result.member.role === 'Server';
+                        sessionPicker.gameStarted = (result.session.objects || []).some(
+                            obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
+                        );
+                        sessionPicker.connected = true;
+                        resizeCanvas(true);
+
+                        if (wasPlaying && sessionPicker.gameStarted) {
+                            // Was mid-game — set to lobby to satisfy startGameFromPicker
+                            // precondition, then re-enter the in-progress game
+                            game.state = 'lobby';
+                            await startGameFromPicker();
+                        } else {
+                            // Return to lobby
+                            game.state = 'lobby';
+                            updatePickerButtons();
+                            startScreen.classList.remove('hidden');
+                        }
+
+                        await refreshSessionList();
+                        return;
+                    } else {
+                        // Session no longer exists or is full
+                        break;
+                    }
+                } catch (err) {
+                    console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
+                }
+            }
+
+            // All attempts failed — return to start screen
+            returnToStartScreen('Session ended');
+        } finally {
+            rejoinInProgress = false;
+        }
+    }
+
     SessionClient.on('onDisconnected', (error) => {
         sessionPicker.connected = false;
+        const lostSessionId = sessionPicker.currentSessionId;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.gameStarted = false;
         
-        if (game.state !== 'start' && game.state !== 'lobby') {
-            // Mid-game disconnect - return to start screen
+        if (lostSessionId) {
+            // Lost connection while in a session — attempt auto-rejoin
+            attemptAutoRejoin(lostSessionId);
+        } else if (game.state !== 'start') {
             returnToStartScreen('Disconnected from server');
         } else {
             game.state = 'start';
@@ -4725,7 +4807,10 @@
     });
 
     // Handle visibility change - prevent pause in multiplayer
-    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing
+    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing.
+    // Note: browsers throttle setInterval in hidden tabs to ~1000ms minimum,
+    // so background updates run at ~1fps rather than the target framerate.
+    // The dt cap (3x) limits per-tick physics to avoid large jumps.
     let backgroundInterval = null;
     document.addEventListener('visibilitychange', () => {
         if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
@@ -4763,18 +4848,91 @@
                     syncLocalAstervoids();
                     updateAstervoidsFromSync();
                     
+                    // Update bullets (owned locally) and expire them.
+                    // Bullet sync + remote update placed before checkCollisions()
+                    // so collision detection sees current positions.
+                    game.bullets = game.bullets.filter(bullet => {
+                        const isMyBullet = bullet.ownerMemberId === bgMemberId;
+                        if (isMyBullet) {
+                            bullet.update(dt);
+                        }
+                        if (isMyBullet && bullet.isExpired()) {
+                            if (bullet.syncObjectId) {
+                                deleteSyncedBullet(bullet);
+                            }
+                            return false;
+                        }
+                        return true;
+                    });
+                    syncLocalBullets();
+                    updateBulletsFromSync();
+                    
+                    // Collision detection (coarser at ~1fps but prevents missed hits)
+                    checkCollisions();
+                    
+                    // Wave management
+                    if (game.astervoids.length === 0 && game.state === 'playing' && !spawningWave) {
+                        if (isGameStateOwner()) {
+                            game.state = 'waveDelay';
+                            game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                            syncGameState();
+                        }
+                    }
+                    if (game.state === 'waveDelay') {
+                        game.waveDelayTimer -= dt;
+                        if (game.waveDelayTimer <= 0) {
+                            if (isGameStateOwner()) {
+                                spawningWave = true;
+                                spawnWave().then(() => {
+                                    spawningWave = false;
+                                    syncGameState();
+                                });
+                            }
+                            game.state = 'playing';
+                        }
+                    }
+                    
                     // Update remote state
                     updateRemoteShips();
-                    updateBulletsFromSync();
                     if (!isGameStateOwner()) updateGameStateFromSync();
                     if (isGameStateOwner()) syncGameState();
                 }, targetFrameTime);
             }
         } else {
-            // Tab visible or not in multiplayer - clear background interval
+            // Tab visible again or not in multiplayer - clear background interval
             if (backgroundInterval) {
                 clearInterval(backgroundInterval);
                 backgroundInterval = null;
+            }
+            // When returning to a multiplayer session, reset frame time to avoid
+            // a large delta-time jump and reconcile state with the server.
+            // The !document.hidden guard is needed because the else branch also
+            // runs when hidden but isSessionMode()/state conditions don't match.
+            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+                game.lastFrameTime = 0;
+                if (SessionClient.isConnected()) {
+                    ObjectSync.triggerReconciliation();
+                }
+            }
+            // Mobile browsers may have killed the connection while backgrounded.
+            // Check immediately, then again after a short delay (deferred health
+            // check) to catch the race where visibilitychange fires before the
+            // queued WebSocket close event is processed — without the deferred
+            // check, the connection appears alive and the user waits 15-25s for
+            // SignalR's full retry cycle before auto-rejoin triggers.
+            function checkAndRejoin() {
+                if (!SessionClient.isConnected() && !rejoinInProgress) {
+                    const savedSessionId = SessionClient.getLastSessionId();
+                    if (savedSessionId) {
+                        attemptAutoRejoin(savedSessionId);
+                    }
+                }
+            }
+            if (!document.hidden) {
+                checkAndRejoin();
+                if (isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+                    setTimeout(checkAndRejoin, 1000);
+                }
             }
         }
     });

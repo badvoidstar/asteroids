@@ -41,3 +41,5 @@ ehthumbs.db
 
 # Azure Developer CLI
 .azure/
+test-output.log
+test_output.log

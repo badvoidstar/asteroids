@@ -757,12 +757,15 @@ sequenceDiagram
         C->>HUB: GetSessionState()
         HUB-->>C: Full snapshot + memberSequences
         C->>C: Sync local objects:<br/>• Add missing<br/>• Update stale<br/>• Remove ghosts<br/>• Reset sequences
-    else Max retries exceeded
+    else Max retries exceeded (or mobile auto-rejoin)
         SR->>C: onclose(error)
-        C->>C: Clear session & member state
+        C->>C: attemptAutoRejoin(sessionId)
+        C->>C: connect() stops old connection,<br/>creates new one
+        C->>HUB: JoinSession(sessionId)
+        HUB-->>C: Rejoin response (new memberId, objects)
     end
 
-    Note over C: Reconciliation recovers from lost<br/>invoke responses during reconnection window
+    Note over C: Stale connection guard: setupEventHandlers()<br/>captures thisConnection reference.<br/>Old connection's onclose/on* events<br/>are silently ignored if connection<br/>has been replaced by connect().
 ```
 
 ## SessionService: Thread Safety
