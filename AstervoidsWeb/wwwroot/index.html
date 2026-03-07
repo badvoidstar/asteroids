@@ -4652,65 +4652,68 @@
         setPickerStatus('Connection lost - reconnecting...', 'error');
 
         const maxAttempts = 3;
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                // Wait before retrying (except first attempt)
-                if (attempt > 0) {
-                    await new Promise(r => setTimeout(r, 2000 * attempt));
-                }
-
-                // Reconnect to hub
-                if (!SessionClient.isConnected()) {
-                    await connectToSessionHub();
-                }
-                if (!SessionClient.isConnected()) continue;
-
-                // Try to rejoin the same session
-                const result = await SessionClient.joinSession(sessionId);
-                if (result) {
-                    // Successfully rejoined — restore game/lobby state
-                    game.mode = 'session';
-                    game.sessionInfo = {
-                        id: result.session.id,
-                        name: result.session.name,
-                        memberId: result.member.id,
-                        role: result.member.role,
-                        aspectRatio: result.session.aspectRatio
-                    };
-                    sessionPicker.currentSessionId = result.session.id;
-                    sessionPicker.isServer = result.member.role === 'Server';
-                    sessionPicker.gameStarted = (result.session.objects || []).some(
-                        obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
-                    );
-                    sessionPicker.connected = true;
-                    resizeCanvas(true);
-
-                    if (wasPlaying && sessionPicker.gameStarted) {
-                        // Re-enter the in-progress game
-                        game.state = 'lobby'; // startGameFromPicker expects lobby or start
-                        await startGameFromPicker();
-                    } else {
-                        // Return to lobby
-                        game.state = 'lobby';
-                        updatePickerButtons();
-                        startScreen.classList.remove('hidden');
+        try {
+            for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                try {
+                    // Wait before retrying (except first attempt)
+                    if (attempt > 0) {
+                        await new Promise(r => setTimeout(r, 2000 * attempt));
                     }
 
-                    await refreshSessionList();
-                    rejoinInProgress = false;
-                    return;
-                } else {
-                    // Session no longer exists or is full
-                    break;
-                }
-            } catch (err) {
-                console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
-            }
-        }
+                    // Reconnect to hub
+                    if (!SessionClient.isConnected()) {
+                        await connectToSessionHub();
+                    }
+                    if (!SessionClient.isConnected()) continue;
 
-        // All attempts failed — return to start screen
-        rejoinInProgress = false;
-        returnToStartScreen('Session ended');
+                    // Try to rejoin the same session
+                    const result = await SessionClient.joinSession(sessionId);
+                    if (result) {
+                        // Successfully rejoined — restore game/lobby state
+                        game.mode = 'session';
+                        game.sessionInfo = {
+                            id: result.session.id,
+                            name: result.session.name,
+                            memberId: result.member.id,
+                            role: result.member.role,
+                            aspectRatio: result.session.aspectRatio
+                        };
+                        sessionPicker.currentSessionId = result.session.id;
+                        sessionPicker.isServer = result.member.role === 'Server';
+                        sessionPicker.gameStarted = (result.session.objects || []).some(
+                            obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
+                        );
+                        sessionPicker.connected = true;
+                        resizeCanvas(true);
+
+                        if (wasPlaying && sessionPicker.gameStarted) {
+                            // Was mid-game — set to lobby to satisfy startGameFromPicker
+                            // precondition, then re-enter the in-progress game
+                            game.state = 'lobby';
+                            await startGameFromPicker();
+                        } else {
+                            // Return to lobby
+                            game.state = 'lobby';
+                            updatePickerButtons();
+                            startScreen.classList.remove('hidden');
+                        }
+
+                        await refreshSessionList();
+                        return;
+                    } else {
+                        // Session no longer exists or is full
+                        break;
+                    }
+                } catch (err) {
+                    console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
+                }
+            }
+
+            // All attempts failed — return to start screen
+            returnToStartScreen('Session ended');
+        } finally {
+            rejoinInProgress = false;
+        }
     }
 
     SessionClient.on('onDisconnected', (error) => {
