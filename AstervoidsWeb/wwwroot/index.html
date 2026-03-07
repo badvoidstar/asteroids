@@ -3911,15 +3911,16 @@
         keys[e.code] = false;
     });
 
-    // Prevent focus loss from affecting input - auto pause
+    // Prevent focus loss from affecting input - auto pause (solo only)
     window.addEventListener('blur', () => {
         // Clear all keys when window loses focus
         Object.keys(keys).forEach(key => keys[key] = false);
         if (game.ship) game.ship.thrusting = false;
         AudioSystem.thrustSound.stop();
         
-        // Auto-pause when window loses focus (only on desktop)
-        if (!touchControlsEnabled && (game.state === 'playing' || game.state === 'waveDelay')) {
+        // Auto-pause when window loses focus (solo desktop only)
+        // In session mode, the visibilitychange handler manages background updates
+        if (!isSessionMode() && !touchControlsEnabled && (game.state === 'playing' || game.state === 'waveDelay')) {
             togglePause();
         }
     });
@@ -4725,7 +4726,10 @@
     });
 
     // Handle visibility change - prevent pause in multiplayer
-    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing
+    // When tab is hidden, requestAnimationFrame stops, but we need to keep syncing.
+    // Note: browsers throttle setInterval in hidden tabs to ~1000ms minimum,
+    // so background updates run at ~1fps rather than the target framerate.
+    // The dt cap (3x) limits per-tick physics to avoid large jumps.
     let backgroundInterval = null;
     document.addEventListener('visibilitychange', () => {
         if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
@@ -4763,18 +4767,69 @@
                     syncLocalAstervoids();
                     updateAstervoidsFromSync();
                     
+                    // Update bullets (owned locally) and expire them.
+                    // Bullet sync + remote update placed before checkCollisions()
+                    // so collision detection sees current positions.
+                    game.bullets = game.bullets.filter(bullet => {
+                        const isMyBullet = bullet.ownerMemberId === bgMemberId;
+                        if (isMyBullet) {
+                            bullet.update(dt);
+                        }
+                        if (isMyBullet && bullet.isExpired()) {
+                            if (bullet.syncObjectId) {
+                                deleteSyncedBullet(bullet);
+                            }
+                            return false;
+                        }
+                        return true;
+                    });
+                    syncLocalBullets();
+                    updateBulletsFromSync();
+                    
+                    // Collision detection (coarser at ~1fps but prevents missed hits)
+                    checkCollisions();
+                    
+                    // Wave management
+                    if (game.astervoids.length === 0 && game.state === 'playing' && !spawningWave) {
+                        if (isGameStateOwner()) {
+                            game.state = 'waveDelay';
+                            game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                            syncGameState();
+                        }
+                    }
+                    if (game.state === 'waveDelay') {
+                        game.waveDelayTimer -= dt;
+                        if (game.waveDelayTimer <= 0) {
+                            if (isGameStateOwner()) {
+                                spawningWave = true;
+                                spawnWave().then(() => {
+                                    spawningWave = false;
+                                    syncGameState();
+                                });
+                            }
+                            game.state = 'playing';
+                        }
+                    }
+                    
                     // Update remote state
                     updateRemoteShips();
-                    updateBulletsFromSync();
                     if (!isGameStateOwner()) updateGameStateFromSync();
                     if (isGameStateOwner()) syncGameState();
                 }, targetFrameTime);
             }
         } else {
-            // Tab visible or not in multiplayer - clear background interval
+            // Tab visible again or not in multiplayer - clear background interval
             if (backgroundInterval) {
                 clearInterval(backgroundInterval);
                 backgroundInterval = null;
+            }
+            // When returning to a multiplayer session, reset frame time to avoid
+            // a large delta-time jump and reconcile state with the server.
+            // The !document.hidden guard is needed because the else branch also
+            // runs when hidden but isSessionMode()/state conditions don't match.
+            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+                game.lastFrameTime = 0;
+                ObjectSync.triggerReconciliation();
             }
         }
     });
