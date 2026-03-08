@@ -35,14 +35,26 @@ public class SessionHub : Hub
     /// Returns null if either is missing (caller should return null/early-exit).
     /// </summary>
     private (Member Member, Session Session)? GetCallerContext()
+        => _sessionService.GetMemberAndSessionByConnectionId(Context.ConnectionId);
+
+    /// <summary>
+    /// Looks up an object and verifies ownership by the given member.
+    /// Returns null and logs a warning if the object doesn't exist or isn't owned by the member.
+    /// </summary>
+    private SessionObject? GetOwnedObject(Member member, Guid objectId)
     {
-        var member = _sessionService.GetMemberByConnectionId(Context.ConnectionId);
-        if (member == null) return null;
+        var obj = _objectService.GetObject(member.SessionId, objectId);
+        if (obj == null)
+            return null;
 
-        var session = _sessionService.GetSession(member.SessionId);
-        if (session == null) return null;
+        if (obj.OwnerMemberId != member.Id)
+        {
+            _logger.LogWarning("{Method} rejected - member {MemberId} does not own object {ObjectId}",
+                nameof(GetOwnedObject), member.Id, objectId);
+            return null;
+        }
 
-        return (member, session);
+        return obj;
     }
 
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
@@ -352,15 +364,9 @@ public class SessionHub : Hub
         var (member, _) = ctx.Value;
 
         // Verify ownership before deleting
-        var obj = _objectService.GetObject(member.SessionId, objectId);
+        var obj = GetOwnedObject(member, objectId);
         if (obj == null)
             return null;
-
-        if (obj.OwnerMemberId != member.Id)
-        {
-            _logger.LogWarning("DeleteObject rejected - member {MemberId} does not own object {ObjectId}", member.Id, objectId);
-            return null;
-        }
 
         var deletedObj = _objectService.DeleteObject(member.SessionId, objectId);
         if (deletedObj == null)
@@ -393,15 +399,9 @@ public class SessionHub : Hub
         var (member, _) = ctx.Value;
 
         // Verify ownership of the object being replaced
-        var existingObj = _objectService.GetObject(member.SessionId, deleteObjectId);
+        var existingObj = GetOwnedObject(member, deleteObjectId);
         if (existingObj == null)
             return null;
-
-        if (existingObj.OwnerMemberId != member.Id)
-        {
-            _logger.LogWarning("ReplaceObject rejected - member {MemberId} does not own object {ObjectId}", member.Id, deleteObjectId);
-            return null;
-        }
 
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);

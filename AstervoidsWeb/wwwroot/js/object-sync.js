@@ -257,6 +257,29 @@ const ObjectSync = (function() {
     }
 
     /**
+     * Register an object from server ObjectInfo into the local object map and type index.
+     */
+    function registerObject(objectInfo, isLocal) {
+        const obj = toLocalObject(objectInfo, isLocal);
+        objects.set(obj.id, obj);
+        addToTypeIndex(obj);
+        return obj;
+    }
+
+    /**
+     * Remove an object from the local object map, type index, and delta tracking.
+     * Returns the removed object, or null if not found.
+     */
+    function removeObjectLocal(objectId) {
+        const obj = objects.get(objectId);
+        if (!obj) return null;
+        removeFromTypeIndex(obj);
+        objects.delete(objectId);
+        lastSentData.delete(objectId);
+        return obj;
+    }
+
+    /**
      * Track the local member's own sequence from an invoke response.
      * Used by createObject, deleteObject, and flushUpdates which all
      * use OthersInGroup (no broadcast echo for own events).
@@ -277,9 +300,7 @@ const ObjectSync = (function() {
 
         if (session.objects) {
             for (const obj of session.objects) {
-                const localObj = toLocalObject(obj, false);
-                objects.set(obj.id, localObj);
-                addToTypeIndex(localObj);
+                registerObject(obj, false);
             }
         }
 
@@ -316,10 +337,7 @@ const ObjectSync = (function() {
         }
 
         const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
-        const obj = toLocalObject(objectInfo, isLocal);
-
-        objects.set(obj.id, obj);
-        addToTypeIndex(obj);
+        const obj = registerObject(objectInfo, isLocal);
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -382,15 +400,9 @@ const ObjectSync = (function() {
      */
     function handleRemoteObjectDeleted(objectId, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
-        const obj = objects.get(objectId);
-        if (obj) {
-            removeFromTypeIndex(obj);
-            objects.delete(objectId);
-            lastSentData.delete(objectId);
-
-            if (callbacks.onObjectDeleted) {
-                callbacks.onObjectDeleted(obj);
-            }
+        const obj = removeObjectLocal(objectId);
+        if (obj && callbacks.onObjectDeleted) {
+            callbacks.onObjectDeleted(obj);
         }
     }
 
@@ -493,9 +505,7 @@ const ObjectSync = (function() {
                     }
                 } else {
                     // Add missing object
-                    const localObj = toLocalObject(obj, false);
-                    objects.set(obj.id, localObj);
-                    addToTypeIndex(localObj);
+                    const localObj = registerObject(obj, false);
                     if (callbacks.onObjectCreated) {
                         callbacks.onObjectCreated(localObj);
                     }
@@ -505,9 +515,7 @@ const ObjectSync = (function() {
             // Remove ghost objects (locally present but not on server)
             for (const [id, obj] of objects) {
                 if (!serverObjectIds.has(id)) {
-                    removeFromTypeIndex(obj);
-                    objects.delete(id);
-                    lastSentData.delete(id);
+                    removeObjectLocal(id);
                     if (callbacks.onObjectDeleted) {
                         callbacks.onObjectDeleted(obj);
                     }
@@ -563,9 +571,7 @@ const ObjectSync = (function() {
             const existing = objects.get(objectInfo.id);
             if (!existing) {
                 const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
-                const obj = toLocalObject(objectInfo, isLocal);
-                objects.set(obj.id, obj);
-                addToTypeIndex(obj);
+                const obj = registerObject(objectInfo, isLocal);
 
                 if (callbacks.onObjectCreated) {
                     callbacks.onObjectCreated(obj);
@@ -837,12 +843,7 @@ const ObjectSync = (function() {
         }
 
         // Local-first: remove immediately so getObjectsByType() won't return it
-        const obj = objects.get(objectId);
-        if (obj) {
-            removeFromTypeIndex(obj);
-            objects.delete(objectId);
-            lastSentData.delete(objectId);
-        }
+        removeObjectLocal(objectId);
 
         // Also remove from pending updates
         pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
@@ -960,15 +961,9 @@ const ObjectSync = (function() {
      */
     function handleMemberDeparture(deletedObjectIds) {
         for (const objectId of deletedObjectIds) {
-            const obj = objects.get(objectId);
-            if (obj) {
-                removeFromTypeIndex(obj);
-                objects.delete(objectId);
-                lastSentData.delete(objectId);
-
-                if (callbacks.onObjectDeleted) {
-                    callbacks.onObjectDeleted(obj);
-                }
+            const obj = removeObjectLocal(objectId);
+            if (obj && callbacks.onObjectDeleted) {
+                callbacks.onObjectDeleted(obj);
             }
         }
     }

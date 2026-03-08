@@ -125,13 +125,14 @@ const SessionClient = (function() {
     function setupEventHandlers() {
         const thisConnection = connection;
 
-        connection.onreconnecting(error => {
-            if (connection !== thisConnection) return;
-            // console.log('[SessionClient] Reconnecting...', error);
-        });
+        // Guard wrapper: skips handler if connection was replaced (stale handler from mobile background disconnect)
+        const guard = (fn) => (...args) => { if (connection === thisConnection) fn(...args); };
 
-        connection.onreconnected(connectionId => {
-            if (connection !== thisConnection) return;
+        connection.onreconnecting(guard(error => {
+            // console.log('[SessionClient] Reconnecting...', error);
+        }));
+
+        connection.onreconnected(guard(connectionId => {
             // console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
             // Reconcile state — invoke responses for Create/Delete/Update may have been
@@ -140,10 +141,9 @@ const SessionClient = (function() {
             if (callbacks.onConnected) {
                 callbacks.onConnected();
             }
-        });
+        }));
 
-        connection.onclose(error => {
-            if (connection !== thisConnection) return;
+        connection.onclose(guard(error => {
             // console.log('[SessionClient] Connection closed:', error);
             currentSession = null;
             currentMember = null;
@@ -152,11 +152,10 @@ const SessionClient = (function() {
             if (callbacks.onDisconnected) {
                 callbacks.onDisconnected(error);
             }
-        });
+        }));
 
         // Session events
-        connection.on('OnMemberJoined', (memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnMemberJoined', guard((memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member joined:', memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
@@ -165,10 +164,9 @@ const SessionClient = (function() {
             if (callbacks.onMemberJoined) {
                 callbacks.onMemberJoined(memberInfo, senderMemberId, memberSequence);
             }
-        });
+        }));
 
-        connection.on('OnMemberLeft', (info, senderMemberId, memberSequence, serverTimestamp) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnMemberLeft', guard((info, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member left:', info);
             
             // Remove member from local session state
@@ -196,45 +194,40 @@ const SessionClient = (function() {
                     callbacks.onRoleChanged(info.promotedRole);
                 }
             }
-        });
+        }));
 
         // Object events
-        connection.on('OnObjectCreated', (objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
             }
-        });
+        }));
 
-        connection.on('OnObjectsUpdated', (objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
-        });
+        }));
 
-        connection.on('OnObjectDeleted', (objectId, senderMemberId, memberSequence, serverTimestamp) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnObjectDeleted', guard((objectId, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectDeleted) {
                 callbacks.onObjectDeleted(objectId, senderMemberId, memberSequence);
             }
-        });
+        }));
 
-        connection.on('OnObjectReplaced', (event, senderMemberId, memberSequence, serverTimestamp) => {
-            if (connection !== thisConnection) return;
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
             }
-        });
+        }));
 
         // Session list changed (signal only - fetch data separately)
-        connection.on('OnSessionsChanged', () => {
-            if (connection !== thisConnection) return;
+        connection.on('OnSessionsChanged', guard(() => {
             // console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
             }
-        });
+        }));
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
@@ -255,6 +248,21 @@ const SessionClient = (function() {
         ensureConnected();
         if (!currentSession) {
             throw new Error('Not in a session');
+        }
+    }
+
+    /**
+     * Invoke a hub method with standard error handling.
+     * Ensures the client is in a session, invokes the method, and wraps
+     * errors with a descriptive log before re-throwing.
+     */
+    async function invokeHub(method, ...args) {
+        ensureInSession();
+        try {
+            return await connection.invoke(method, ...args);
+        } catch (err) {
+            console.error(`[SessionClient] ${method} failed:`, err);
+            throw err;
         }
     }
 
@@ -394,67 +402,32 @@ const SessionClient = (function() {
      * @param {string} scope - 'Member' or 'Session'
      */
     async function createObject(data, scope = 'Member', ownerMemberId = null) {
-        ensureInSession();
-
-        try {
-            return await connection.invoke('CreateObject', data, scope, ownerMemberId);
-        } catch (err) {
-            console.error('[SessionClient] Create object failed:', err);
-            throw err;
-        }
+        return invokeHub('CreateObject', data, scope, ownerMemberId);
     }
 
     /**
      * Update multiple objects atomically.
      */
     async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null) {
-        ensureInSession();
-
-        try {
-            const response = await connection.invoke('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
-            return response;
-        } catch (err) {
-            console.error('[SessionClient] Update objects failed:', err);
-            throw err;
-        }
+        return invokeHub('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
     }
 
     /**
      * Atomically delete an object and create replacements in a single broadcast.
      */
     async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null) {
-        ensureInSession();
-
-        try {
-            return await connection.invoke('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId);
-        } catch (err) {
-            console.error('[SessionClient] Replace object failed:', err);
-            throw err;
-        }
+        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId);
     }
 
     /**
      * Delete an object from the session.
      */
     async function deleteObject(objectId) {
-        ensureInSession();
-
-        try {
-            return await connection.invoke('DeleteObject', objectId);
-        } catch (err) {
-            console.error('[SessionClient] Delete object failed:', err);
-            throw err;
-        }
+        return invokeHub('DeleteObject', objectId);
     }
 
     async function getSessionState() {
-        ensureInSession();
-        try {
-            return await connection.invoke('GetSessionState');
-        } catch (err) {
-            console.error('[SessionClient] GetSessionState failed:', err);
-            throw err;
-        }
+        return invokeHub('GetSessionState');
     }
 
     /**
