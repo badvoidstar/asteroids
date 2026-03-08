@@ -43,3 +43,7 @@ ehthumbs.db
 .azure/
 test-output.log
 test_output.log
+
+# Bicep compiled output
+infra/*.json
+!infra/main.parameters.json
