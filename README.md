@@ -2,10 +2,6 @@
 
 A classic Astervoids game built with HTML5 Canvas and ASP.NET Core.
 
-## Play Online
-
-- **GitHub Pages:** https://badvoidstar.github.io/astervoids/
-
 ## Local Development
 
 ```powershell
