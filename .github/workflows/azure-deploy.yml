@@ -344,73 +344,82 @@ jobs:
               echo "Certificate not ready, will retry..."
             done
             
-            # Check for shared wildcard certificate for branch deployments
-            # NOTE: Azure managed certificates do NOT support wildcard hostnames.
-            # Wildcard certs must be uploaded manually (see infra/CUSTOM_DOMAIN_SETUP.md).
-            WILDCARD_HOST="*.${CUSTOM_DOMAIN}"
-            WILDCARD_CERT="cert-wildcard-${CUSTOM_DOMAIN//./-}"
-            
-            echo ""
-            echo "=========================================="
-            echo "Checking wildcard certificate for branch deployments: $WILDCARD_HOST"
-            echo "=========================================="
-            
-            WILDCARD_EXISTS=$(az containerapp env certificate list \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APPS_ENVIRONMENT" \
-              --query "[?name=='$WILDCARD_CERT'].name" -o tsv 2>/dev/null || echo "")
-            
-            if [ -n "$WILDCARD_EXISTS" ]; then
-              echo "✅ Wildcard certificate already exists: $WILDCARD_CERT"
-            else
-              echo "::notice::No wildcard certificate found for branch deployments."
-              echo "To enable HTTPS for branch deployments, upload a wildcard certificate"
-              echo "for '$WILDCARD_HOST' named '$WILDCARD_CERT' to the Container Apps Environment."
-              echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
-            fi
-            
           else
             # ============================================================
-            # BRANCH: Use shared wildcard certificate (no per-branch cert)
-            # NOTE: Azure managed certificates do NOT support wildcard hostnames,
-            # so the wildcard cert must be uploaded manually before branch
-            # deployments can use HTTPS. See infra/CUSTOM_DOMAIN_SETUP.md.
+            # BRANCH: Create per-branch managed certificate
+            # Same approach as production — each branch gets its own free
+            # managed certificate for its specific subdomain.
             # ============================================================
-            BASE_DOMAIN="${{ secrets.CUSTOM_DOMAIN_NAME }}"
-            BASE_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}"
-            WILDCARD_CERT="cert-wildcard-${BASE_SUBDOMAIN}-${BASE_DOMAIN//./-}"
-            WILDCARD_HOST="*.${BASE_SUBDOMAIN}.${BASE_DOMAIN}"
             
-            # Check if a manually-uploaded wildcard cert exists
-            WILDCARD_EXISTS=$(az containerapp env certificate list \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APPS_ENVIRONMENT" \
-              --query "[?name=='$WILDCARD_CERT'].name" -o tsv 2>/dev/null || echo "")
-            
-            # Add hostname (works regardless of certificate)
-            echo "Adding custom hostname..."
-            az containerapp hostname add \
+            HOSTNAME_EXISTS=$(az containerapp hostname list \
               --resource-group "$RESOURCE_GROUP" \
               --name "$CONTAINER_APP_NAME" \
-              --hostname "$CUSTOM_DOMAIN" 2>&1 || true
+              --query "[?name=='$CUSTOM_DOMAIN'].name" -o tsv 2>/dev/null || echo "")
             
-            if [ -n "$WILDCARD_EXISTS" ]; then
-              echo "Binding wildcard certificate: $WILDCARD_CERT"
+            if [ -z "$HOSTNAME_EXISTS" ]; then
+              echo "Adding custom hostname..."
+              if ! az containerapp hostname add \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APP_NAME" \
+                --hostname "$CUSTOM_DOMAIN" 2>&1; then
+                echo "::warning::Failed to add hostname $CUSTOM_DOMAIN"
+                exit 0
+              fi
+            else
+              echo "Hostname already exists, skipping add..."
+            fi
+            
+            CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
+            CERT_EXISTS=$(az containerapp env certificate list \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APPS_ENVIRONMENT" \
+              --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -z "$CERT_EXISTS" ]; then
+              echo "Creating managed certificate: $CERT_NAME"
+              if ! az containerapp env certificate create \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APPS_ENVIRONMENT" \
+                --certificate-name "$CERT_NAME" \
+                --hostname "$CUSTOM_DOMAIN" \
+                --validation-method CNAME 2>&1; then
+                echo "::warning::Failed to create certificate for $CUSTOM_DOMAIN. DNS may not be propagated yet."
+                exit 0
+              fi
+            fi
+            
+            echo "Waiting for certificate provisioning..."
+            CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
+            CERT_READY=false
+            
+            for i in $(seq 1 30); do
+              STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
+              echo "Certificate state: $STATE (check $i/30)"
+              
+              if [ "$STATE" = "Succeeded" ]; then
+                CERT_READY=true
+                break
+              elif [ "$STATE" = "Failed" ]; then
+                echo "::warning::Certificate provisioning failed for $CUSTOM_DOMAIN"
+                break
+              fi
+              sleep 10
+            done
+            
+            if [ "$CERT_READY" = "true" ]; then
+              echo "Binding certificate..."
               if az containerapp hostname bind \
                 --resource-group "$RESOURCE_GROUP" \
                 --name "$CONTAINER_APP_NAME" \
                 --hostname "$CUSTOM_DOMAIN" \
-                --certificate "$WILDCARD_CERT" \
-                --environment "$CONTAINER_APPS_ENVIRONMENT" 2>&1; then
-                echo "✅ HTTPS enabled for $CUSTOM_DOMAIN using wildcard certificate"
+                --environment "$CONTAINER_APPS_ENVIRONMENT" \
+                --validation-method CNAME 2>&1; then
+                echo "✅ HTTPS enabled for $CUSTOM_DOMAIN"
               else
-                echo "::warning::Failed to bind wildcard certificate to $CUSTOM_DOMAIN"
+                echo "::warning::Failed to bind certificate to $CUSTOM_DOMAIN"
               fi
             else
-              echo "::warning::No wildcard certificate '$WILDCARD_CERT' found."
-              echo "Branch deployment will be available via HTTP at $CUSTOM_DOMAIN but not HTTPS."
-              echo "To enable HTTPS, upload a wildcard certificate for '$WILDCARD_HOST'."
-              echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
+              echo "::warning::Certificate not ready for $CUSTOM_DOMAIN. HTTPS will be configured on next deployment."
             fi
           fi
 

@@ -38,9 +38,9 @@ After the base deployment, the workflow attempts to:
 **Note**: This step uses `continue-on-error: true` because DNS propagation may not be complete on the first deployment. Subsequent deployments will succeed once DNS has propagated.
 
 ### Branch Deployments
-Branch deployments (e.g., `feature-login.app.yourdomain.com`) use a shared wildcard certificate. Since Azure managed certificates do not support wildcard hostnames, you must upload a wildcard certificate manually before branch deployments can use HTTPS. See [Wildcard Certificate for Branch Deployments](#wildcard-certificate-for-branch-deployments) for instructions.
+Branch deployments (e.g., `feature-login.app.yourdomain.com`) each get their own free managed certificate, just like production. No wildcard certificate is needed — the workflow automatically creates a per-branch managed certificate for each branch's specific subdomain.
 
-The workflow will still add the custom hostname for branch deployments even without a wildcard certificate — the branch will be accessible via HTTP but not HTTPS until the certificate is uploaded.
+When a branch is deleted, the cleanup workflow removes the branch's container app, DNS records, and managed certificate.
 
 ### Deployment Verification
 After custom domain setup, the workflow verifies that all URLs are actually accessible:
@@ -94,17 +94,6 @@ The script will:
 2. Add the custom hostname
 3. Create and bind a managed certificate
 4. **Post-verify** — confirms `https://app.yourdomain.com` is actually accessible
-
-To also create the shared wildcard certificate for branch deployments, add `-CreateWildcard`:
-
-```powershell
-.\infra\enable-custom-domain.ps1 `
-    -ResourceGroup "rg-production" `
-    -ContainerAppName "ca-web-production" `
-    -EnvironmentName "cae-production" `
-    -CustomDomain "app.yourdomain.com" `
-    -CreateWildcard
-```
 
 If DNS is hosted in Azure DNS (same subscription), you can skip the DNS pre-check since Azure Container Apps can verify its own DNS directly:
 
@@ -200,72 +189,42 @@ azd up                                    # Creates infrastructure + deploys app
     -ContainerAppName "ca-web-production" `
     -EnvironmentName "cae-production" `
     -CustomDomain "app.yourdomain.com" `
-    -CreateWildcard -SkipDnsCheck
+    -SkipDnsCheck
 ```
 
 ### `azd down` (Destroy)
 
 `azd down` deletes the resource group and all resources within it:
 - All Container Apps (including any branch deployments sharing the resource group)
-- Container Apps Environment (including all certificates — both production and wildcard)
+- Container Apps Environment (including all certificates — production and per-branch)
 - Container Registry
 - DNS Zone (including all DNS records)
 
 No orphaned resources are left behind.
 
-## Wildcard Certificate for Branch Deployments
+## Branch Deployment Certificates
 
-Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. Since Azure managed certificates do not support wildcard hostnames, you must upload a wildcard certificate manually.
+Branch deployments each receive their own free Azure managed certificate. No wildcard certificate or manual certificate management is required.
+
+### How It Works
+
+1. When a branch is deployed, the workflow creates a DNS record for the branch subdomain (e.g., `feature-login.app.yourdomain.com`)
+2. The workflow creates a managed certificate for that specific hostname using `az containerapp env certificate create`
+3. The certificate is bound to the branch's Container App
+4. When the branch is deleted, the cleanup workflow removes the certificate along with the Container App and DNS records
 
 ### Certificate Naming Convention
 
-The wildcard certificate follows this naming pattern:
-- **Name:** `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
-- **Hostname:** `*.{subdomain}.{domain}` (e.g., `*.app.yourdomain.com`)
+Each branch certificate follows this naming pattern:
+- **Name:** `cert-{branch}-{subdomain}-{domain}` (e.g., `cert-feature-login-app-yourdomain-com`)
+- **Hostname:** `{branch}.{subdomain}.{domain}` (e.g., `feature-login.app.yourdomain.com`)
 
-### Wildcard Certificate Upload
+### Why Not Wildcard Certificates?
 
-Azure managed certificates do not support wildcard hostnames, so you must upload a custom wildcard certificate:
+Azure Container Apps managed certificates do **not** support wildcard hostnames (e.g., `*.app.yourdomain.com`). The `*` character is rejected by the API with an `InvalidCharactersInHostname` error. This is a documented platform limitation — see [Microsoft Learn: Custom domain names and free managed certificates](https://learn.microsoft.com/en-us/azure/container-apps/custom-domains-managed-certificates).
 
-1. **Obtain a wildcard certificate** for `*.{subdomain}.{domain}` (e.g., from Let's Encrypt, DigiCert, or another CA)
-
-2. **Upload to Container Apps Environment:**
-   ```bash
-   az containerapp env certificate upload \
-       --resource-group rg-production \
-       --name cae-production \
-       --certificate-name cert-wildcard-app-yourdomain-com \
-       --certificate-file /path/to/wildcard.pfx \
-       --password "<pfx-password>"
-   ```
-
-3. **Verify the certificate:**
-   ```bash
-   az containerapp env certificate list \
-       --resource-group rg-production \
-       --name cae-production \
-       --query "[?name=='cert-wildcard-app-yourdomain-com']"
-   ```
-
-Once uploaded, all subsequent branch deployments will automatically use the wildcard certificate for HTTPS.
-
-### Let's Encrypt Wildcard Certificate
-
-To obtain a free wildcard certificate from Let's Encrypt:
-
-```bash
-# Using certbot with DNS challenge
-certbot certonly \
-    --manual \
-    --preferred-challenges dns \
-    -d "*.app.yourdomain.com"
-
-# Convert to PFX format
-openssl pkcs12 -export \
-    -out wildcard.pfx \
-    -inkey privkey.pem \
-    -in fullchain.pem \
-    -password pass:your-password
-```
-
-**Note:** Let's Encrypt certificates expire every 90 days and must be renewed and re-uploaded.
+Per-branch managed certificates are the recommended approach because they are:
+- **Free** — no certificate purchase required
+- **Automatic** — created and bound by the workflow
+- **Auto-renewed** — Azure handles renewal
+- **Cleaned up** — removed when the branch is deleted

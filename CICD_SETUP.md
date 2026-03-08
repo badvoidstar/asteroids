@@ -137,15 +137,16 @@ When you push to any branch, the workflow automatically:
 1. Builds and tests the application
 2. Deploys to a branch-specific Container App
 3. Creates DNS records for a branch-specific subdomain
-4. Binds the shared wildcard certificate for HTTPS (if a wildcard certificate has been uploaded)
+4. Creates a free managed certificate and enables HTTPS
 
-### Wildcard Certificate
+### Per-Branch Managed Certificates
 
-Branch deployments use a shared wildcard certificate (`*.{subdomain}.{domain}`) instead of creating individual certificates per branch. This makes branch deployments faster and simpler.
+Each branch deployment gets its own free Azure managed certificate — no wildcard certificate or manual setup required.
 
-- Azure managed certificates do not support wildcard hostnames, so you must upload a wildcard certificate manually — see [Custom Domain Setup](infra/CUSTOM_DOMAIN_SETUP.md)
-- Without a wildcard certificate, branch deployments will still be accessible via HTTP but not HTTPS
-- The naming convention is `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
+- Certificates are created automatically using `az containerapp env certificate create` with the branch's specific subdomain
+- Certificates are auto-renewed by Azure
+- Certificates are cleaned up when the branch is deleted
+- Certificate naming follows: `cert-{branch}-{subdomain}-{domain}` (e.g., `cert-feature-login-app-yourdomain-com`)
 
 ### Subdomain Naming
 
@@ -165,6 +166,7 @@ Branch names are sanitized for DNS compatibility:
 |----------|------------|------------------------|
 | Container App | `ca-web-production` | `ca-web-feature-login` |
 | Subdomain | `app.domain.com` | `feature-login.app.domain.com` |
+| Certificate | `cert-app-domain-com` | `cert-feature-login-app-domain-com` |
 
 ### Prerequisites for Branch Deployments
 
@@ -177,8 +179,7 @@ When a branch is deleted from GitHub:
 1. The cleanup workflow triggers automatically
 2. Deletes the branch's Container App
 3. Removes DNS records (CNAME and TXT)
-
-The shared wildcard certificate is never deleted — it remains in the Container Apps Environment for reuse by future branch deployments.
+4. Deletes the branch's managed certificate
 
 **Note:** The main branch cleanup is blocked to prevent accidental deletion of production.
 

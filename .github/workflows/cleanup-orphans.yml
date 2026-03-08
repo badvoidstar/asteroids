@@ -115,8 +115,9 @@ jobs:
               if [ -n "${{ secrets.CUSTOM_DOMAIN_NAME }}" ] && [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
                 DOMAIN_NAME="${{ secrets.CUSTOM_DOMAIN_NAME }}"
                 BRANCH_SUBDOMAIN="$SANITIZED_BRANCH.${{ secrets.CUSTOM_SUBDOMAIN }}"
+                BRANCH_FQDN="$BRANCH_SUBDOMAIN.$DOMAIN_NAME"
                 
-                echo "  -> Deleting DNS records for: $BRANCH_SUBDOMAIN.$DOMAIN_NAME"
+                echo "  -> Deleting DNS records for: $BRANCH_FQDN"
                 
                 # Delete CNAME record
                 az network dns record-set cname delete \
@@ -131,6 +132,15 @@ jobs:
                   --zone-name "$DOMAIN_NAME" \
                   --name "asuid.$BRANCH_SUBDOMAIN" \
                   --yes 2>/dev/null || echo "  -> TXT not found"
+                
+                # Delete per-branch managed certificate
+                CERT_NAME="cert-${BRANCH_FQDN//./-}"
+                echo "  -> Deleting certificate: $CERT_NAME"
+                az containerapp env certificate delete \
+                  --resource-group "${{ env.PRODUCTION_RG }}" \
+                  --name "${{ env.CONTAINER_ENV_NAME }}" \
+                  --certificate "$CERT_NAME" \
+                  --yes 2>/dev/null || echo "  -> Certificate not found"
               fi
             fi
           done

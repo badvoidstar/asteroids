@@ -29,11 +29,6 @@
 .PARAMETER SkipDnsCheck
     Skip the DNS pre-check (use if you know DNS is configured via Azure DNS).
 
-.PARAMETER CreateWildcard
-    Check for an existing wildcard certificate (*.CustomDomain) for branch deployments.
-    Azure managed certificates do not support wildcard hostnames, so this only checks
-    if a manually-uploaded certificate exists.
-
 .EXAMPLE
     .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
         -ContainerAppName "ca-web-production" `
@@ -45,7 +40,7 @@
         -ContainerAppName "ca-web-production" `
         -EnvironmentName "cae-production" `
         -CustomDomain "app.yourdomain.com" `
-        -CreateWildcard
+        -SkipDnsCheck
 #>
 
 param(
@@ -61,9 +56,7 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$CustomDomain,
 
-    [switch]$SkipDnsCheck,
-
-    [switch]$CreateWildcard
+    [switch]$SkipDnsCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -191,30 +184,4 @@ if ($accessible) {
     Write-Host "⚠ Certificate bound but https://$CustomDomain is not yet responding." -ForegroundColor Yellow
     Write-Host "  This is normal if DNS hasn't fully propagated to all resolvers." -ForegroundColor Yellow
     Write-Host "  The domain should become accessible within a few minutes." -ForegroundColor Yellow
-}
-
-# Optional: Check for wildcard certificate for branch deployments
-if ($CreateWildcard) {
-    Write-Host "`n=== Wildcard Certificate for Branch Deployments ===" -ForegroundColor Cyan
-    $wildcardHost = "*.$CustomDomain"
-    $wildcardCertName = "cert-wildcard-$($CustomDomain -replace '\.', '-')"
-
-    Write-Host "  Hostname: $wildcardHost"
-    Write-Host "  Certificate name: $wildcardCertName"
-
-    $existingWildcard = az containerapp env certificate list `
-        --resource-group $ResourceGroup `
-        --name $EnvironmentName `
-        --query "[?name=='$wildcardCertName'].name" -o tsv 2>$null
-
-    if ($existingWildcard) {
-        Write-Host "✅ Wildcard certificate already exists: $wildcardCertName" -ForegroundColor Green
-    } else {
-        # Azure managed certificates do NOT support wildcard hostnames.
-        # Wildcard certs must be uploaded manually.
-        Write-Host "⚠ No wildcard certificate found: $wildcardCertName" -ForegroundColor Yellow
-        Write-Host "  Azure managed certificates do not support wildcard hostnames." -ForegroundColor Yellow
-        Write-Host "  Upload a wildcard certificate for '$wildcardHost' manually." -ForegroundColor Yellow
-        Write-Host "  See infra/CUSTOM_DOMAIN_SETUP.md for instructions." -ForegroundColor Yellow
-    }
 }
