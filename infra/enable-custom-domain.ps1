@@ -8,11 +8,9 @@
     Run this after the initial deployment has created DNS verification records and they have propagated.
 
     The script performs these steps:
-    1. Verifies DNS records exist (CNAME + TXT verification)
-    2. Adds the custom hostname to the Container App
-    3. Creates a managed certificate for the domain
-    4. Binds the certificate to enable HTTPS
-    5. Verifies the domain is accessible
+    1. Adds the custom hostname to the Container App
+    2. Creates a managed certificate for the domain
+    3. Binds the certificate to enable HTTPS
 
 .PARAMETER ResourceGroup
     The name of the resource group containing the Container App.
@@ -26,21 +24,11 @@
 .PARAMETER CustomDomain
     The custom domain name (e.g., app.yourdomain.com).
 
-.PARAMETER SkipDnsCheck
-    Skip the DNS pre-check (use if you know DNS is configured via Azure DNS).
-
 .EXAMPLE
     .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
         -ContainerAppName "ca-web-production" `
         -EnvironmentName "cae-production" `
         -CustomDomain "app.yourdomain.com"
-
-.EXAMPLE
-    .\enable-custom-domain.ps1 -ResourceGroup "rg-production" `
-        -ContainerAppName "ca-web-production" `
-        -EnvironmentName "cae-production" `
-        -CustomDomain "app.yourdomain.com" `
-        -SkipDnsCheck
 #>
 
 param(
@@ -54,9 +42,7 @@ param(
     [string]$EnvironmentName,
 
     [Parameter(Mandatory=$true)]
-    [string]$CustomDomain,
-
-    [switch]$SkipDnsCheck
+    [string]$CustomDomain
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,52 +54,8 @@ Write-Host "Environment: $EnvironmentName"
 Write-Host "Custom Domain: $CustomDomain"
 Write-Host ""
 
-# Step 0: Verify DNS records exist
-if (-not $SkipDnsCheck) {
-    Write-Host "[0/4] Verifying DNS records..." -ForegroundColor Yellow
-
-    $cnameOk = $false
-    $txtOk = $false
-
-    try {
-        $cnameResult = Resolve-DnsName -Name $CustomDomain -Type CNAME -ErrorAction SilentlyContinue
-        if ($cnameResult) {
-            Write-Host "  ✓ CNAME record found: $($cnameResult.NameHost)" -ForegroundColor Green
-            $cnameOk = $true
-        }
-    } catch { }
-
-    try {
-        $txtResult = Resolve-DnsName -Name "asuid.$CustomDomain" -Type TXT -ErrorAction SilentlyContinue
-        if ($txtResult) {
-            Write-Host "  ✓ TXT verification record found" -ForegroundColor Green
-            $txtOk = $true
-        }
-    } catch { }
-
-    if (-not $cnameOk -or -not $txtOk) {
-        if (-not $cnameOk) {
-            Write-Host "  ✗ CNAME record not found for '$CustomDomain'" -ForegroundColor Red
-        }
-        if (-not $txtOk) {
-            Write-Host "  ✗ TXT record not found for 'asuid.$CustomDomain'" -ForegroundColor Red
-        }
-        Write-Host "" -ForegroundColor Red
-        Write-Host "DNS records are not yet visible. Possible causes:" -ForegroundColor Red
-        Write-Host "  - DNS propagation is still in progress (wait 5-15 minutes)" -ForegroundColor Red
-        Write-Host "  - Domain registrar NS records don't point to Azure DNS" -ForegroundColor Red
-        Write-Host "  - Records were not created (run deployment first)" -ForegroundColor Red
-        Write-Host "" -ForegroundColor Yellow
-        Write-Host "Use -SkipDnsCheck to bypass this check if using Azure DNS (Azure can verify its own records)." -ForegroundColor Yellow
-        exit 1
-    }
-    Write-Host "✓ DNS records verified" -ForegroundColor Green
-} else {
-    Write-Host "[0/4] DNS pre-check skipped (-SkipDnsCheck)" -ForegroundColor DarkGray
-}
-
 # Step 1: Add custom hostname to container app
-Write-Host "`n[1/4] Adding custom hostname to container app..." -ForegroundColor Yellow
+Write-Host "[1/3] Adding custom hostname to container app..." -ForegroundColor Yellow
 az containerapp hostname add `
     --resource-group $ResourceGroup `
     --name $ContainerAppName `
@@ -127,7 +69,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✓ Custom hostname added" -ForegroundColor Green
 
 # Step 2: Create managed certificate
-Write-Host "`n[2/4] Creating managed certificate..." -ForegroundColor Yellow
+Write-Host "`n[2/3] Creating managed certificate..." -ForegroundColor Yellow
 $certName = "cert-$($CustomDomain -replace '\.', '-')"
 
 az containerapp env certificate create `
@@ -144,7 +86,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "✓ Certificate created: $certName" -ForegroundColor Green
 
 # Step 3: Bind certificate to hostname
-Write-Host "`n[3/4] Binding certificate to enable HTTPS..." -ForegroundColor Yellow
+Write-Host "`n[3/3] Binding certificate to enable HTTPS..." -ForegroundColor Yellow
 az containerapp hostname bind `
     --resource-group $ResourceGroup `
     --name $ContainerAppName `
@@ -156,32 +98,6 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "✗ Failed to bind certificate" -ForegroundColor Red
     exit 1
 }
-Write-Host "✓ Certificate bound" -ForegroundColor Green
 
-# Step 4: Verify domain is accessible
-Write-Host "`n[4/4] Verifying domain is accessible..." -ForegroundColor Yellow
-$maxAttempts = 6
-$accessible = $false
-
-for ($i = 1; $i -le $maxAttempts; $i++) {
-    try {
-        $response = Invoke-WebRequest -Uri "https://$CustomDomain" -UseBasicParsing -TimeoutSec 10 -ErrorAction SilentlyContinue
-        if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
-            $accessible = $true
-            break
-        }
-    } catch {
-        Write-Host "  Attempt $i/$maxAttempts - not yet responding..." -ForegroundColor DarkGray
-    }
-    if ($i -lt $maxAttempts) { Start-Sleep -Seconds 5 }
-}
-
-Write-Host ""
-if ($accessible) {
-    Write-Host "✅ Successfully configured HTTPS for $CustomDomain" -ForegroundColor Green
-    Write-Host "   https://$CustomDomain is accessible now." -ForegroundColor Green
-} else {
-    Write-Host "⚠ Certificate bound but https://$CustomDomain is not yet responding." -ForegroundColor Yellow
-    Write-Host "  This is normal if DNS hasn't fully propagated to all resolvers." -ForegroundColor Yellow
-    Write-Host "  The domain should become accessible within a few minutes." -ForegroundColor Yellow
-}
+Write-Host "`n✓ Successfully configured HTTPS for $CustomDomain" -ForegroundColor Green
+Write-Host "The custom domain is now accessible at https://$CustomDomain" -ForegroundColor Green

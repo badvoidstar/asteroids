@@ -56,21 +56,16 @@ az role assignment create \
   --scope /subscriptions/$SUBSCRIPTION_ID
 ```
 
-### Step 4: Create GitHub Environments
+### Step 4: Create GitHub Environment
 
-The workflow uses GitHub environments for deployment protection and OIDC authentication.
+The workflow uses a GitHub environment for deployment protection and OIDC authentication.
 
 1. Go to your repository Settings → Environments
 2. Click "New environment"
 3. Name it `production`
-4. Optionally configure protection rules (e.g., required reviewers for production deployments)
-5. Click "New environment" again
-6. Name it `preview`
-7. Do **not** add protection rules — branch deployments should deploy automatically
+4. Optionally configure protection rules (e.g., required reviewers)
 
 ### Step 5: Configure Federated Credentials
-
-Create federated credentials for **both** environments so OIDC authentication works for production and branch deployments:
 
 ```bash
 # Get your GitHub repository information
@@ -84,16 +79,6 @@ az ad app federated-credential create \
     "name": "github-astervoids-production",
     "issuer": "https://token.actions.githubusercontent.com",
     "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':environment:production",
-    "audiences": ["api://AzureADTokenExchange"]
-  }'
-
-# Create federated credential for the preview environment (branch deployments)
-az ad app federated-credential create \
-  --id <app-id> \
-  --parameters '{
-    "name": "github-astervoids-preview",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':environment:preview",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 ```
@@ -137,22 +122,13 @@ When you push to any branch, the workflow automatically:
 1. Builds and tests the application
 2. Deploys to a branch-specific Container App
 3. Creates DNS records for a branch-specific subdomain
-4. Creates a free managed certificate and enables HTTPS
-
-### Per-Branch Managed Certificates
-
-Each branch deployment gets its own free Azure managed certificate — no wildcard certificate or manual setup required.
-
-- Certificates are created automatically using `az containerapp env certificate create` with the branch's specific subdomain
-- Certificates are auto-renewed by Azure
-- Certificates are cleaned up when the branch is deleted
-- Certificate naming follows: `cert-{branch}-{subdomain}-{domain}` (e.g., `cert-feature-login-app-yourdomain-com`)
+4. Configures HTTPS with a managed certificate
 
 ### Subdomain Naming
 
 Branch deployments get subdomains following this pattern:
 - **Production (main):** `{subdomain}.{domain}` (e.g., `app.yourdomain.com`)
-- **Feature branches:** `{branch}.{subdomain}.{domain}` (e.g., `feature-login.app.yourdomain.com`)
+- **Feature branches:** `{subdomain}-{branch}.{domain}` (e.g., `app-feature-login.yourdomain.com`)
 
 Branch names are sanitized for DNS compatibility:
 - Converted to lowercase
@@ -165,8 +141,7 @@ Branch names are sanitized for DNS compatibility:
 | Resource | Production | Branch (feature/login) |
 |----------|------------|------------------------|
 | Container App | `ca-web-production` | `ca-web-feature-login` |
-| Subdomain | `app.domain.com` | `feature-login.app.domain.com` |
-| Certificate | `cert-app-domain-com` | `cert-feature-login-app-domain-com` |
+| Subdomain | `app.domain.com` | `app-feature-login.domain.com` |
 
 ### Prerequisites for Branch Deployments
 
@@ -179,7 +154,7 @@ When a branch is deleted from GitHub:
 1. The cleanup workflow triggers automatically
 2. Deletes the branch's Container App
 3. Removes DNS records (CNAME and TXT)
-4. Deletes the branch's managed certificate
+4. Removes the managed certificate
 
 **Note:** The main branch cleanup is blocked to prevent accidental deletion of production.
 
@@ -202,8 +177,7 @@ The workflow is defined in `.github/workflows/azure-deploy.yml` and includes:
 - Builds the solution
 - Runs tests
 
-### Deploy Job
-- Runs on push to any branch (uses `production` environment for main, `preview` for branches)
+### Deploy Job (main branch only)
 - Installs Azure Developer CLI (azd)
 - Authenticates to Azure using OIDC (federated credentials)
 - Authenticates azd using GitHub's federated credential provider
