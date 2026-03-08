@@ -56,16 +56,21 @@ az role assignment create \
   --scope /subscriptions/$SUBSCRIPTION_ID
 ```
 
-### Step 4: Create GitHub Environment
+### Step 4: Create GitHub Environments
 
-The workflow uses a GitHub environment for deployment protection and OIDC authentication.
+The workflow uses GitHub environments for deployment protection and OIDC authentication.
 
 1. Go to your repository Settings → Environments
 2. Click "New environment"
 3. Name it `production`
-4. Optionally configure protection rules (e.g., required reviewers)
+4. Optionally configure protection rules (e.g., required reviewers for production deployments)
+5. Click "New environment" again
+6. Name it `preview`
+7. Do **not** add protection rules — branch deployments should deploy automatically
 
 ### Step 5: Configure Federated Credentials
+
+Create federated credentials for **both** environments so OIDC authentication works for production and branch deployments:
 
 ```bash
 # Get your GitHub repository information
@@ -79,6 +84,16 @@ az ad app federated-credential create \
     "name": "github-astervoids-production",
     "issuer": "https://token.actions.githubusercontent.com",
     "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':environment:production",
+    "audiences": ["api://AzureADTokenExchange"]
+  }'
+
+# Create federated credential for the preview environment (branch deployments)
+az ad app federated-credential create \
+  --id <app-id> \
+  --parameters '{
+    "name": "github-astervoids-preview",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "subject": "repo:'"$GITHUB_ORG/$GITHUB_REPO"':environment:preview",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 ```
@@ -122,7 +137,7 @@ When you push to any branch, the workflow automatically:
 1. Builds and tests the application
 2. Deploys to a branch-specific Container App
 3. Creates DNS records for a branch-specific subdomain
-4. Binds the shared wildcard certificate for HTTPS
+4. Binds the shared wildcard certificate for HTTPS (if a wildcard certificate has been uploaded)
 
 ### Wildcard Certificate
 
@@ -186,7 +201,8 @@ The workflow is defined in `.github/workflows/azure-deploy.yml` and includes:
 - Builds the solution
 - Runs tests
 
-### Deploy Job (main branch only)
+### Deploy Job
+- Runs on push to any branch (uses `production` environment for main, `preview` for branches)
 - Installs Azure Developer CLI (azd)
 - Authenticates to Azure using OIDC (federated credentials)
 - Authenticates azd using GitHub's federated credential provider
