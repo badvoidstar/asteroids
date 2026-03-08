@@ -138,12 +138,12 @@ jobs:
             azd env set CUSTOM_DOMAIN_NAME "${{ secrets.CUSTOM_DOMAIN_NAME }}"
           fi
           
-          # Set subdomain (with branch suffix for non-production)
+          # Set subdomain (with branch prefix as subdomain level for non-production)
           if [ -n "${{ secrets.CUSTOM_SUBDOMAIN }}" ]; then
             if [ "${{ steps.vars.outputs.is_production }}" = "true" ]; then
               azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}"
             else
-              azd env set CUSTOM_SUBDOMAIN "${{ secrets.CUSTOM_SUBDOMAIN }}-${{ steps.vars.outputs.sanitized_branch }}"
+              azd env set CUSTOM_SUBDOMAIN "${{ steps.vars.outputs.sanitized_branch }}.${{ secrets.CUSTOM_SUBDOMAIN }}"
             fi
           fi
 
@@ -210,6 +210,8 @@ jobs:
         if: env.CUSTOM_DOMAIN != ''
         continue-on-error: true
         run: |
+          IS_PRODUCTION="${{ steps.vars.outputs.is_production }}"
+          
           echo "Configuring custom domain: $CUSTOM_DOMAIN"
           
           # Check if hostname already exists and is bound with HTTPS
@@ -240,127 +242,315 @@ jobs:
             fi
           }
           
-          # Retry logic with exponential backoff for the entire custom domain setup
-          MAX_RETRIES=3
-          RETRY_DELAY=120  # Start with 2 minutes
-          
-          for attempt in $(seq 1 $MAX_RETRIES); do
-            echo ""
-            echo "=========================================="
-            echo "Custom domain setup attempt $attempt of $MAX_RETRIES"
-            echo "=========================================="
+          if [ "$IS_PRODUCTION" = "true" ]; then
+            # ============================================================
+            # PRODUCTION: Create managed certificate with retry
+            # ============================================================
+            MAX_RETRIES=3
+            RETRY_DELAY=120  # Start with 2 minutes
             
-            # Wait for DNS propagation before attempting (skip wait on first attempt if DNS already propagated)
-            if [ $attempt -gt 1 ] || ! check_dns; then
-              if [ $attempt -gt 1 ]; then
-                WAIT_TIME=$((RETRY_DELAY * (attempt - 1)))
-                echo "Waiting ${WAIT_TIME}s before retry..."
-                sleep $WAIT_TIME
+            for attempt in $(seq 1 $MAX_RETRIES); do
+              echo ""
+              echo "=========================================="
+              echo "Custom domain setup attempt $attempt of $MAX_RETRIES"
+              echo "=========================================="
+              
+              if [ $attempt -gt 1 ] || ! check_dns; then
+                if [ $attempt -gt 1 ]; then
+                  WAIT_TIME=$((RETRY_DELAY * (attempt - 1)))
+                  echo "Waiting ${WAIT_TIME}s before retry..."
+                  sleep $WAIT_TIME
+                fi
+                
+                if ! check_dns; then
+                  echo "DNS not propagated yet, will retry..."
+                  if [ $attempt -eq $MAX_RETRIES ]; then
+                    echo "::warning::DNS not propagated after $MAX_RETRIES attempts. Custom domain setup incomplete."
+                    echo "Run the deployment again later or configure manually."
+                    exit 0
+                  fi
+                  continue
+                fi
               fi
               
-              # Check DNS again after waiting
-              if ! check_dns; then
-                echo "DNS not propagated yet, will retry..."
-                if [ $attempt -eq $MAX_RETRIES ]; then
-                  echo "::warning::DNS not propagated after $MAX_RETRIES attempts. Custom domain setup incomplete."
-                  echo "Run the deployment again later or configure manually."
-                  exit 0
-                fi
-                continue
-              fi
-            fi
-            
-            # Check if hostname already exists (refresh check each attempt)
-            HOSTNAME_EXISTS=$(az containerapp hostname list \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APP_NAME" \
-              --query "[?name=='$CUSTOM_DOMAIN'].name" -o tsv 2>/dev/null || echo "")
-            
-            # Add custom hostname (skip if already exists)
-            if [ -z "$HOSTNAME_EXISTS" ]; then
-              echo "Adding custom hostname..."
-              if ! az containerapp hostname add \
+              HOSTNAME_EXISTS=$(az containerapp hostname list \
                 --resource-group "$RESOURCE_GROUP" \
                 --name "$CONTAINER_APP_NAME" \
-                --hostname "$CUSTOM_DOMAIN" 2>&1; then
-                echo "Failed to add hostname, will retry..."
-                continue
+                --query "[?name=='$CUSTOM_DOMAIN'].name" -o tsv 2>/dev/null || echo "")
+              
+              if [ -z "$HOSTNAME_EXISTS" ]; then
+                echo "Adding custom hostname..."
+                if ! az containerapp hostname add \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --name "$CONTAINER_APP_NAME" \
+                  --hostname "$CUSTOM_DOMAIN" 2>&1; then
+                  echo "Failed to add hostname, will retry..."
+                  continue
+                fi
+              else
+                echo "Hostname already exists, skipping add..."
               fi
-            else
-              echo "Hostname already exists, skipping add..."
-            fi
-            
-            # Create certificate
-            CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
-            CERT_EXISTS=$(az containerapp env certificate list \
-              --resource-group "$RESOURCE_GROUP" \
-              --name "$CONTAINER_APPS_ENVIRONMENT" \
-              --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
-            
-            if [ -z "$CERT_EXISTS" ]; then
-              echo "Creating managed certificate..."
-              if ! az containerapp env certificate create \
+              
+              CERT_NAME="cert-${CUSTOM_DOMAIN//./-}"
+              CERT_EXISTS=$(az containerapp env certificate list \
                 --resource-group "$RESOURCE_GROUP" \
                 --name "$CONTAINER_APPS_ENVIRONMENT" \
-                --certificate-name "$CERT_NAME" \
-                --hostname "$CUSTOM_DOMAIN" \
+                --query "[?name=='$CERT_NAME'].name" -o tsv 2>/dev/null || echo "")
+              
+              if [ -z "$CERT_EXISTS" ]; then
+                echo "Creating managed certificate..."
+                if ! az containerapp env certificate create \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --name "$CONTAINER_APPS_ENVIRONMENT" \
+                  --certificate-name "$CERT_NAME" \
+                  --hostname "$CUSTOM_DOMAIN" \
+                  --validation-method CNAME 2>&1; then
+                  echo "Failed to create certificate, will retry..."
+                  continue
+                fi
+              fi
+              
+              echo "Waiting for certificate provisioning..."
+              CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
+              CERT_READY=false
+              
+              for i in $(seq 1 30); do
+                STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
+                echo "Certificate state: $STATE (check $i/30)"
+                
+                if [ "$STATE" = "Succeeded" ]; then
+                  CERT_READY=true
+                  break
+                elif [ "$STATE" = "Failed" ]; then
+                  echo "Certificate provisioning failed"
+                  break
+                fi
+                sleep 10
+              done
+              
+              if [ "$CERT_READY" = "true" ]; then
+                echo "Binding certificate..."
+                if az containerapp hostname bind \
+                  --resource-group "$RESOURCE_GROUP" \
+                  --name "$CONTAINER_APP_NAME" \
+                  --hostname "$CUSTOM_DOMAIN" \
+                  --environment "$CONTAINER_APPS_ENVIRONMENT" \
+                  --validation-method CNAME 2>&1; then
+                  echo "✅ HTTPS enabled for $CUSTOM_DOMAIN"
+                  break
+                fi
+              fi
+              
+              echo "Certificate not ready, will retry..."
+            done
+            
+            # Create shared wildcard certificate for branch deployments
+            WILDCARD_HOST="*.${CUSTOM_DOMAIN}"
+            WILDCARD_CERT="cert-wildcard-${CUSTOM_DOMAIN//./-}"
+            
+            echo ""
+            echo "=========================================="
+            echo "Creating wildcard certificate for branch deployments: $WILDCARD_HOST"
+            echo "=========================================="
+            
+            WILDCARD_EXISTS=$(az containerapp env certificate list \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APPS_ENVIRONMENT" \
+              --query "[?name=='$WILDCARD_CERT'].name" -o tsv 2>/dev/null || echo "")
+            
+            if [ -n "$WILDCARD_EXISTS" ]; then
+              echo "✅ Wildcard certificate already exists: $WILDCARD_CERT"
+            else
+              if az containerapp env certificate create \
+                --resource-group "$RESOURCE_GROUP" \
+                --name "$CONTAINER_APPS_ENVIRONMENT" \
+                --certificate-name "$WILDCARD_CERT" \
+                --hostname "$WILDCARD_HOST" \
                 --validation-method CNAME 2>&1; then
-                echo "Failed to create certificate, will retry..."
-                continue
+                echo "✅ Wildcard certificate created: $WILDCARD_CERT"
+              else
+                echo "::warning::Could not create wildcard managed certificate."
+                echo "To enable HTTPS for branch deployments, upload a wildcard certificate"
+                echo "for '$WILDCARD_HOST' named '$WILDCARD_CERT' to the Container Apps Environment."
+                echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
               fi
             fi
             
-            # Wait for certificate to be ready (up to 5 minutes per attempt)
-            echo "Waiting for certificate provisioning..."
-            CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$CERT_NAME"
-            CERT_READY=false
+          else
+            # ============================================================
+            # BRANCH: Use shared wildcard certificate (no per-branch cert)
+            # Creates the wildcard cert automatically if it doesn't exist
+            # (e.g., first branch deploy after infra was provisioned, or
+            # after azd down/up cycle). No DNS wait — Azure DNS records
+            # were just created by Bicep during azd provision, so Azure
+            # can verify them immediately.
+            # ============================================================
+            BASE_DOMAIN="${{ secrets.CUSTOM_DOMAIN_NAME }}"
+            BASE_SUBDOMAIN="${{ secrets.CUSTOM_SUBDOMAIN }}"
+            WILDCARD_CERT="cert-wildcard-${BASE_SUBDOMAIN}-${BASE_DOMAIN//./-}"
             
-            for i in $(seq 1 30); do
-              STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-              echo "Certificate state: $STATE (check $i/30)"
-              
-              if [ "$STATE" = "Succeeded" ]; then
-                CERT_READY=true
-                break
-              elif [ "$STATE" = "Failed" ]; then
-                echo "Certificate provisioning failed"
-                break
-              fi
-              sleep 10
-            done
+            # Check that the wildcard cert exists; create it if not
+            WILDCARD_HOST="*.${BASE_SUBDOMAIN}.${BASE_DOMAIN}"
+            WILDCARD_EXISTS=$(az containerapp env certificate list \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APPS_ENVIRONMENT" \
+              --query "[?name=='$WILDCARD_CERT'].name" -o tsv 2>/dev/null || echo "")
             
-            if [ "$CERT_READY" = "true" ]; then
-              echo "Binding certificate..."
-              if az containerapp hostname bind \
+            if [ -z "$WILDCARD_EXISTS" ]; then
+              echo "Wildcard certificate '$WILDCARD_CERT' not found. Creating it now..."
+              if az containerapp env certificate create \
                 --resource-group "$RESOURCE_GROUP" \
-                --name "$CONTAINER_APP_NAME" \
-                --hostname "$CUSTOM_DOMAIN" \
-                --environment "$CONTAINER_APPS_ENVIRONMENT" \
+                --name "$CONTAINER_APPS_ENVIRONMENT" \
+                --certificate-name "$WILDCARD_CERT" \
+                --hostname "$WILDCARD_HOST" \
                 --validation-method CNAME 2>&1; then
-                echo "✅ HTTPS enabled for $CUSTOM_DOMAIN"
+                echo "✅ Wildcard certificate created: $WILDCARD_CERT"
+              else
+                echo "::warning::Could not create wildcard managed certificate '$WILDCARD_CERT'."
+                echo "Upload a wildcard certificate for '$WILDCARD_HOST' manually."
+                echo "See infra/CUSTOM_DOMAIN_SETUP.md for instructions."
                 exit 0
               fi
             fi
             
-            echo "Certificate not ready, will retry..."
+            # Wait for wildcard cert to be fully provisioned (may still be provisioning)
+            CERT_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/$CONTAINER_APPS_ENVIRONMENT/managedCertificates/$WILDCARD_CERT"
+            CERT_STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+            
+            if [ "$CERT_STATE" != "Succeeded" ]; then
+              echo "Wildcard certificate exists but is $CERT_STATE, waiting for provisioning..."
+              for i in $(seq 1 30); do
+                CERT_STATE=$(az resource show --ids "$CERT_ID" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+                echo "  Certificate state: $CERT_STATE (check $i/30)"
+                if [ "$CERT_STATE" = "Succeeded" ]; then
+                  break
+                elif [ "$CERT_STATE" = "Failed" ]; then
+                  echo "::warning::Wildcard certificate provisioning failed."
+                  echo "See infra/CUSTOM_DOMAIN_SETUP.md for manual certificate instructions."
+                  exit 0
+                fi
+                sleep 10
+              done
+              
+              if [ "$CERT_STATE" != "Succeeded" ]; then
+                echo "::warning::Wildcard certificate still provisioning after 5 minutes."
+                echo "Try deploying again later."
+                exit 0
+              fi
+            fi
+            
+            # Add hostname and bind with wildcard cert (no DNS wait needed)
+            echo "Adding custom hostname..."
+            az containerapp hostname add \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APP_NAME" \
+              --hostname "$CUSTOM_DOMAIN" 2>&1 || true
+            
+            echo "Binding wildcard certificate: $WILDCARD_CERT"
+            if az containerapp hostname bind \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APP_NAME" \
+              --hostname "$CUSTOM_DOMAIN" \
+              --certificate "$WILDCARD_CERT" \
+              --environment "$CONTAINER_APPS_ENVIRONMENT" 2>&1; then
+              echo "✅ HTTPS enabled for $CUSTOM_DOMAIN using wildcard certificate"
+            else
+              echo "::warning::Failed to bind wildcard certificate to $CUSTOM_DOMAIN"
+            fi
+          fi
+
+      - name: Verify Deployment Availability
+        id: verify
+        run: |
+          AZURE_URL="${{ steps.deploy.outputs.url }}"
+          AZURE_STATUS="unknown"
+          DOMAIN_STATUS="none"
+          
+          # Verify Azure Container Apps URL is accessible
+          echo "Verifying Azure URL: $AZURE_URL"
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$AZURE_URL" 2>/dev/null || echo "000")
+            echo "  Attempt $i: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+              AZURE_STATUS="accessible"
+              break
+            fi
+            sleep 5
           done
           
-          echo "::warning::Custom domain setup incomplete after $MAX_RETRIES attempts."
-          echo "The deployment succeeded but HTTPS is not yet configured."
-          echo "This usually resolves on the next deployment after DNS propagates."
+          if [ "$AZURE_STATUS" != "accessible" ]; then
+            AZURE_STATUS="unavailable"
+            if [ "$HTTP_CODE" = "000" ]; then
+              echo "::warning::Azure URL not reachable (connection failed or timed out). The container may still be starting."
+            else
+              echo "::warning::Azure URL returned HTTP $HTTP_CODE. The container may still be starting."
+            fi
+          fi
+          echo "azure_status=$AZURE_STATUS" >> $GITHUB_OUTPUT
+          
+          # Verify custom domain (if configured)
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo ""
+            echo "Verifying custom domain: https://$CUSTOM_DOMAIN"
+            
+            # Check DNS resolution
+            DNS_RESOLVED=false
+            RESOLVED_ADDR=$(nslookup "$CUSTOM_DOMAIN" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | head -1 || echo "")
+            if [ -n "$RESOLVED_ADDR" ]; then
+              DNS_RESOLVED=true
+              echo "  DNS resolves: $RESOLVED_ADDR"
+            else
+              echo "  DNS not resolving yet"
+            fi
+            
+            # Check HTTPS accessibility
+            if [ "$DNS_RESOLVED" = "true" ]; then
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://$CUSTOM_DOMAIN" 2>/dev/null || echo "000")
+              echo "  HTTPS response: HTTP $HTTP_CODE"
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+                DOMAIN_STATUS="accessible"
+              else
+                DOMAIN_STATUS="dns_ok_not_serving"
+              fi
+            else
+              DOMAIN_STATUS="pending_dns"
+            fi
+          fi
+          echo "domain_status=$DOMAIN_STATUS" >> $GITHUB_OUTPUT
 
       - name: Deployment Summary
         run: |
-          echo "### 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.vars.outputs.is_production }}" = "true" ]; then
             echo "**Environment:** production" >> $GITHUB_STEP_SUMMARY
           else
             echo "**Environment:** preview (${{ steps.vars.outputs.branch_name }})" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "**Application URL:** ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
-          if [ -n "$CUSTOM_DOMAIN" ]; then
-            echo "**Custom Domain:** https://$CUSTOM_DOMAIN" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Azure URL status
+          AZURE_URL="${{ steps.deploy.outputs.url }}"
+          if [ "${{ steps.verify.outputs.azure_status }}" = "accessible" ]; then
+            echo "✅ **Azure URL:** $AZURE_URL" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏳ **Azure URL:** $AZURE_URL *(container still starting)*" >> $GITHUB_STEP_SUMMARY
           fi
+          
+          # Custom domain status
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            case "${{ steps.verify.outputs.domain_status }}" in
+              accessible)
+                echo "✅ **Custom Domain:** https://$CUSTOM_DOMAIN" >> $GITHUB_STEP_SUMMARY
+                ;;
+              dns_ok_not_serving)
+                echo "⏳ **Custom Domain:** https://$CUSTOM_DOMAIN *(DNS resolves but HTTPS not yet serving — certificate may still be provisioning)*" >> $GITHUB_STEP_SUMMARY
+                ;;
+              pending_dns)
+                echo "⏳ **Custom Domain:** https://$CUSTOM_DOMAIN *(waiting for DNS propagation)*" >> $GITHUB_STEP_SUMMARY
+                ;;
+            esac
+          fi
+          
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "View your deployment in the [Azure Portal](https://portal.azure.com)" >> $GITHUB_STEP_SUMMARY
