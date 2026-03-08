@@ -16,7 +16,7 @@ public class SessionHub : Hub
     private readonly ILogger<SessionHub> _logger;
 
     // Group name for all connected clients to receive session list updates
-    private const string AllClientsGroup = "AllClients";
+    internal const string AllClientsGroup = "AllClients";
 
     public SessionHub(
         ISessionService sessionService,

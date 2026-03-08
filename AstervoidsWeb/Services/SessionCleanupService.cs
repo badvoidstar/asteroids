@@ -21,7 +21,7 @@ public class SessionCleanupService : BackgroundService
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(10);
 
     // Group name must match SessionHub.AllClientsGroup
-    private const string AllClientsGroup = "AllClients";
+    private const string AllClientsGroup = SessionHub.AllClientsGroup;
 
     public SessionCleanupService(
         ISessionService sessionService,
