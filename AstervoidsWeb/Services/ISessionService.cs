@@ -66,6 +66,20 @@ public interface ISessionService
     /// More efficient than calling GetMemberByConnectionId + GetSession separately.
     /// </summary>
     (Member Member, Session Session)? GetMemberAndSessionByConnectionId(string connectionId);
+
+    /// <summary>
+    /// Gets all sessions (including empty ones awaiting cleanup).
+    /// Used by the cleanup service to check for expired sessions.
+    /// </summary>
+    IEnumerable<Session> GetAllSessions();
+
+    /// <summary>
+    /// Force-destroys a session, removing all members and cleaning up lookup dictionaries.
+    /// Used by the cleanup service for expired sessions.
+    /// </summary>
+    /// <param name="sessionId">The session to destroy.</param>
+    /// <returns>Result with connection IDs of removed members, or null if session not found.</returns>
+    ForceDestroySessionResult? ForceDestroySession(Guid sessionId);
 }
 
 /// <summary>
@@ -117,4 +131,12 @@ public record JoinSessionResult(
     Session? Session,
     Member? Member,
     string? ErrorMessage
+);
+
+/// <summary>
+/// Result of force-destroying a session.
+/// </summary>
+public record ForceDestroySessionResult(
+    IEnumerable<string> ConnectionIds,
+    string SessionName
 );

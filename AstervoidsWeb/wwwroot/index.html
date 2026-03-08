@@ -4738,6 +4738,12 @@
         }
     });
 
+    // Handle session expiration (server-side timeout)
+    SessionClient.on('onSessionExpired', (reason) => {
+        console.warn('[Game] Session expired:', reason);
+        returnToStartScreen(reason);
+    });
+
     // Handle role changes (e.g., promoted to server when server leaves)
     SessionClient.on('onRoleChanged', (newRole) => {
         if (game.sessionInfo) {

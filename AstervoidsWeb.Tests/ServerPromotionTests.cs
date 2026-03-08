@@ -112,7 +112,7 @@ public class ServerPromotionTests
     }
 
     [Fact]
-    public void ServerLeaves_NoClients_ShouldDestroySession()
+    public void ServerLeaves_NoClients_ShouldKeepSessionForTimeout()
     {
         // Arrange
         var (session, _) = CreateTestSession();
@@ -122,9 +122,12 @@ public class ServerPromotionTests
 
         // Assert
         result.Should().NotBeNull();
-        result!.SessionDestroyed.Should().BeTrue();
+        result!.SessionDestroyed.Should().BeFalse();
         result.PromotedMember.Should().BeNull();
-        _sessionService.GetSession(session.Id).Should().BeNull();
+        var remainingSession = _sessionService.GetSession(session.Id);
+        remainingSession.Should().NotBeNull();
+        remainingSession!.Members.Should().BeEmpty();
+        remainingSession.LastMemberLeftAt.Should().NotBeNull();
     }
 
     [Fact]
