@@ -78,17 +78,8 @@ public class SessionService : ISessionService
                 AspectRatio = clampedAspectRatio
             };
 
-            var creator = new Member
-            {
-                ConnectionId = creatorConnectionId,
-                Role = MemberRole.Server,
-                SessionId = session.Id
-            };
-
-            session.Members.TryAdd(creator.Id, creator);
             _sessions.TryAdd(session.Id, session);
-            _connectionToMember.TryAdd(creatorConnectionId, creator.Id);
-            _memberToSession.TryAdd(creator.Id, session.Id);
+            var creator = RegisterMember(creatorConnectionId, session, MemberRole.Server);
 
             _logger?.LogInformation("Session created: {SessionName} ({SessionId}) by {MemberId}", 
                 session.Name, session.Id, creator.Id);
@@ -121,16 +112,7 @@ public class SessionService : ISessionService
                 return new JoinSessionResult(false, null, null, $"Session is full (maximum {_maxMembersPerSession} members)");
             }
 
-            var member = new Member
-            {
-                ConnectionId = connectionId,
-                Role = MemberRole.Client,
-                SessionId = session.Id
-            };
-
-            session.Members.TryAdd(member.Id, member);
-            _connectionToMember.TryAdd(connectionId, member.Id);
-            _memberToSession.TryAdd(member.Id, session.Id);
+            var member = RegisterMember(connectionId, session, MemberRole.Client);
 
             _logger?.LogInformation("Member {MemberId} joined session {SessionName} as Client", 
                 member.Id, session.Name);
@@ -222,19 +204,29 @@ public class SessionService : ISessionService
 
     public Member? GetMemberByConnectionId(string connectionId)
     {
-        if (!_connectionToMember.TryGetValue(connectionId, out var memberId))
-            return null;
-
-        if (!_memberToSession.TryGetValue(memberId, out var sessionId))
-            return null;
-
-        if (!_sessions.TryGetValue(sessionId, out var session))
-            return null;
-
+        var resolved = ResolveConnectionToSession(connectionId);
+        if (resolved == null) return null;
+        var (memberId, session) = resolved.Value;
         return session.Members.TryGetValue(memberId, out var member) ? member : null;
     }
 
     public Session? GetSessionByConnectionId(string connectionId)
+        => ResolveConnectionToSession(connectionId)?.session;
+
+    public (Member Member, Session Session)? GetMemberAndSessionByConnectionId(string connectionId)
+    {
+        var resolved = ResolveConnectionToSession(connectionId);
+        if (resolved == null) return null;
+        var (memberId, session) = resolved.Value;
+        return session.Members.TryGetValue(memberId, out var member) ? (member, session) : null;
+    }
+
+    /// <summary>
+    /// Resolves a connection ID to its member ID and session.
+    /// Shared lookup chain used by GetMemberByConnectionId, GetSessionByConnectionId,
+    /// and GetMemberAndSessionByConnectionId.
+    /// </summary>
+    private (Guid memberId, Session session)? ResolveConnectionToSession(string connectionId)
     {
         if (!_connectionToMember.TryGetValue(connectionId, out var memberId))
             return null;
@@ -242,7 +234,26 @@ public class SessionService : ISessionService
         if (!_memberToSession.TryGetValue(memberId, out var sessionId))
             return null;
 
-        return _sessions.TryGetValue(sessionId, out var session) ? session : null;
+        return _sessions.TryGetValue(sessionId, out var session) ? (memberId, session) : null;
+    }
+
+    /// <summary>
+    /// Creates a member, adds it to the session, and registers it in the lookup dictionaries.
+    /// </summary>
+    private Member RegisterMember(string connectionId, Session session, MemberRole role)
+    {
+        var member = new Member
+        {
+            ConnectionId = connectionId,
+            Role = role,
+            SessionId = session.Id
+        };
+
+        session.Members.TryAdd(member.Id, member);
+        _connectionToMember.TryAdd(connectionId, member.Id);
+        _memberToSession.TryAdd(member.Id, session.Id);
+
+        return member;
     }
 
     private string GenerateUniqueFruitName()

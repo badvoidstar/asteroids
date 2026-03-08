@@ -60,6 +60,12 @@ public interface ISessionService
     /// Gets the session a connection belongs to.
     /// </summary>
     Session? GetSessionByConnectionId(string connectionId);
+
+    /// <summary>
+    /// Gets both the member and session for a connection in a single lookup.
+    /// More efficient than calling GetMemberByConnectionId + GetSession separately.
+    /// </summary>
+    (Member Member, Session Session)? GetMemberAndSessionByConnectionId(string connectionId);
 }
 
 /// <summary>
