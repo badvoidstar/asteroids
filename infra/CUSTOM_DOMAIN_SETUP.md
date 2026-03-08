@@ -34,12 +34,13 @@ After the base deployment, the workflow attempts to:
 1. Add the custom hostname to the Container App
 2. Create a managed SSL certificate for the production domain
 3. Bind the certificate to enable HTTPS
-4. Create a shared wildcard certificate (`*.<subdomain>.<yourdomain.com>`) for branch deployments
 
 **Note**: This step uses `continue-on-error: true` because DNS propagation may not be complete on the first deployment. Subsequent deployments will succeed once DNS has propagated.
 
 ### Branch Deployments
-Branch deployments (e.g., `feature-login.app.yourdomain.com`) use a shared wildcard certificate. If the wildcard cert doesn't exist yet (e.g., first deployment after infrastructure provisioning, or after an `azd down`/`azd up` cycle), the branch deployment will automatically create it. No per-branch certificate is created — the workflow adds the hostname and binds it to the wildcard cert.
+Branch deployments (e.g., `feature-login.app.yourdomain.com`) use a shared wildcard certificate. Since Azure managed certificates do not support wildcard hostnames, you must upload a wildcard certificate manually before branch deployments can use HTTPS. See [Wildcard Certificate for Branch Deployments](#wildcard-certificate-for-branch-deployments) for instructions.
+
+The workflow will still add the custom hostname for branch deployments even without a wildcard certificate — the branch will be accessible via HTTP but not HTTPS until the certificate is uploaded.
 
 ### Deployment Verification
 After custom domain setup, the workflow verifies that all URLs are actually accessible:
@@ -214,7 +215,7 @@ No orphaned resources are left behind.
 
 ## Wildcard Certificate for Branch Deployments
 
-Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. The workflow automatically creates this certificate during either the production deployment or the first branch deployment — whichever runs first after infrastructure is provisioned.
+Branch deployments use a shared wildcard certificate to avoid creating per-branch certificates. Since Azure managed certificates do not support wildcard hostnames, you must upload a wildcard certificate manually.
 
 ### Certificate Naming Convention
 
@@ -222,9 +223,9 @@ The wildcard certificate follows this naming pattern:
 - **Name:** `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
 - **Hostname:** `*.{subdomain}.{domain}` (e.g., `*.app.yourdomain.com`)
 
-### Manual Wildcard Certificate Upload
+### Wildcard Certificate Upload
 
-If Azure managed wildcard certificates are not supported in your region, you can upload a custom wildcard certificate:
+Azure managed certificates do not support wildcard hostnames, so you must upload a custom wildcard certificate:
 
 1. **Obtain a wildcard certificate** for `*.{subdomain}.{domain}` (e.g., from Let's Encrypt, DigiCert, or another CA)
 

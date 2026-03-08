@@ -128,8 +128,8 @@ When you push to any branch, the workflow automatically:
 
 Branch deployments use a shared wildcard certificate (`*.{subdomain}.{domain}`) instead of creating individual certificates per branch. This makes branch deployments faster and simpler.
 
-- The wildcard certificate is created automatically during the first production deployment or the first branch deployment — whichever runs first after infrastructure is provisioned
-- If Azure managed wildcard certificates are not supported, you can upload a custom wildcard certificate — see [Custom Domain Setup](infra/CUSTOM_DOMAIN_SETUP.md)
+- Azure managed certificates do not support wildcard hostnames, so you must upload a wildcard certificate manually — see [Custom Domain Setup](infra/CUSTOM_DOMAIN_SETUP.md)
+- Without a wildcard certificate, branch deployments will still be accessible via HTTP but not HTTPS
 - The naming convention is `cert-wildcard-{subdomain}-{domain}` (e.g., `cert-wildcard-app-yourdomain-com`)
 
 ### Subdomain Naming
