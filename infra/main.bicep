@@ -200,15 +200,19 @@ module dnsRecordsBranch 'core/dns/dns-records.bicep' = if (isBranch && useCustom
 // OUTPUTS
 // ============================================================================
 
-// Use conditional outputs based on deployment type
+// Common web app output expressions (DRY: each conditional module output is referenced once)
+var webUri = isProduction ? webProduction.outputs.uri : (isStandalone ? webStandalone.outputs.uri : webBranch.outputs.uri)
+var webName = isProduction ? webProduction.outputs.name : (isStandalone ? webStandalone.outputs.name : webBranch.outputs.name)
+var webVerificationId = isProduction ? webProduction.outputs.verificationId : (isStandalone ? webStandalone.outputs.verificationId : webBranch.outputs.verificationId)
+
 output AZURE_CONTAINER_REGISTRY_ENDPOINT string = isProduction ? containerAppsProduction.outputs.registryLoginServer : (isStandalone ? containerAppsStandalone.outputs.registryLoginServer : '${containerRegistryName}.azurecr.io')
 output AZURE_CONTAINER_REGISTRY_NAME string = containerRegistryName
-output WEB_URI string = isProduction ? webProduction.outputs.uri : (isStandalone ? webStandalone.outputs.uri : webBranch.outputs.uri)
-output WEB_AZURE_URI string = isProduction ? webProduction.outputs.uri : (isStandalone ? webStandalone.outputs.uri : webBranch.outputs.uri)
+output WEB_URI string = webUri
+output WEB_AZURE_URI string = webUri
 #disable-next-line BCP318
 output DNS_NAME_SERVERS array = (isProduction && useCustomDomain) ? dnsZone.outputs.nameServers : []
-output CONTAINER_APP_NAME string = isProduction ? webProduction.outputs.name : (isStandalone ? webStandalone.outputs.name : webBranch.outputs.name)
+output CONTAINER_APP_NAME string = webName
 output CONTAINER_APPS_ENVIRONMENT string = containerAppsEnvironmentName
 output RESOURCE_GROUP string = isProduction ? 'rg-production' : (isStandalone ? 'rg-${environmentName}' : sharedResourceGroupName)
 output CUSTOM_DOMAIN string = fullCustomDomain
-output DOMAIN_VERIFICATION_ID string = isProduction ? webProduction.outputs.verificationId : (isStandalone ? webStandalone.outputs.verificationId : webBranch.outputs.verificationId)
+output DOMAIN_VERIFICATION_ID string = webVerificationId

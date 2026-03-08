@@ -15,13 +15,25 @@ public class ObjectServiceTests
         _objectService = new ObjectService(_sessionService);
     }
 
+    private (Session session, Member creator) CreateTestSession(string connectionId = "connection-1")
+    {
+        var result = _sessionService.CreateSession(connectionId, 1.5);
+        return (result.Session!, result.Creator!);
+    }
+
+    private (Session session, Member server, Member client) CreateTestSessionWithClient(
+        string serverConn = "connection-1", string clientConn = "connection-2")
+    {
+        var (session, server) = CreateTestSession(serverConn);
+        var joinResult = _sessionService.JoinSession(session.Id, clientConn);
+        return (session, server, joinResult.Member!);
+    }
+
     [Fact]
     public void CreateObject_ShouldCreateObjectWithCorrectAffiliation()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
 
         // Act
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
@@ -46,10 +58,7 @@ public class ObjectServiceTests
     public void CreateObject_ClientCreatesObject_ShouldHaveClientAffiliation()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        Assert.True(joinResult.Success);
-        var client = joinResult.Member!;
+        var (session, _, client) = CreateTestSessionWithClient();
 
         // Act
         var obj = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
@@ -77,11 +86,7 @@ public class ObjectServiceTests
     public void CreateObject_WithOwnerMemberId_ShouldSetDifferentOwner()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var otherMember = joinResult.Member!;
+        var (session, creator, otherMember) = CreateTestSessionWithClient();
 
         // Act
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
@@ -97,9 +102,7 @@ public class ObjectServiceTests
     public void CreateObject_WithInvalidOwnerMemberId_ShouldReturnNull()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
 
         // Act
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
@@ -113,9 +116,7 @@ public class ObjectServiceTests
     public void UpdateObject_ShouldMergeData()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0,
@@ -141,9 +142,7 @@ public class ObjectServiceTests
     public void UpdateObject_WithExpectedVersion_ShouldSucceed()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
@@ -163,9 +162,7 @@ public class ObjectServiceTests
     public void UpdateObject_WithWrongVersion_ShouldFail()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
@@ -185,9 +182,7 @@ public class ObjectServiceTests
     public void UpdateObjects_ShouldBatchUpdate()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
         var obj2 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
 
@@ -210,9 +205,7 @@ public class ObjectServiceTests
     public void DeleteObject_ShouldRemoveObject()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
 
         // Act
@@ -240,9 +233,7 @@ public class ObjectServiceTests
     public void GetSessionObjects_ShouldReturnAllObjects()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
         _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
         _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
@@ -258,9 +249,7 @@ public class ObjectServiceTests
     public void DeleteObject_AlreadyDeleted_ShouldReturnFalseAndNotCorruptSession()
     {
         // Arrange - simulates two bullets hitting the same asteroid
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var asteroid = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
@@ -285,9 +274,7 @@ public class ObjectServiceTests
     public void UpdateObject_AfterDeletion_ShouldReturnNull()
     {
         // Arrange - simulates an in-flight update arriving after deletion
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
@@ -308,11 +295,7 @@ public class ObjectServiceTests
     public void ConcurrentCollision_TwoBulletsHitSameAsteroid_SecondDeleteIsSafe()
     {
         // Arrange - two players each fire a bullet at the same asteroid
-        var createResult = _sessionService.CreateSession("connection-1", 1.5);
-        var session = createResult.Session!;
-        var server = createResult.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var client = joinResult.Member!;
+        var (session, server, client) = CreateTestSessionWithClient();
 
         // Server owns the asteroid
         var asteroid = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
@@ -375,9 +358,7 @@ public class ObjectServiceTests
     public void GetObjectCountByType_ShouldCountMatchingObjects()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
 
         _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
@@ -402,11 +383,7 @@ public class ObjectServiceTests
     public void HandleMemberDeparture_ClientLeaves_SessionScopedObjectsMigrated()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var server = result.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var client = joinResult.Member!;
+        var (session, server, client) = CreateTestSessionWithClient();
 
         // Client owns session-scoped asteroids (from distributed ownership)
         var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
@@ -429,11 +406,7 @@ public class ObjectServiceTests
     public void HandleMemberDeparture_MigratedObjects_ShouldIncludeNewVersion()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var server = result.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var client = joinResult.Member!;
+        var (session, server, client) = CreateTestSessionWithClient();
 
         var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
@@ -458,11 +431,7 @@ public class ObjectServiceTests
     public void HandleMemberDeparture_MultipleObjectsMigrated_EachHasCorrectVersion()
     {
         // Arrange
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var server = result.Creator!;
-        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
-        var client = joinResult.Member!;
+        var (session, server, client) = CreateTestSessionWithClient();
 
         var obj1 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
@@ -492,9 +461,7 @@ public class ObjectServiceTests
     public void UpdateObjects_WithVersionMismatch_ShouldPartiallySucceed()
     {
         // Arrange — simulates version drift where one object's version has advanced
-        var result = _sessionService.CreateSession("connection-1", 1.5);
-        var session = result.Session!;
-        var creator = result.Creator!;
+        var (session, creator) = CreateTestSession();
         var obj1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
         var obj2 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
 
