@@ -2817,12 +2817,9 @@
         if (!isSessionMode()) return;
         
         try {
-            // Track which ships already exist at game start so they don't get entry bonuses
+            // Track peak ship count so reconnecting members don't get extra lives.
+            // Only ships above this high-water mark trigger a life bonus.
             const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
-            const processedEntries = {};
-            for (const ship of shipObjects) {
-                processedEntries[ship.id] = true;
-            }
             
             const gameStateData = {
                 type: OBJECT_TYPES.GAME_STATE,
@@ -2834,7 +2831,7 @@
                 speedMultiplier: game.speedMultiplier,
                 waveDelayTimer: game.waveDelayTimer,
                 processedHits: {},
-                processedEntries: processedEntries
+                peakShipCount: shipObjects.length
             };
             
             const objectInfo = await ObjectSync.createObject(
@@ -2861,7 +2858,7 @@
         const processedScores = { ...(gsObj?.data?.processedScores || {}) };
         let groupScore = gsObj?.data?.groupScore || 0;
         
-        // Read lives from gsObj.data (same source as processedHits/processedEntries)
+        // Read lives from gsObj.data (same source as processedHits/peakShipCount)
         // so that they are always from the same sync point. Using game.lives would
         // be stale if a remote delta arrived between the last updateGameStateFromSync()
         // and an ownership migration — causing incorrect lives on the new owner.
@@ -2897,17 +2894,14 @@
             }
         }
         
-        // Process new player entries — award an extra life for each new joiner
-        // Done AFTER hit processing so that game-over (lives=0) takes priority
-        const processedEntries = { ...(gsObj?.data?.processedEntries || {}) };
-        for (const ship of shipObjects) {
-            const shipId = ship.id;
-            if (!processedEntries[shipId]) {
-                processedEntries[shipId] = true;
-                if (lives > 0) {
-                    lives += 1;
-                }
-            }
+        // Award extra lives when the ship count exceeds the previous peak.
+        // Uses a high-water mark so reconnecting members (whose count returns to
+        // a previously seen level) don't receive an extra life.
+        let peakShipCount = gsObj?.data?.peakShipCount || 0;
+        const currentShipCount = shipObjects.length;
+        if (currentShipCount > peakShipCount && lives > 0) {
+            lives += currentShipCount - peakShipCount;
+            peakShipCount = currentShipCount;
         }
         
         // Write back to game.lives for local rendering/game-over checks
@@ -2925,7 +2919,7 @@
             waveDelayTimer: game.waveDelayTimer,
             processedHits: processedHits,
             processedScores: processedScores,
-            processedEntries: processedEntries
+            peakShipCount: peakShipCount
         };
         
         // Note: this queues into pendingUpdates (same batch as ship/asteroid/bullet updates).
