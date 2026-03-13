@@ -57,8 +57,14 @@ public class SessionHub : Hub
         return obj;
     }
 
+    private static MemberInfo ToMemberInfo(Member member) =>
+        new(member.Id, member.Role.ToString(), member.JoinedAt);
+
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
         new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version);
+
+    private static (MemberInfo[] Members, ObjectInfo[] Objects) ToSessionSnapshot(Session session) =>
+        ([.. session.Members.Values.Select(ToMemberInfo)], [.. session.Objects.Values.Select(ToObjectInfo)]);
 
     private static ObjectScope ParseScope(string scope) =>
         scope.Equals("Session", StringComparison.OrdinalIgnoreCase) ? ObjectScope.Session : ObjectScope.Member;
@@ -132,7 +138,7 @@ public class SessionHub : Hub
 
         // Notify other members
         await Clients.OthersInGroup(session.Id.ToString()).SendAsync("OnMemberJoined",
-            new MemberInfo(member.Id, member.Role.ToString(), member.JoinedAt),
+            ToMemberInfo(member),
             member.Id, memberSequence, serverTimestamp);
 
         _logger.LogInformation(
@@ -143,8 +149,7 @@ public class SessionHub : Hub
         await BroadcastSessionsChanged();
 
         // Return session state including existing objects
-        var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
-        var objects = session.Objects.Values.Select(ToObjectInfo);
+        var (members, objects) = ToSessionSnapshot(session);
 
         return new JoinSessionResponse(
             session.Id,
@@ -470,8 +475,7 @@ public class SessionHub : Hub
         }
         var (_, session) = ctx.Value;
 
-        var members = session.Members.Values.Select(m => new MemberInfo(m.Id, m.Role.ToString(), m.JoinedAt));
-        var objects = session.Objects.Values.Select(ToObjectInfo);
+        var (members, objects) = ToSessionSnapshot(session);
 
         var memberSequences = session.Members.Values.ToDictionary(
             m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
