@@ -2915,7 +2915,7 @@
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
             wave: inLobby ? (gsObj?.data?.wave ?? game.wave) : game.wave,
-            state: inLobby ? (gsObj?.data?.state || 'playing') : game.state,
+            state: inLobby ? (gsObj?.data?.state ?? 'playing') : game.state,
             lives: lives,
             score: groupScore,
             groupScore: groupScore,
