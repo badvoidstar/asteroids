@@ -2907,16 +2907,20 @@
         // Write back to game.lives for local rendering/game-over checks
         game.lives = lives;
         
+        // When the GameState owner is in the lobby (not actively playing), preserve
+        // gameplay-progression fields from the existing GameState object so we don't
+        // overwrite them with stale local values (e.g. state:'lobby', wave:0).
+        const inLobby = game.state === 'lobby';
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
-            wave: game.wave,
-            state: game.state,
+            wave: inLobby ? (gsObj?.data?.wave ?? game.wave) : game.wave,
+            state: inLobby ? (gsObj?.data?.state || 'playing') : game.state,
             lives: lives,
             score: groupScore,
             groupScore: groupScore,
-            speedMultiplier: game.speedMultiplier,
-            waveDelayTimer: game.waveDelayTimer,
+            speedMultiplier: inLobby ? (gsObj?.data?.speedMultiplier ?? game.speedMultiplier) : game.speedMultiplier,
+            waveDelayTimer: inLobby ? (gsObj?.data?.waveDelayTimer ?? game.waveDelayTimer) : game.waveDelayTimer,
             processedHits: processedHits,
             processedScores: processedScores,
             peakShipCount: peakShipCount
@@ -3781,11 +3785,31 @@
         }
         
         // Update remote objects in lobby (for live preview)
+        // Also process locally-owned objects — a lobby member may own session-scoped
+        // objects (asteroids, GameState) after ownership migration from departing members.
         if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
+            // Update physics on locally-owned asteroids so they keep moving
+            const lobbyMemberId = SessionClient.getCurrentMember()?.id;
+            if (lobbyMemberId) {
+                game.astervoids.forEach(asteroid => {
+                    if (asteroid.syncObjectId) {
+                        const syncObj = ObjectSync.getObject(asteroid.syncObjectId);
+                        if (syncObj && syncObj.ownerMemberId === lobbyMemberId) {
+                            asteroid.update(dt);
+                        }
+                    }
+                });
+                syncLocalAstervoids();
+            }
+
             updateRemoteShips();
             updateAstervoidsFromSync();
             updateBulletsFromSync();
-            updateGameStateFromSync();
+            if (isGameStateOwner()) {
+                syncGameState();
+            } else {
+                updateGameStateFromSync();
+            }
             updateHUD();
         }
         
