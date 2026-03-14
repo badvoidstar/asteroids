@@ -2907,20 +2907,25 @@
         // Write back to game.lives for local rendering/game-over checks
         game.lives = lives;
         
-        // When the GameState owner is in the lobby (not actively playing), preserve
-        // gameplay-progression fields from the existing GameState object so we don't
-        // overwrite them with stale local values (e.g. state:'lobby', wave:0).
-        const inLobby = game.state === 'lobby';
+        // game.state controls the local UI state machine (lobby/playing/gameover/etc.).
+        // A lobby member who inherits GameState ownership must NOT broadcast
+        // state:'lobby' — use the GameState object's own state instead.
+        // Other fields (wave, speedMultiplier, waveDelayTimer) are kept current by
+        // updateGameStateFromSync() until ownership transfers, so they're safe to
+        // read from local game.* directly.
+        const syncedState = game.state === 'lobby'
+            ? (gsObj?.data?.state ?? 'playing')
+            : game.state;
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
-            wave: inLobby ? (gsObj?.data?.wave ?? game.wave) : game.wave,
-            state: inLobby ? (gsObj?.data?.state ?? 'playing') : game.state,
+            wave: game.wave,
+            state: syncedState,
             lives: lives,
             score: groupScore,
             groupScore: groupScore,
-            speedMultiplier: inLobby ? (gsObj?.data?.speedMultiplier ?? game.speedMultiplier) : game.speedMultiplier,
-            waveDelayTimer: inLobby ? (gsObj?.data?.waveDelayTimer ?? game.waveDelayTimer) : game.waveDelayTimer,
+            speedMultiplier: game.speedMultiplier,
+            waveDelayTimer: game.waveDelayTimer,
             processedHits: processedHits,
             processedScores: processedScores,
             peakShipCount: peakShipCount
