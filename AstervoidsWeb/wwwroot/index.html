@@ -3699,12 +3699,8 @@
         // This consolidation ensures owned asteroids split/destroy, waves advance,
         // and game-over state is correctly detected for spectators too.
         const lobbySpectating = isLobbySpectating();
-        if (game.state === 'playing' || game.state === 'waveDelay' || lobbySpectating) {
-            // Effective game state: for lobby spectators, read from the GameState
-            // sync object (game.state stays 'lobby' for UI purposes).
-            const effectiveState = lobbySpectating
-                ? (ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE)?.data?.state ?? 'playing')
-                : game.state;
+        if (lobbySpectating || game.state === 'playing' || game.state === 'waveDelay') {
+            const effectiveState = getEffectiveGameState();
 
             // --- GAMEPLAY (only when lives > 0) ---
             if (game.lives > 0) {
@@ -3793,9 +3789,7 @@
                 }
                 
                 // Re-read effective state after potential mutation above
-                const currentEffectiveState = lobbySpectating
-                    ? (ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE)?.data?.state ?? effectiveState)
-                    : game.state;
+                const currentEffectiveState = getEffectiveGameState();
 
                 // Handle wave delay countdown (adjusted for delta time)
                 if (currentEffectiveState === 'waveDelay') {
@@ -4931,10 +4925,8 @@
                     // Collision detection (coarser at ~1fps but prevents missed hits)
                     checkCollisions();
                     
-                    // Wave management — uses effectiveState for lobby spectators
-                    const bgEffectiveState = bgLobbySpectating
-                        ? (ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE)?.data?.state ?? 'playing')
-                        : game.state;
+                    // Wave management — uses getEffectiveGameState() for lobby spectators
+                    const bgEffectiveState = getEffectiveGameState();
                     if (game.astervoids.length === 0 && bgEffectiveState === 'playing' && !spawningWave) {
                         if (isGameStateOwner()) {
                             if (bgLobbySpectating) {
@@ -4947,10 +4939,8 @@
                             syncGameState();
                         }
                     }
-                    const bgCurrentEffectiveState = bgLobbySpectating
-                        ? (ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE)?.data?.state ?? bgEffectiveState)
-                        : game.state;
-                    if (bgCurrentEffectiveState === 'waveDelay') {
+                    const bgCurrentState = getEffectiveGameState();
+                    if (bgCurrentState === 'waveDelay') {
                         game.waveDelayTimer -= dt;
                         if (game.waveDelayTimer <= 0) {
                             if (isGameStateOwner()) {
