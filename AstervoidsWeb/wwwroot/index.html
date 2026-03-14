@@ -3810,6 +3810,42 @@
             updateRemoteShips();
             updateAstervoidsFromSync();
             updateBulletsFromSync();
+
+            // Process collisions — handles remote bullets with pendingHit
+            // targeting our owned asteroids (splits/destruction).
+            // Lobby members have no ship or own bullets, so only the
+            // "asteroid owner scans remote pendingHit" path fires.
+            checkCollisions();
+
+            // Wave management for GameState owner in lobby.
+            // Use the synced game state (not game.state which is 'lobby').
+            if (isGameStateOwner() && game.multiplayer.gameStateObjectId) {
+                const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
+                if (gsObj?.data) {
+                    const syncedState = gsObj.data.state;
+
+                    // Detect wave completion
+                    if (game.astervoids.length === 0 && syncedState === 'playing' && !spawningWave) {
+                        game.waveDelayTimer = CONFIG.WAVE_DELAY;
+                        gsObj.data.state = 'waveDelay';
+                        syncGameState();
+                    }
+
+                    // Handle wave delay countdown
+                    if (gsObj.data.state === 'waveDelay') {
+                        game.waveDelayTimer -= dt;
+                        if (game.waveDelayTimer <= 0) {
+                            spawningWave = true;
+                            gsObj.data.state = 'playing';
+                            spawnWave().then(() => {
+                                spawningWave = false;
+                                syncGameState();
+                            });
+                        }
+                    }
+                }
+            }
+
             if (isGameStateOwner()) {
                 syncGameState();
             } else {
