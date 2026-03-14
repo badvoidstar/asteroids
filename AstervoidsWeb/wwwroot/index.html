@@ -4265,11 +4265,13 @@
         // Start/Enter button - only visible when in a session
         if (currentSessionId) {
             btnStartEnter.style.display = '';
-            if (isServer) {
+            if (isServer && !gameStarted) {
+                // Server before game starts — offer to Start
                 btnStartEnter.textContent = 'Start';
                 btnStartEnter.className = 'picker-btn action';
-                btnStartEnter.disabled = gameStarted; // Disable if already started
+                btnStartEnter.disabled = false;
             } else {
+                // Game already started (server promoted mid-game, or non-server) — offer to Enter
                 btnStartEnter.textContent = 'Enter';
                 btnStartEnter.className = 'picker-btn action';
                 btnStartEnter.disabled = !gameStarted; // Disable until server starts
