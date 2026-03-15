@@ -93,7 +93,7 @@ public class SessionServiceTests
     }
 
     [Fact]
-    public void LeaveSession_LastMemberLeaves_ShouldDestroySession()
+    public void LeaveSession_LastMemberLeaves_ShouldKeepSessionForTimeout()
     {
         // Arrange
         var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
@@ -103,8 +103,11 @@ public class SessionServiceTests
 
         // Assert
         result.Should().NotBeNull();
-        result!.SessionDestroyed.Should().BeTrue();
-        _sessionService.GetSession(session.Id).Should().BeNull();
+        result!.SessionDestroyed.Should().BeFalse();
+        var remainingSession = _sessionService.GetSession(session.Id);
+        remainingSession.Should().NotBeNull();
+        remainingSession!.Members.Should().BeEmpty();
+        remainingSession.LastMemberLeftAt.Should().NotBeNull();
     }
 
     [Fact]
@@ -298,5 +301,99 @@ public class SessionServiceTests
         // Assert
         joinResult.Success.Should().BeTrue();
         joinResult.Session!.AspectRatio.Should().BeApproximately(1.333, 0.001);
+    }
+
+    [Fact]
+    public void JoinSession_EmptySession_ShouldBecomeServer()
+    {
+        // Arrange - create session, then all members leave
+        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        _sessionService.LeaveSession("connection-1");
+
+        // Act - join the empty session
+        var joinResult = _sessionService.JoinSession(session.Id, "connection-2");
+
+        // Assert
+        joinResult.Success.Should().BeTrue();
+        joinResult.Member!.Role.Should().Be(MemberRole.Server);
+    }
+
+    [Fact]
+    public void JoinSession_EmptySession_ShouldClearLastMemberLeftAt()
+    {
+        // Arrange
+        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        _sessionService.LeaveSession("connection-1");
+        session.LastMemberLeftAt.Should().NotBeNull();
+
+        // Act
+        _sessionService.JoinSession(session.Id, "connection-2");
+
+        // Assert
+        session.LastMemberLeftAt.Should().BeNull();
+    }
+
+    [Fact]
+    public void GetAllSessions_ShouldIncludeEmptySessions()
+    {
+        // Arrange - create sessions, leave one empty
+        _sessionService.CreateSession("connection-1", 1.5);
+        var session2 = _sessionService.CreateSession("connection-2", 1.5).Session!;
+        _sessionService.LeaveSession("connection-2");
+
+        // Act
+        var allSessions = _sessionService.GetAllSessions().ToList();
+        var activeSessions = _sessionService.GetActiveSessions().Sessions.ToList();
+
+        // Assert
+        allSessions.Should().HaveCount(2);
+        activeSessions.Should().HaveCount(1); // Empty sessions excluded from active list
+    }
+
+    [Fact]
+    public void ForceDestroySession_ShouldRemoveSessionAndMembers()
+    {
+        // Arrange
+        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+
+        // Act
+        var result = _sessionService.ForceDestroySession(session.Id);
+
+        // Assert
+        result.Should().NotBeNull();
+        result!.ConnectionIds.Should().HaveCount(2);
+        result.ConnectionIds.Should().Contain("connection-1");
+        result.ConnectionIds.Should().Contain("connection-2");
+        result.SessionName.Should().Be(session.Name);
+        _sessionService.GetSession(session.Id).Should().BeNull();
+        _sessionService.GetMemberByConnectionId("connection-1").Should().BeNull();
+        _sessionService.GetMemberByConnectionId("connection-2").Should().BeNull();
+    }
+
+    [Fact]
+    public void ForceDestroySession_EmptySession_ShouldReturnEmptyConnectionIds()
+    {
+        // Arrange
+        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        _sessionService.LeaveSession("connection-1");
+
+        // Act
+        var result = _sessionService.ForceDestroySession(session.Id);
+
+        // Assert
+        result.Should().NotBeNull();
+        result!.ConnectionIds.Should().BeEmpty();
+        _sessionService.GetSession(session.Id).Should().BeNull();
+    }
+
+    [Fact]
+    public void ForceDestroySession_NonExistentSession_ShouldReturnNull()
+    {
+        // Act
+        var result = _sessionService.ForceDestroySession(Guid.NewGuid());
+
+        // Assert
+        result.Should().BeNull();
     }
 }
