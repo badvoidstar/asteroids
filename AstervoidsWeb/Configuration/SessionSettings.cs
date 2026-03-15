@@ -22,4 +22,16 @@ public class SessionSettings
     /// on member departure. When false, all objects go to a single member. Default is true.
     /// </summary>
     public bool DistributeOrphanedObjects { get; set; } = true;
+
+    /// <summary>
+    /// How long (in seconds) a session can remain empty (no connected members) before being destroyed.
+    /// Default is 60 seconds.
+    /// </summary>
+    public int EmptyTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Maximum lifetime (in minutes) for any session, regardless of member activity.
+    /// Default is 20 minutes.
+    /// </summary>
+    public int AbsoluteTimeoutMinutes { get; set; } = 20;
 }

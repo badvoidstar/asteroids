@@ -2381,6 +2381,14 @@
     // Guard to prevent wave re-detection while async spawn is in flight
     let spawningWave = false;
 
+    // Helper to check if this client is a lobby spectator watching an in-progress game.
+    // Lobby spectators process objects and see overlays but haven't entered the game yet.
+    // Uses the absence of a ship (not game.state) because game.state tracks the actual
+    // game state ('playing', 'waveDelay', etc.) even for spectators.
+    function isLobbySpectating() {
+        return !game.ship && isSessionMode() && sessionPicker.gameStarted;
+    }
+
     // Helper to check if game is over (lives depleted during active play)
     function isGameOver() {
         return game.state === 'gameover' ||
@@ -2817,12 +2825,9 @@
         if (!isSessionMode()) return;
         
         try {
-            // Track which ships already exist at game start so they don't get entry bonuses
+            // Track peak ship count so reconnecting members don't get extra lives.
+            // Only ships above this high-water mark trigger a life bonus.
             const shipObjects = ObjectSync.getObjectsByType(OBJECT_TYPES.SHIP);
-            const processedEntries = {};
-            for (const ship of shipObjects) {
-                processedEntries[ship.id] = true;
-            }
             
             const gameStateData = {
                 type: OBJECT_TYPES.GAME_STATE,
@@ -2834,7 +2839,7 @@
                 speedMultiplier: game.speedMultiplier,
                 waveDelayTimer: game.waveDelayTimer,
                 processedHits: {},
-                processedEntries: processedEntries
+                peakShipCount: shipObjects.length
             };
             
             const objectInfo = await ObjectSync.createObject(
@@ -2861,7 +2866,7 @@
         const processedScores = { ...(gsObj?.data?.processedScores || {}) };
         let groupScore = gsObj?.data?.groupScore || 0;
         
-        // Read lives from gsObj.data (same source as processedHits/processedEntries)
+        // Read lives from gsObj.data (same source as processedHits/peakShipCount)
         // so that they are always from the same sync point. Using game.lives would
         // be stale if a remote delta arrived between the last updateGameStateFromSync()
         // and an ownership migration — causing incorrect lives on the new owner.
@@ -2897,21 +2902,26 @@
             }
         }
         
-        // Process new player entries — award an extra life for each new joiner
-        // Done AFTER hit processing so that game-over (lives=0) takes priority
-        const processedEntries = { ...(gsObj?.data?.processedEntries || {}) };
-        for (const ship of shipObjects) {
-            const shipId = ship.id;
-            if (!processedEntries[shipId]) {
-                processedEntries[shipId] = true;
-                if (lives > 0) {
-                    lives += 1;
-                }
-            }
+        // Award extra lives when the ship count exceeds the previous peak.
+        // Uses a high-water mark so reconnecting members (whose count returns to
+        // a previously seen level) don't receive an extra life.
+        let peakShipCount = gsObj?.data?.peakShipCount || 0;
+        const currentShipCount = shipObjects.length;
+        if (currentShipCount > peakShipCount && lives > 0) {
+            lives += currentShipCount - peakShipCount;
+            peakShipCount = currentShipCount;
         }
         
         // Write back to game.lives for local rendering/game-over checks
         game.lives = lives;
+        
+        // If game.state is 'lobby' (spectator who just inherited ownership),
+        // adopt the actual game state from the GameState object so we don't
+        // broadcast 'lobby' as the state. After this, game.state tracks the
+        // actual state and no further guard is needed.
+        if (game.state === 'lobby') {
+            game.state = gsObj?.data?.state ?? 'playing';
+        }
         
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
@@ -2925,7 +2935,7 @@
             waveDelayTimer: game.waveDelayTimer,
             processedHits: processedHits,
             processedScores: processedScores,
-            processedEntries: processedEntries
+            peakShipCount: peakShipCount
         };
         
         // Note: this queues into pendingUpdates (same batch as ship/asteroid/bullet updates).
@@ -2945,7 +2955,8 @@
         
         const data = gameStateObj.data;
         
-        // Update game state from sync (but NOT the state field if we're in lobby - that's spectating)
+        // Update game state from sync — all fields including state
+        // are applied for both lobby spectators and entered players
         if (data.wave !== undefined) game.wave = data.wave;
         const oldLives = game.lives;
         if (data.lives !== undefined) game.lives = data.lives;
@@ -2959,14 +2970,14 @@
             AudioSystem.thrustSound.stop();
         }
         
-        // Handle state transitions from server - but only if we've actually entered the game
-        // (not if we're in lobby spectating)
-        if (game.state !== 'lobby' && data.state && data.state !== game.state) {
+        // Handle state transitions — lobby spectators also receive state updates
+        // so game.state always reflects the actual game state
+        if (data.state && data.state !== game.state) {
             const oldState = game.state;
             game.state = data.state;
             
-            // Handle state change effects
-            if (data.state === 'playing' && oldState === 'waveDelay') {
+            // Handle state change audio effects (skip for lobby spectators — no audio yet)
+            if (!isLobbySpectating() && data.state === 'playing' && oldState === 'waveDelay') {
                 AudioSystem.playNewWave();
             }
         }
@@ -3572,9 +3583,13 @@
      * Update HUD display elements
      */
     function updateHUD() {
-        // Show HUD row only when content is relevant (not on start screen)
+        // Show HUD row only when content is relevant:
+        // - Not on start screen
+        // - In session mode: only when GameState object exists (game has been started)
         if (hudDisplay) {
-            hudDisplay.style.display = game.state !== 'start' ? 'flex' : 'none';
+            const showHud = game.state !== 'start' &&
+                (!isSessionMode() || ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE));
+            hudDisplay.style.display = showHud ? 'flex' : 'none';
         }
         
         scoreDisplay.textContent = `Score: ${game.score}`;
@@ -3670,11 +3685,17 @@
             game.cosmeticAstervoids.forEach(asteroid => asteroid.update(dt));
         }
         
-        // Update game state based on current state
+        // Update game state based on current state.
+        // Lobby spectators (in session, game started, haven't entered) process the
+        // same logic as entered players — minus ship/bullet ownership (they have none).
+        // game.state tracks the actual game state for both spectators and entered players,
+        // so no separate lobby spectator paths are needed for state management.
+        const lobbySpectating = isLobbySpectating();
         if (game.state === 'playing' || game.state === 'waveDelay') {
+
             // --- GAMEPLAY (only when lives > 0) ---
             if (game.lives > 0) {
-                // Update local ship
+                // Update local ship (spectators have no ship — naturally skipped)
                 if (game.ship) {
                     game.ship.update(dt);
                     
@@ -3713,6 +3734,7 @@
                 }
                 
                 // Update bullets and remove expired ones
+                // (spectators have no own bullets — filter runs harmlessly)
                 const myMemberId = SessionClient.getCurrentMember()?.id;
                 game.bullets = game.bullets.filter(bullet => {
                     // Only locally update our own bullets; remote bullets are positioned by sync
@@ -3762,15 +3784,21 @@
                             });
                         }
                         game.state = 'playing';
-                        AudioSystem.playNewWave();
+                        // Play wave audio only for entered players (not spectators)
+                        if (!lobbySpectating) {
+                            AudioSystem.playNewWave();
+                        }
                     }
                 }
                 
                 // Update background beat tempo based on asteroid count
-                const maxAstervoids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
-                const totalAsteroidArea = game.astervoids.reduce((sum, a) => sum + a.radius * a.radius, 0);
-                const maxArea = maxAstervoids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
-                AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
+                // (skip for spectators — no audio in lobby)
+                if (!lobbySpectating) {
+                    const maxAstervoids = CONFIG.ASTEROID_BASE_COUNT + (game.wave - 1) * CONFIG.WAVE_ASTEROID_INCREMENT;
+                    const totalAsteroidArea = game.astervoids.reduce((sum, a) => sum + a.radius * a.radius, 0);
+                    const maxArea = maxAstervoids * CONFIG.INITIAL_ASTEROID_RADIUS * CONFIG.INITIAL_ASTEROID_RADIUS;
+                    AudioSystem.beat.updateTempo(totalAsteroidArea, maxArea);
+                }
             }
             
             // --- SYNC (always runs while state is playing/waveDelay) ---
@@ -3786,11 +3814,11 @@
             updateHUD();
         }
         
-        // Update remote objects in lobby (for live preview)
+        // Lobby bootstrap: when in session with game.state === 'lobby', sync from
+        // the GameState object to transition game.state to the actual state.
+        // This runs once — after the first sync, game.state becomes 'playing'/'waveDelay'
+        // and the main game loop block above takes over.
         if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
-            updateRemoteShips();
-            updateAstervoidsFromSync();
-            updateBulletsFromSync();
             updateGameStateFromSync();
             updateHUD();
         }
@@ -3831,8 +3859,8 @@
                 drawRemoteShips(ctx);
             }
             
-            // Draw local ship (only when playing, not in lobby)
-            if (game.state !== 'lobby' && game.ship) {
+            // Draw local ship (only when present — spectators have no ship)
+            if (game.ship) {
                 game.ship.draw(ctx);
             }
         }
@@ -3846,7 +3874,8 @@
             const gh = getGameHeight();
             drawCenteredText('GAME OVER', gh / 2 - 40, 48);
             drawCenteredText(`Final Score: ${game.score}`, gh / 2 + 10, 24);
-            if (!touchControlsEnabled) {
+            // Don't show "Press ENTER for menu" for lobby spectators (they're already on the menu)
+            if (!touchControlsEnabled && !isLobbySpectating()) {
                 drawCenteredText('Press ENTER for menu', gh / 2 + 50, 20);
             }
         }
@@ -4242,11 +4271,13 @@
         // Start/Enter button - only visible when in a session
         if (currentSessionId) {
             btnStartEnter.style.display = '';
-            if (isServer) {
+            if (isServer && !gameStarted) {
+                // Server before game starts — offer to Start
                 btnStartEnter.textContent = 'Start';
                 btnStartEnter.className = 'picker-btn action';
-                btnStartEnter.disabled = gameStarted; // Disable if already started
+                btnStartEnter.disabled = false;
             } else {
+                // Game already started (server promoted mid-game, or non-server) — offer to Enter
                 btnStartEnter.textContent = 'Enter';
                 btnStartEnter.className = 'picker-btn action';
                 btnStartEnter.disabled = !gameStarted; // Disable until server starts
@@ -4518,7 +4549,9 @@
 
     // Start game from picker (replaces old startGame for picker context)
     async function startGameFromPicker() {
-        if (game.state === 'start' || game.state === 'lobby') {
+        // Allow entry from: start screen, lobby (game not started),
+        // or session spectator entering an in-progress game (has actual state but no ship)
+        if (game.state === 'start' || game.state === 'lobby' || (isSessionMode() && !game.ship)) {
             // Recalculate viewport with new session aspect ratio before initializing (force recalc)
             resizeCanvas(true);
             try {
@@ -4607,9 +4640,9 @@
     sessionPicker.btnStartEnter.addEventListener('click', handleStartEnterButton);
     sessionPicker.btnSolo.addEventListener('click', handleSoloPlay);
 
-    // Keyboard navigation for session picker
+    // Keyboard navigation for session picker (only when start screen is visible)
     document.addEventListener('keydown', (e) => {
-        if (game.state !== 'start' && game.state !== 'lobby') return;
+        if (startScreen.classList.contains('hidden')) return;
 
         const { sessions, currentSessionId } = sessionPicker;
         
@@ -4738,6 +4771,12 @@
         }
     });
 
+    // Handle session expiration (server-side timeout)
+    SessionClient.on('onSessionExpired', (reason) => {
+        console.warn('[Game] Session expired:', reason);
+        returnToStartScreen(reason);
+    });
+
     // Handle role changes (e.g., promoted to server when server leaves)
     SessionClient.on('onRoleChanged', (newRole) => {
         if (game.sessionInfo) {
@@ -4786,7 +4825,8 @@
     // Handle session list changes (signal from server - fetch fresh data with jitter)
     let sessionRefreshTimeout = null;
     SessionClient.on('onSessionsChanged', () => {
-        if (game.state === 'start' || game.state === 'lobby') {
+        // Refresh session list when the start screen is visible (player can see the list)
+        if (!startScreen.classList.contains('hidden')) {
             // Debounce: cancel pending refresh if another signal arrives
             if (sessionRefreshTimeout) {
                 clearTimeout(sessionRefreshTimeout);
@@ -4827,7 +4867,7 @@
                     // Tick ObjectSync for frame-count-based sends
                     ObjectSync.tick(elapsed / 1000);
                     
-                    // Update local ship
+                    // Update local ship (spectators have no ship — naturally skipped)
                     if (game.ship) {
                         game.ship.update(dt);
                         syncLocalShip();

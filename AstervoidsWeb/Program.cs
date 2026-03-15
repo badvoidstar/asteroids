@@ -11,6 +11,7 @@ builder.Services.Configure<SessionSettings>(
 // Register services
 builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IObjectService, ObjectService>();
+builder.Services.AddHostedService<SessionCleanupService>();
 
 // Add response compression (Brotli + Gzip for all HTTP responses).
 // Compresses static files (HTML/JS/CSS), SignalR negotiation, and fallback transports.

@@ -112,10 +112,16 @@ public class SessionService : ISessionService
                 return new JoinSessionResult(false, null, null, $"Session is full (maximum {_maxMembersPerSession} members)");
             }
 
-            var member = RegisterMember(connectionId, session, MemberRole.Client);
+            // Assign Server role if session has no members (rejoining an empty session)
+            var role = session.Members.IsEmpty ? MemberRole.Server : MemberRole.Client;
+            var member = RegisterMember(connectionId, session, role);
 
-            _logger?.LogInformation("Member {MemberId} joined session {SessionName} as Client", 
-                member.Id, session.Name);
+            // Clear empty-session tracking since we now have a member
+            if (session.LastMemberLeftAt.HasValue)
+                session.LastMemberLeftAt = null;
+
+            _logger?.LogInformation("Member {MemberId} joined session {SessionName} as {Role}", 
+                member.Id, session.Name, role);
 
             return new JoinSessionResult(true, session, member, null);
         }
@@ -166,11 +172,12 @@ public class SessionService : ISessionService
             }
         }
 
-        // If no members left, destroy the session
-        var sessionDestroyed = session.Members.IsEmpty;
-        if (sessionDestroyed)
+        // If no members left, mark session for cleanup instead of destroying immediately.
+        // The cleanup service will destroy it after the configured empty timeout.
+        var sessionDestroyed = false;
+        if (session.Members.IsEmpty)
         {
-            _sessions.TryRemove(sessionId, out _);
+            session.LastMemberLeftAt = DateTime.UtcNow;
         }
 
         return new LeaveSessionResult(
@@ -219,6 +226,30 @@ public class SessionService : ISessionService
         if (resolved == null) return null;
         var (memberId, session) = resolved.Value;
         return session.Members.TryGetValue(memberId, out var member) ? (member, session) : null;
+    }
+
+    public IEnumerable<Session> GetAllSessions()
+    {
+        return _sessions.Values.ToList();
+    }
+
+    public ForceDestroySessionResult? ForceDestroySession(Guid sessionId)
+    {
+        if (!_sessions.TryRemove(sessionId, out var session))
+            return null;
+
+        var connectionIds = new List<string>();
+        foreach (var member in session.Members.Values)
+        {
+            _memberToSession.TryRemove(member.Id, out _);
+            _connectionToMember.TryRemove(member.ConnectionId, out _);
+            connectionIds.Add(member.ConnectionId);
+        }
+
+        _logger?.LogInformation("Session {SessionName} ({SessionId}) force-destroyed. Removed {MemberCount} members.",
+            session.Name, session.Id, connectionIds.Count);
+
+        return new ForceDestroySessionResult(connectionIds, session.Name);
     }
 
     /// <summary>

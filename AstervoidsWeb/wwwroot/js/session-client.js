@@ -27,6 +27,7 @@ const SessionClient = (function() {
         onObjectDeleted: null,
         onObjectReplaced: null,
         onSessionsChanged: null,
+        onSessionExpired: null,
         onError: null
     };
 
@@ -226,6 +227,16 @@ const SessionClient = (function() {
             // console.log('[SessionClient] Sessions changed signal received');
             if (callbacks.onSessionsChanged) {
                 callbacks.onSessionsChanged();
+            }
+        }));
+
+        // Session expired (server-side timeout)
+        connection.on('OnSessionExpired', guard((reason) => {
+            currentSession = null;
+            currentMember = null;
+            lastSessionId = null; // Can't auto-rejoin an expired session
+            if (callbacks.onSessionExpired) {
+                callbacks.onSessionExpired(reason);
             }
         }));
     }

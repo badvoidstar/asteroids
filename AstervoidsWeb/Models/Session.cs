@@ -41,6 +41,12 @@ public class Session
     public double AspectRatio { get; init; } = 16.0 / 9.0;
 
     /// <summary>
+    /// Timestamp when the last member left the session (null if members are present).
+    /// Used by the cleanup service to determine when to destroy empty sessions.
+    /// </summary>
+    public DateTime? LastMemberLeftAt { get; set; }
+
+    /// <summary>
     /// Version number for optimistic concurrency control on session-level operations.
     /// Used primarily for server role promotion.
     /// </summary>
