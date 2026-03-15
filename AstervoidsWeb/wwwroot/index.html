@@ -2383,28 +2383,16 @@
 
     // Helper to check if this client is a lobby spectator watching an in-progress game.
     // Lobby spectators process objects and see overlays but haven't entered the game yet.
+    // Uses the absence of a ship (not game.state) because game.state tracks the actual
+    // game state ('playing', 'waveDelay', etc.) even for spectators.
     function isLobbySpectating() {
-        return game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted;
+        return !game.ship && isSessionMode() && sessionPicker.gameStarted;
     }
 
-    // Helper to get the effective game state from the GameState sync object.
-    // For lobby spectators, game.state is 'lobby' but the actual game is in
-    // 'playing', 'waveDelay', etc. — this returns that actual state.
-    // For entered players, returns game.state directly.
-    function getEffectiveGameState() {
-        if (isLobbySpectating()) {
-            const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
-            return gsObj?.data?.state || null;
-        }
-        return game.state;
-    }
-
-    // Helper to check if game is over (lives depleted during active play).
-    // For lobby spectators, checks the synced game state instead of game.state.
+    // Helper to check if game is over (lives depleted during active play)
     function isGameOver() {
-        const effectiveState = getEffectiveGameState();
-        return effectiveState === 'gameover' ||
-            (game.lives <= 0 && (effectiveState === 'playing' || effectiveState === 'waveDelay'));
+        return game.state === 'gameover' ||
+            (game.lives <= 0 && (game.state === 'playing' || game.state === 'waveDelay'));
     }
 
     // Pause menu element reference
@@ -2927,20 +2915,19 @@
         // Write back to game.lives for local rendering/game-over checks
         game.lives = lives;
         
-        // game.state controls the local UI state machine (lobby/playing/gameover/etc.).
-        // A lobby spectator who inherits GameState ownership must NOT broadcast
-        // state:'lobby' — use the GameState object's own state instead.
-        // Other fields (wave, speedMultiplier, waveDelayTimer) are kept current by
-        // updateGameStateFromSync() until ownership transfers, so they're safe to
-        // read from local game.* directly.
-        const syncedState = isLobbySpectating()
-            ? (gsObj?.data?.state ?? 'playing')
-            : game.state;
+        // If game.state is 'lobby' (spectator who just inherited ownership),
+        // adopt the actual game state from the GameState object so we don't
+        // broadcast 'lobby' as the state. After this, game.state tracks the
+        // actual state and no further guard is needed.
+        if (game.state === 'lobby') {
+            game.state = gsObj?.data?.state ?? 'playing';
+        }
+        
         const gameStateData = {
             type: OBJECT_TYPES.GAME_STATE,
             gameStarted: true,
             wave: game.wave,
-            state: syncedState,
+            state: game.state,
             lives: lives,
             score: groupScore,
             groupScore: groupScore,
@@ -2968,7 +2955,8 @@
         
         const data = gameStateObj.data;
         
-        // Update game state from sync (but NOT the state field if we're in lobby - that's spectating)
+        // Update game state from sync — all fields including state
+        // are applied for both lobby spectators and entered players
         if (data.wave !== undefined) game.wave = data.wave;
         const oldLives = game.lives;
         if (data.lives !== undefined) game.lives = data.lives;
@@ -2982,14 +2970,14 @@
             AudioSystem.thrustSound.stop();
         }
         
-        // Handle state transitions from server - but only if we've actually entered the game
-        // (not if we're in lobby spectating)
-        if (game.state !== 'lobby' && data.state && data.state !== game.state) {
+        // Handle state transitions — lobby spectators also receive state updates
+        // so game.state always reflects the actual game state
+        if (data.state && data.state !== game.state) {
             const oldState = game.state;
             game.state = data.state;
             
-            // Handle state change effects
-            if (data.state === 'playing' && oldState === 'waveDelay') {
+            // Handle state change audio effects (skip for lobby spectators — no audio yet)
+            if (!isLobbySpectating() && data.state === 'playing' && oldState === 'waveDelay') {
                 AudioSystem.playNewWave();
             }
         }
@@ -3595,9 +3583,13 @@
      * Update HUD display elements
      */
     function updateHUD() {
-        // Show HUD row only when content is relevant (not on start screen)
+        // Show HUD row only when content is relevant:
+        // - Not on start screen
+        // - In session mode: only when GameState object exists (game has been started)
         if (hudDisplay) {
-            hudDisplay.style.display = game.state !== 'start' ? 'flex' : 'none';
+            const showHud = game.state !== 'start' &&
+                (!isSessionMode() || ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE));
+            hudDisplay.style.display = showHud ? 'flex' : 'none';
         }
         
         scoreDisplay.textContent = `Score: ${game.score}`;
@@ -3696,11 +3688,10 @@
         // Update game state based on current state.
         // Lobby spectators (in session, game started, haven't entered) process the
         // same logic as entered players — minus ship/bullet ownership (they have none).
-        // This consolidation ensures owned asteroids split/destroy, waves advance,
-        // and game-over state is correctly detected for spectators too.
+        // game.state tracks the actual game state for both spectators and entered players,
+        // so no separate lobby spectator paths are needed for state management.
         const lobbySpectating = isLobbySpectating();
-        if (lobbySpectating || game.state === 'playing' || game.state === 'waveDelay') {
-            const effectiveState = getEffectiveGameState();
+        if (game.state === 'playing' || game.state === 'waveDelay') {
 
             // --- GAMEPLAY (only when lives > 0) ---
             if (game.lives > 0) {
@@ -3771,44 +3762,30 @@
                 // Check collisions
                 checkCollisions();
                 
-                // Check for wave completion (GameState owner detects locally).
-                // Uses effectiveState so lobby spectators who own GameState can detect too.
-                if (game.astervoids.length === 0 && effectiveState === 'playing' && !spawningWave) {
+                // Check for wave completion (GameState owner detects locally)
+                if (game.astervoids.length === 0 && game.state === 'playing' && !spawningWave) {
                     if (!isSessionMode() || isGameStateOwner()) {
-                        if (lobbySpectating) {
-                            // Lobby spectator: update the sync object state directly
-                            // (game.state stays 'lobby' for UI purposes)
-                            const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
-                            if (gsObj?.data) gsObj.data.state = 'waveDelay';
-                        } else {
-                            game.state = 'waveDelay';
-                        }
+                        game.state = 'waveDelay';
                         game.waveDelayTimer = CONFIG.WAVE_DELAY;
                         if (isSessionMode()) syncGameState();
                     }
                 }
                 
-                // Re-read effective state after potential mutation above
-                const currentEffectiveState = getEffectiveGameState();
-
                 // Handle wave delay countdown (adjusted for delta time)
-                if (currentEffectiveState === 'waveDelay') {
+                if (game.state === 'waveDelay') {
                     game.waveDelayTimer -= dt;
                     if (game.waveDelayTimer <= 0) {
                         // GameState owner spawns waves in multiplayer
                         if (!isSessionMode() || isGameStateOwner()) {
                             spawningWave = true;
-                            if (lobbySpectating) {
-                                const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
-                                if (gsObj?.data) gsObj.data.state = 'playing';
-                            }
                             spawnWave().then(() => {
                                 spawningWave = false;
                                 if (isSessionMode()) syncGameState();
                             });
                         }
+                        game.state = 'playing';
+                        // Play wave audio only for entered players (not spectators)
                         if (!lobbySpectating) {
-                            game.state = 'playing';
                             AudioSystem.playNewWave();
                         }
                     }
@@ -3824,7 +3801,7 @@
                 }
             }
             
-            // --- SYNC (always runs while state is playing/waveDelay/lobby-spectating) ---
+            // --- SYNC (always runs while state is playing/waveDelay) ---
             // Game state sync continues even when lives <= 0, ensuring all
             // clients receive the final lives count and transition together.
             if (isSessionMode() && isGameStateOwner()) {
@@ -3834,6 +3811,15 @@
                 updateGameStateFromSync();
             }
             
+            updateHUD();
+        }
+        
+        // Lobby bootstrap: when in session with game.state === 'lobby', sync from
+        // the GameState object to transition game.state to the actual state.
+        // This runs once — after the first sync, game.state becomes 'playing'/'waveDelay'
+        // and the main game loop block above takes over.
+        if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
+            updateGameStateFromSync();
             updateHUD();
         }
         
@@ -3873,16 +3859,14 @@
                 drawRemoteShips(ctx);
             }
             
-            // Draw local ship (only when playing, not in lobby)
-            if (game.state !== 'lobby' && game.ship) {
+            // Draw local ship (only when present — spectators have no ship)
+            if (game.ship) {
                 game.ship.draw(ctx);
             }
         }
         
-        // Draw state-specific overlays (in gameplay coordinates).
-        // For lobby spectators, use the effective game state from the GameState sync object.
-        const renderEffectiveState = getEffectiveGameState();
-        if (renderEffectiveState === 'waveDelay') {
+        // Draw state-specific overlays (in gameplay coordinates)
+        if (game.state === 'waveDelay') {
             drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 48);
         }
         
@@ -4565,7 +4549,9 @@
 
     // Start game from picker (replaces old startGame for picker context)
     async function startGameFromPicker() {
-        if (game.state === 'start' || game.state === 'lobby') {
+        // Allow entry from: start screen, lobby (game not started),
+        // or session spectator entering an in-progress game (has actual state but no ship)
+        if (game.state === 'start' || game.state === 'lobby' || (isSessionMode() && !game.ship)) {
             // Recalculate viewport with new session aspect ratio before initializing (force recalc)
             resizeCanvas(true);
             try {
@@ -4654,9 +4640,9 @@
     sessionPicker.btnStartEnter.addEventListener('click', handleStartEnterButton);
     sessionPicker.btnSolo.addEventListener('click', handleSoloPlay);
 
-    // Keyboard navigation for session picker
+    // Keyboard navigation for session picker (only when start screen is visible)
     document.addEventListener('keydown', (e) => {
-        if (game.state !== 'start' && game.state !== 'lobby') return;
+        if (startScreen.classList.contains('hidden')) return;
 
         const { sessions, currentSessionId } = sessionPicker;
         
@@ -4839,7 +4825,8 @@
     // Handle session list changes (signal from server - fetch fresh data with jitter)
     let sessionRefreshTimeout = null;
     SessionClient.on('onSessionsChanged', () => {
-        if (game.state === 'start' || game.state === 'lobby') {
+        // Refresh session list when the start screen is visible (player can see the list)
+        if (!startScreen.classList.contains('hidden')) {
             // Debounce: cancel pending refresh if another signal arrives
             if (sessionRefreshTimeout) {
                 clearTimeout(sessionRefreshTimeout);
@@ -4866,7 +4853,7 @@
     // The dt cap (3x) limits per-tick physics to avoid large jumps.
     let backgroundInterval = null;
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay' || isLobbySpectating())) {
+        if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
             // Tab hidden during multiplayer - use setInterval as fallback
             if (!backgroundInterval) {
                 const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
@@ -4879,8 +4866,6 @@
                     
                     // Tick ObjectSync for frame-count-based sends
                     ObjectSync.tick(elapsed / 1000);
-                    
-                    const bgLobbySpectating = isLobbySpectating();
                     
                     // Update local ship (spectators have no ship — naturally skipped)
                     if (game.ship) {
@@ -4925,38 +4910,25 @@
                     // Collision detection (coarser at ~1fps but prevents missed hits)
                     checkCollisions();
                     
-                    // Wave management — uses getEffectiveGameState() for lobby spectators
-                    const bgEffectiveState = getEffectiveGameState();
-                    if (game.astervoids.length === 0 && bgEffectiveState === 'playing' && !spawningWave) {
+                    // Wave management
+                    if (game.astervoids.length === 0 && game.state === 'playing' && !spawningWave) {
                         if (isGameStateOwner()) {
-                            if (bgLobbySpectating) {
-                                const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
-                                if (gsObj?.data) gsObj.data.state = 'waveDelay';
-                            } else {
-                                game.state = 'waveDelay';
-                            }
+                            game.state = 'waveDelay';
                             game.waveDelayTimer = CONFIG.WAVE_DELAY;
                             syncGameState();
                         }
                     }
-                    const bgCurrentState = getEffectiveGameState();
-                    if (bgCurrentState === 'waveDelay') {
+                    if (game.state === 'waveDelay') {
                         game.waveDelayTimer -= dt;
                         if (game.waveDelayTimer <= 0) {
                             if (isGameStateOwner()) {
                                 spawningWave = true;
-                                if (bgLobbySpectating) {
-                                    const gsObj = ObjectSync.getObject(game.multiplayer.gameStateObjectId);
-                                    if (gsObj?.data) gsObj.data.state = 'playing';
-                                }
                                 spawnWave().then(() => {
                                     spawningWave = false;
                                     syncGameState();
                                 });
                             }
-                            if (!bgLobbySpectating) {
-                                game.state = 'playing';
-                            }
+                            game.state = 'playing';
                         }
                     }
                     
@@ -4976,7 +4948,7 @@
             // a large delta-time jump and reconcile state with the server.
             // The !document.hidden guard is needed because the else branch also
             // runs when hidden but isSessionMode()/state conditions don't match.
-            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay' || isLobbySpectating())) {
+            if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
                 if (SessionClient.isConnected()) {
                     ObjectSync.triggerReconciliation();
@@ -4998,7 +4970,7 @@
             }
             if (!document.hidden) {
                 checkAndRejoin();
-                if (isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay' || isLobbySpectating())) {
+                if (isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                     setTimeout(checkAndRejoin, 1000);
                 }
             }
