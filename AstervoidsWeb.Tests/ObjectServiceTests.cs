@@ -428,6 +428,27 @@ public class ObjectServiceTests
     }
 
     [Fact]
+    public void HandleMemberDeparture_MigratedObject_ShouldRefreshUpdatedAt()
+    {
+        // Arrange
+        var (session, server, client) = CreateTestSessionWithClient();
+        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        {
+            ["type"] = "asteroid"
+        });
+        asteroid!.UpdatedAt = DateTime.UtcNow.AddMinutes(-1);
+        var originalUpdatedAt = asteroid.UpdatedAt;
+
+        // Act
+        _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+
+        // Assert
+        var migratedObject = _objectService.GetObject(session.Id, asteroid.Id);
+        migratedObject.Should().NotBeNull();
+        migratedObject!.UpdatedAt.Should().BeAfter(originalUpdatedAt);
+    }
+
+    [Fact]
     public void HandleMemberDeparture_MultipleObjectsMigrated_EachHasCorrectVersion()
     {
         // Arrange
