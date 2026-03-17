@@ -1,45 +1,22 @@
 using AstervoidsWeb.Models;
-using AstervoidsWeb.Services;
 using FluentAssertions;
 
 namespace AstervoidsWeb.Tests;
 
-public class ServerPromotionTests
+public class ServerPromotionTests : TestBase
 {
-    private readonly SessionService _sessionService;
-    private readonly ObjectService _objectService;
-
-    public ServerPromotionTests()
-    {
-        _sessionService = new SessionService();
-        _objectService = new ObjectService(_sessionService);
-    }
-
-    private (Session session, Member creator) CreateTestSession(string connectionId = "server-conn")
-    {
-        var result = _sessionService.CreateSession(connectionId, 1.5);
-        return (result.Session!, result.Creator!);
-    }
-
-    private (Session session, Member server, Member client) CreateTestSessionWithClient(
-        string serverConn = "server-conn", string clientConn = "client-conn")
-    {
-        var (session, server) = CreateTestSession(serverConn);
-        var joinResult = _sessionService.JoinSession(session.Id, clientConn);
-        return (session, server, joinResult.Member!);
-    }
 
     [Fact]
     public void ServerLeaves_WithMultipleClients_ShouldPromoteOneClient()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
-        _sessionService.JoinSession(session.Id, "client1-conn");
-        _sessionService.JoinSession(session.Id, "client2-conn");
-        _sessionService.JoinSession(session.Id, "client3-conn");
+        var (session, _) = CreateTestSession("server-conn");
+        SessionService.JoinSession(session.Id, "client1-conn");
+        SessionService.JoinSession(session.Id, "client2-conn");
+        SessionService.JoinSession(session.Id, "client3-conn");
 
         // Act
-        var result = _sessionService.LeaveSession("server-conn");
+        var result = SessionService.LeaveSession("server-conn");
 
         // Assert
         result.Should().NotBeNull();
@@ -47,7 +24,7 @@ public class ServerPromotionTests
         result.PromotedMember!.Role.Should().Be(MemberRole.Server);
 
         // Verify only one server exists
-        var remainingSession = _sessionService.GetSession(session.Id);
+        var remainingSession = SessionService.GetSession(session.Id);
         var servers = remainingSession!.Members.Values.Where(m => m.Role == MemberRole.Server).ToList();
         servers.Should().HaveCount(1);
     }
@@ -56,19 +33,19 @@ public class ServerPromotionTests
     public void ServerLeaves_MemberScopedObjectsDeleted_SessionScopedMigrated()
     {
         // Arrange
-        var (session, server, client) = CreateTestSessionWithClient();
+        var (session, server, client) = CreateTestSessionWithClient("server-conn", "client-conn");
 
         // Create objects - member-scoped by server, session-scoped by server, member-scoped by client
-        var serverMemberObj = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Member);
-        var serverSessionObj = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session);
-        var clientObj = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member);
+        var serverMemberObj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Member);
+        var serverSessionObj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session);
+        var clientObj = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Member);
 
         // Act
-        var leaveResult = _sessionService.LeaveSession("server-conn");
+        var leaveResult = SessionService.LeaveSession("server-conn");
         var remainingIds = leaveResult!.PromotedMember != null 
             ? new List<Guid> { leaveResult.PromotedMember.Id } 
             : new List<Guid>();
-        var departureResult = _objectService.HandleMemberDeparture(session.Id, server.Id, remainingIds);
+        var departureResult = ObjectService.HandleMemberDeparture(session.Id, server.Id, remainingIds);
 
         // Assert
         departureResult.DeletedObjectIds.Should().Contain(serverMemberObj!.Id);
@@ -81,15 +58,15 @@ public class ServerPromotionTests
     public void ServerLeaves_SessionVersionShouldIncrement()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
-        _sessionService.JoinSession(session.Id, "client-conn");
+        var (session, _) = CreateTestSession("server-conn");
+        SessionService.JoinSession(session.Id, "client-conn");
         var initialVersion = session.Version;
 
         // Act
-        _sessionService.LeaveSession("server-conn");
+        SessionService.LeaveSession("server-conn");
 
         // Assert
-        var updatedSession = _sessionService.GetSession(session.Id);
+        var updatedSession = SessionService.GetSession(session.Id);
         updatedSession!.Version.Should().Be(initialVersion + 1);
     }
 
@@ -97,17 +74,17 @@ public class ServerPromotionTests
     public void ClientLeaves_ShouldNotAffectServerRole()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
-        _sessionService.JoinSession(session.Id, "client-conn");
+        var (session, _) = CreateTestSession("server-conn");
+        SessionService.JoinSession(session.Id, "client-conn");
 
         // Act
-        var result = _sessionService.LeaveSession("client-conn");
+        var result = SessionService.LeaveSession("client-conn");
 
         // Assert
         result.Should().NotBeNull();
         result!.PromotedMember.Should().BeNull();
 
-        var serverMember = _sessionService.GetMemberByConnectionId("server-conn");
+        var serverMember = SessionService.GetMemberByConnectionId("server-conn");
         serverMember!.Role.Should().Be(MemberRole.Server);
     }
 
@@ -115,16 +92,16 @@ public class ServerPromotionTests
     public void ServerLeaves_NoClients_ShouldKeepSessionForTimeout()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
+        var (session, _) = CreateTestSession("server-conn");
 
         // Act
-        var result = _sessionService.LeaveSession("server-conn");
+        var result = SessionService.LeaveSession("server-conn");
 
         // Assert
         result.Should().NotBeNull();
         result!.SessionDestroyed.Should().BeFalse();
         result.PromotedMember.Should().BeNull();
-        var remainingSession = _sessionService.GetSession(session.Id);
+        var remainingSession = SessionService.GetSession(session.Id);
         remainingSession.Should().NotBeNull();
         remainingSession!.Members.Should().BeEmpty();
         remainingSession.LastMemberLeftAt.Should().NotBeNull();
@@ -134,29 +111,29 @@ public class ServerPromotionTests
     public void ConcurrentJoinsAndLeaves_ShouldMaintainSessionIntegrity()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
+        var (session, _) = CreateTestSession("server-conn");
         var sessionId = session.Id;
 
         // Simulate rapid joins (only 3 since max is 4)
         var joinTasks = Enumerable.Range(0, 3)
-            .Select(i => Task.Run(() => _sessionService.JoinSession(sessionId, $"client-{i}")))
+            .Select(i => Task.Run(() => SessionService.JoinSession(sessionId, $"client-{i}")))
             .ToArray();
 
         Task.WaitAll(joinTasks);
 
         // All joins should succeed
-        var currentSession = _sessionService.GetSession(sessionId);
+        var currentSession = SessionService.GetSession(sessionId);
         currentSession!.Members.Count.Should().Be(4); // 1 server + 3 clients
 
         // Simulate rapid leaves (clients only)
         var leaveTasks = Enumerable.Range(0, 3)
-            .Select(i => Task.Run(() => _sessionService.LeaveSession($"client-{i}")))
+            .Select(i => Task.Run(() => SessionService.LeaveSession($"client-{i}")))
             .ToArray();
 
         Task.WaitAll(leaveTasks);
 
         // Session should still exist with just the server
-        currentSession = _sessionService.GetSession(sessionId);
+        currentSession = SessionService.GetSession(sessionId);
         currentSession!.Members.Count.Should().Be(1);
         currentSession.Members.Values.First().Role.Should().Be(MemberRole.Server);
     }
@@ -165,24 +142,24 @@ public class ServerPromotionTests
     public void RapidServerChanges_ShouldAlwaysHaveOneServer()
     {
         // Arrange
-        var (session, _) = CreateTestSession();
+        var (session, _) = CreateTestSession("server-conn");
         var sessionId = session.Id;
 
         // Add clients (max 3 since max members is 4)
         for (int i = 0; i < 3; i++)
         {
-            _sessionService.JoinSession(sessionId, $"client-{i}");
+            SessionService.JoinSession(sessionId, $"client-{i}");
         }
 
         // Rapidly leave as server multiple times
         for (int i = 0; i < 3; i++)
         {
-            var serverMember = _sessionService.GetSession(sessionId)!.Members.Values
+            var serverMember = SessionService.GetSession(sessionId)!.Members.Values
                 .First(m => m.Role == MemberRole.Server);
             
-            _sessionService.LeaveSession(serverMember.ConnectionId);
+            SessionService.LeaveSession(serverMember.ConnectionId);
 
-            var currentSession = _sessionService.GetSession(sessionId);
+            var currentSession = SessionService.GetSession(sessionId);
             if (currentSession != null && currentSession.Members.Count > 0)
             {
                 var serverCount = currentSession.Members.Values.Count(m => m.Role == MemberRole.Server);

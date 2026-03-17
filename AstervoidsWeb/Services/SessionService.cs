@@ -50,6 +50,22 @@ public class SessionService : ISessionService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Creates a failed CreateSessionResult with the specified error message.
+    /// </summary>
+    private static CreateSessionResult CreateSessionFailure(string errorMessage)
+    {
+        return new CreateSessionResult(false, null, null, errorMessage);
+    }
+
+    /// <summary>
+    /// Creates a failed JoinSessionResult with the specified error message.
+    /// </summary>
+    private static JoinSessionResult JoinSessionFailure(string errorMessage)
+    {
+        return new JoinSessionResult(false, null, null, errorMessage);
+    }
+
     public CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio)
     {
         lock (_sessionLock)
@@ -58,7 +74,7 @@ public class SessionService : ISessionService
             if (_connectionToMember.ContainsKey(creatorConnectionId))
             {
                 _logger?.LogWarning("CreateSession failed: connection {ConnectionId} is already in a session", creatorConnectionId);
-                return new CreateSessionResult(false, null, null, "Already in a session. Leave current session before creating a new one.");
+                return CreateSessionFailure("Already in a session. Leave current session before creating a new one.");
             }
 
             // Check if we've reached the maximum number of sessions
@@ -66,7 +82,7 @@ public class SessionService : ISessionService
             if (activeCount >= _maxSessions)
             {
                 _logger?.LogWarning("CreateSession failed: maximum sessions ({MaxSessions}) reached", _maxSessions);
-                return new CreateSessionResult(false, null, null, $"Maximum number of sessions ({_maxSessions}) has been reached");
+                return CreateSessionFailure($"Maximum number of sessions ({_maxSessions}) has been reached");
             }
 
             // Validate aspect ratio (reasonable bounds: 0.25 to 4.0)
@@ -96,20 +112,20 @@ public class SessionService : ISessionService
             if (_connectionToMember.ContainsKey(connectionId))
             {
                 _logger?.LogWarning("JoinSession failed: connection {ConnectionId} is already in a session", connectionId);
-                return new JoinSessionResult(false, null, null, "Already in a session. Leave current session before joining another.");
+                return JoinSessionFailure("Already in a session. Leave current session before joining another.");
             }
 
             if (!_sessions.TryGetValue(sessionId, out var session))
             {
                 _logger?.LogWarning("JoinSession failed: session {SessionId} not found", sessionId);
-                return new JoinSessionResult(false, null, null, "Session not found");
+                return JoinSessionFailure("Session not found");
             }
 
             // Check if session is full
             if (session.Members.Count >= _maxMembersPerSession)
             {
                 _logger?.LogWarning("JoinSession failed: session {SessionId} is full ({MaxMembers} members)", sessionId, _maxMembersPerSession);
-                return new JoinSessionResult(false, null, null, $"Session is full (maximum {_maxMembersPerSession} members)");
+                return JoinSessionFailure($"Session is full (maximum {_maxMembersPerSession} members)");
             }
 
             // Assign Server role if session has no members (rejoining an empty session)
