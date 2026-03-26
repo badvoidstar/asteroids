@@ -374,7 +374,7 @@ public class ObjectServiceTests : TestBase
 
         // Assert
         departure.MigratedObjects.Should().Contain(m => m.ObjectId == asteroid!.Id);
-        var migratedObj = ObjectService.GetObject(session.Id, asteroid.Id);
+        var migratedObj = ObjectService.GetObject(session.Id, asteroid!.Id);
         migratedObj.Should().NotBeNull();
         migratedObj!.OwnerMemberId.Should().Be(server.Id);
         ObjectService.GetSessionObjects(session.Id).Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(1);
@@ -410,7 +410,7 @@ public class ObjectServiceTests : TestBase
     {
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
-        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroid = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid"
         });
@@ -418,10 +418,10 @@ public class ObjectServiceTests : TestBase
         var originalUpdatedAt = asteroid.UpdatedAt;
 
         // Act
-        _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
 
         // Assert
-        var migratedObject = _objectService.GetObject(session.Id, asteroid.Id);
+        var migratedObject = ObjectService.GetObject(session.Id, asteroid.Id);
         migratedObject.Should().NotBeNull();
         migratedObject!.UpdatedAt.Should().BeAfter(originalUpdatedAt);
     }
@@ -451,7 +451,7 @@ public class ObjectServiceTests : TestBase
 
         // Assert — each migration carries the post-increment version
         var m1 = departure.MigratedObjects.First(m => m.ObjectId == obj1.Id);
-        var m2 = departure.MigratedObjects.First(m => m.ObjectId == obj2.Id);
+        var m2 = departure.MigratedObjects.First(m => m.ObjectId == obj2!.Id);
         m1.NewVersion.Should().Be(4); // 1 (create) + 2 updates + 1 migration = 4
         m2.NewVersion.Should().Be(2); // 1 (create) + 1 migration = 2
     }
