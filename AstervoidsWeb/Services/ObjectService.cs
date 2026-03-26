@@ -97,9 +97,14 @@ public class ObjectService : IObjectService
             obj.Data[kvp.Key] = kvp.Value;
         }
 
+        BumpObjectVersion(obj);
+        return true;
+    }
+
+    private static void BumpObjectVersion(SessionObject obj)
+    {
         obj.Version++;
         obj.UpdatedAt = DateTime.UtcNow;
-        return true;
     }
 
     public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
@@ -176,8 +181,7 @@ public class ObjectService : IObjectService
                 }
 
                 obj.OwnerMemberId = newOwnerId;
-                obj.Version++;
-                obj.UpdatedAt = DateTime.UtcNow;
+                BumpObjectVersion(obj);
                 migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version));
             }
         }
