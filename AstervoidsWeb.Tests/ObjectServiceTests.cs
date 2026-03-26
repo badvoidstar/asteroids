@@ -4,30 +4,8 @@ using FluentAssertions;
 
 namespace AstervoidsWeb.Tests;
 
-public class ObjectServiceTests
+public class ObjectServiceTests : TestBase
 {
-    private readonly SessionService _sessionService;
-    private readonly ObjectService _objectService;
-
-    public ObjectServiceTests()
-    {
-        _sessionService = new SessionService();
-        _objectService = new ObjectService(_sessionService);
-    }
-
-    private (Session session, Member creator) CreateTestSession(string connectionId = "connection-1")
-    {
-        var result = _sessionService.CreateSession(connectionId, 1.5);
-        return (result.Session!, result.Creator!);
-    }
-
-    private (Session session, Member server, Member client) CreateTestSessionWithClient(
-        string serverConn = "connection-1", string clientConn = "connection-2")
-    {
-        var (session, server) = CreateTestSession(serverConn);
-        var joinResult = _sessionService.JoinSession(session.Id, clientConn);
-        return (session, server, joinResult.Member!);
-    }
 
     [Fact]
     public void CreateObject_ShouldCreateObjectWithCorrectAffiliation()
@@ -36,7 +14,7 @@ public class ObjectServiceTests
         var (session, creator) = CreateTestSession();
 
         // Act
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 100.0,
@@ -61,7 +39,7 @@ public class ObjectServiceTests
         var (session, _, client) = CreateTestSessionWithClient();
 
         // Act
-        var obj = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["type"] = "bullet"
         });
@@ -76,7 +54,7 @@ public class ObjectServiceTests
     public void CreateObject_InvalidSession_ShouldReturnNull()
     {
         // Act
-        var obj = _objectService.CreateObject(Guid.NewGuid(), Guid.NewGuid(), ObjectScope.Member);
+        var obj = ObjectService.CreateObject(Guid.NewGuid(), Guid.NewGuid(), ObjectScope.Member);
 
         // Assert
         obj.Should().BeNull();
@@ -89,7 +67,7 @@ public class ObjectServiceTests
         var (session, creator, otherMember) = CreateTestSessionWithClient();
 
         // Act
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
             new Dictionary<string, object?> { ["type"] = "asteroid" }, ownerMemberId: otherMember.Id);
 
         // Assert
@@ -105,7 +83,7 @@ public class ObjectServiceTests
         var (session, creator) = CreateTestSession();
 
         // Act
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session,
             ownerMemberId: Guid.NewGuid());
 
         // Assert
@@ -117,14 +95,14 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0,
             ["y"] = 200.0
         });
 
         // Act
-        var updated = _objectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
+        var updated = ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
         {
             ["x"] = 150.0,
             ["z"] = 50.0
@@ -143,13 +121,13 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
         });
 
         // Act
-        var updated = _objectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
+        var updated = ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
         {
             ["x"] = 150.0
         }, expectedVersion: 1);
@@ -163,13 +141,13 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
         });
 
         // Act
-        var updated = _objectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
+        var updated = ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
         {
             ["x"] = 150.0
         }, expectedVersion: 999);
@@ -183,8 +161,8 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        var obj1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
-        var obj2 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+        var obj1 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+        var obj2 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
 
         var updates = new List<ObjectUpdate>
         {
@@ -193,7 +171,7 @@ public class ObjectServiceTests
         };
 
         // Act
-        var results = _objectService.UpdateObjects(session.Id, updates).ToList();
+        var results = ObjectService.UpdateObjects(session.Id, updates).ToList();
 
         // Assert
         results.Should().HaveCount(2);
@@ -206,24 +184,24 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
 
         // Act
-        var deleted = _objectService.DeleteObject(session.Id, obj!.Id);
+        var deleted = ObjectService.DeleteObject(session.Id, obj!.Id);
 
         // Assert
         deleted.Should().NotBeNull();
-        _objectService.GetObject(session.Id, obj.Id).Should().BeNull();
+        ObjectService.GetObject(session.Id, obj.Id).Should().BeNull();
     }
 
     [Fact]
     public void DeleteObject_NonExistent_ShouldReturnNull()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = SessionService.CreateSession("connection-1", 1.5).Session!;
 
         // Act
-        var deleted = _objectService.DeleteObject(session.Id, Guid.NewGuid());
+        var deleted = ObjectService.DeleteObject(session.Id, Guid.NewGuid());
 
         // Assert
         deleted.Should().BeNull();
@@ -234,12 +212,12 @@ public class ObjectServiceTests
     {
         // Arrange
         var (session, creator) = CreateTestSession();
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
 
         // Act
-        var objects = _objectService.GetSessionObjects(session.Id).ToList();
+        var objects = ObjectService.GetSessionObjects(session.Id).ToList();
 
         // Assert
         objects.Should().HaveCount(3);
@@ -250,24 +228,24 @@ public class ObjectServiceTests
     {
         // Arrange - simulates two bullets hitting the same asteroid
         var (session, creator) = CreateTestSession();
-        var asteroid = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroid = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 0.5,
             ["y"] = 0.5
         });
-        var otherObj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session);
+        var otherObj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session);
 
         // Act - first delete succeeds, second is a no-op
-        var firstDelete = _objectService.DeleteObject(session.Id, asteroid!.Id);
-        var secondDelete = _objectService.DeleteObject(session.Id, asteroid.Id);
+        var firstDelete = ObjectService.DeleteObject(session.Id, asteroid!.Id);
+        var secondDelete = ObjectService.DeleteObject(session.Id, asteroid.Id);
 
         // Assert - double-delete is safe, other objects unaffected
         firstDelete.Should().NotBeNull();
         secondDelete.Should().BeNull();
-        _objectService.GetObject(session.Id, asteroid.Id).Should().BeNull();
-        _objectService.GetObject(session.Id, otherObj!.Id).Should().NotBeNull();
-        _objectService.GetSessionObjects(session.Id).Should().HaveCount(1);
+        ObjectService.GetObject(session.Id, asteroid.Id).Should().BeNull();
+        ObjectService.GetObject(session.Id, otherObj!.Id).Should().NotBeNull();
+        ObjectService.GetSessionObjects(session.Id).Should().HaveCount(1);
     }
 
     [Fact]
@@ -275,14 +253,14 @@ public class ObjectServiceTests
     {
         // Arrange - simulates an in-flight update arriving after deletion
         var (session, creator) = CreateTestSession();
-        var obj = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["x"] = 100.0
         });
-        _objectService.DeleteObject(session.Id, obj!.Id);
+        ObjectService.DeleteObject(session.Id, obj!.Id);
 
         // Act - update on deleted object
-        var updated = _objectService.UpdateObject(session.Id, obj.Id, new Dictionary<string, object?>
+        var updated = ObjectService.UpdateObject(session.Id, obj.Id, new Dictionary<string, object?>
         {
             ["x"] = 200.0
         });
@@ -298,7 +276,7 @@ public class ObjectServiceTests
         var (session, server, client) = CreateTestSessionWithClient();
 
         // Server owns the asteroid
-        var asteroid = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroid = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 0.5,
@@ -307,36 +285,36 @@ public class ObjectServiceTests
         });
 
         // Each player owns a bullet
-        var bullet1 = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var bullet1 = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["type"] = "bullet"
         });
-        var bullet2 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
+        var bullet2 = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["type"] = "bullet"
         });
 
         // Act - first bullet hit: asteroid owner deletes asteroid, creates children
-        var asteroidDeleted = _objectService.DeleteObject(session.Id, asteroid!.Id);
-        var child1 = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroidDeleted = ObjectService.DeleteObject(session.Id, asteroid!.Id);
+        var child1 = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 0.48,
             ["y"] = 0.5,
             ["radius"] = 0.05
         });
-        var child2 = _objectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var child2 = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 0.52,
             ["y"] = 0.5,
             ["radius"] = 0.05
         });
-        var bullet1Deleted = _objectService.DeleteObject(session.Id, bullet1!.Id);
+        var bullet1Deleted = ObjectService.DeleteObject(session.Id, bullet1!.Id);
 
         // Second bullet hit arrives — asteroid already gone
-        var secondAsteroidDelete = _objectService.DeleteObject(session.Id, asteroid.Id);
-        var asteroidLookup = _objectService.GetObject(session.Id, asteroid.Id);
+        var secondAsteroidDelete = ObjectService.DeleteObject(session.Id, asteroid.Id);
+        var asteroidLookup = ObjectService.GetObject(session.Id, asteroid.Id);
 
         // Assert
         asteroidDeleted.Should().NotBeNull();
@@ -347,7 +325,7 @@ public class ObjectServiceTests
         asteroidLookup.Should().BeNull("asteroid should not reappear");
 
         // Session should contain: child1, child2, bullet2 (bullet1 was deleted)
-        var remaining = _objectService.GetSessionObjects(session.Id).ToList();
+        var remaining = ObjectService.GetSessionObjects(session.Id).ToList();
         remaining.Should().HaveCount(3);
         remaining.Should().Contain(o => o.Id == child1!.Id);
         remaining.Should().Contain(o => o.Id == child2!.Id);
@@ -360,21 +338,21 @@ public class ObjectServiceTests
         // Arrange
         var (session, creator) = CreateTestSession();
 
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid", ["x"] = 0.1
         });
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid", ["x"] = 0.2
         });
-        _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
+        ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
         {
             ["type"] = "bullet"
         });
 
         // Act & Assert — verify objects exist via GetSessionObjects
-        var objects = _objectService.GetSessionObjects(session.Id).ToList();
+        var objects = ObjectService.GetSessionObjects(session.Id).ToList();
         objects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(2);
         objects.Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "bullet").Should().Be(1);
     }
@@ -386,20 +364,20 @@ public class ObjectServiceTests
         var (session, server, client) = CreateTestSessionWithClient();
 
         // Client owns session-scoped asteroids (from distributed ownership)
-        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroid = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid", ["x"] = 0.5
         });
 
         // Act — client leaves, session-scoped objects should migrate to server
-        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
 
         // Assert
         departure.MigratedObjects.Should().Contain(m => m.ObjectId == asteroid!.Id);
-        var migratedObj = _objectService.GetObject(session.Id, asteroid.Id);
+        var migratedObj = ObjectService.GetObject(session.Id, asteroid.Id);
         migratedObj.Should().NotBeNull();
         migratedObj!.OwnerMemberId.Should().Be(server.Id);
-        _objectService.GetSessionObjects(session.Id).Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(1);
+        ObjectService.GetSessionObjects(session.Id).Count(o => o.Data.TryGetValue("type", out var t) && t?.ToString() == "asteroid").Should().Be(1);
     }
 
     [Fact]
@@ -408,21 +386,21 @@ public class ObjectServiceTests
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
 
-        var asteroid = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var asteroid = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid", ["x"] = 0.5
         });
 
         // Update the object a few times to advance the version
-        _objectService.UpdateObject(session.Id, asteroid!.Id, new Dictionary<string, object?> { ["x"] = 0.6 });
-        _objectService.UpdateObject(session.Id, asteroid.Id, new Dictionary<string, object?> { ["x"] = 0.7 });
+        ObjectService.UpdateObject(session.Id, asteroid!.Id, new Dictionary<string, object?> { ["x"] = 0.6 });
+        ObjectService.UpdateObject(session.Id, asteroid.Id, new Dictionary<string, object?> { ["x"] = 0.7 });
 
         // Act — client leaves
-        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
 
         // Assert — migration should include the version AFTER the migration increment
         var migration = departure.MigratedObjects.First(m => m.ObjectId == asteroid.Id);
-        var serverObj = _objectService.GetObject(session.Id, asteroid.Id);
+        var serverObj = ObjectService.GetObject(session.Id, asteroid.Id);
         migration.NewVersion.Should().Be(serverObj!.Version);
         migration.NewVersion.Should().Be(4); // v1 (create) + v2 (update1) + v3 (update2) + v4 (migration)
     }
@@ -454,22 +432,22 @@ public class ObjectServiceTests
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
 
-        var obj1 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var obj1 = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid"
         });
         // Update obj1 twice → version 3
-        _objectService.UpdateObject(session.Id, obj1!.Id, new Dictionary<string, object?> { ["x"] = 1 });
-        _objectService.UpdateObject(session.Id, obj1.Id, new Dictionary<string, object?> { ["x"] = 2 });
+        ObjectService.UpdateObject(session.Id, obj1!.Id, new Dictionary<string, object?> { ["x"] = 1 });
+        ObjectService.UpdateObject(session.Id, obj1.Id, new Dictionary<string, object?> { ["x"] = 2 });
 
-        var obj2 = _objectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
+        var obj2 = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid"
         });
         // obj2 stays at version 1 (no updates)
 
         // Act
-        var departure = _objectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
 
         // Assert — each migration carries the post-increment version
         var m1 = departure.MigratedObjects.First(m => m.ObjectId == obj1.Id);
@@ -483,11 +461,11 @@ public class ObjectServiceTests
     {
         // Arrange — simulates version drift where one object's version has advanced
         var (session, creator) = CreateTestSession();
-        var obj1 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
-        var obj2 = _objectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+        var obj1 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
+        var obj2 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
 
         // Advance obj2's version by updating it directly
-        _objectService.UpdateObject(session.Id, obj2!.Id, new Dictionary<string, object?> { ["x"] = 50 });
+        ObjectService.UpdateObject(session.Id, obj2!.Id, new Dictionary<string, object?> { ["x"] = 50 });
         // obj2 is now at version 2
 
         var updates = new List<ObjectUpdate>
@@ -497,7 +475,7 @@ public class ObjectServiceTests
         };
 
         // Act
-        var results = _objectService.UpdateObjects(session.Id, updates).ToList();
+        var results = ObjectService.UpdateObjects(session.Id, updates).ToList();
 
         // Assert — only obj1 should be updated; obj2 rejected due to version mismatch
         results.Should().HaveCount(1);
@@ -505,7 +483,7 @@ public class ObjectServiceTests
         results[0].Data["x"].Should().Be(100);
 
         // obj2 should remain unchanged
-        var obj2State = _objectService.GetObject(session.Id, obj2.Id);
+        var obj2State = ObjectService.GetObject(session.Id, obj2.Id);
         obj2State!.Data["x"].Should().Be(50);
         obj2State.Version.Should().Be(2);
     }

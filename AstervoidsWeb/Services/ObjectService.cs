@@ -24,9 +24,17 @@ public class ObjectService : IObjectService
         _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
     }
 
+    /// <summary>
+    /// Validates that a session exists. Returns the session if valid, or null if not found.
+    /// </summary>
+    private Session? GetValidSession(Guid sessionId)
+    {
+        return _sessionService.GetSession(sessionId);
+    }
+
     public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
@@ -52,7 +60,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
@@ -64,7 +72,7 @@ public class ObjectService : IObjectService
 
     public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return Enumerable.Empty<SessionObject>();
 
@@ -109,7 +117,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
@@ -118,7 +126,7 @@ public class ObjectService : IObjectService
 
     public IEnumerable<SessionObject> GetSessionObjects(Guid sessionId)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return Enumerable.Empty<SessionObject>();
 
@@ -127,7 +135,7 @@ public class ObjectService : IObjectService
 
     public SessionObject? GetObject(Guid sessionId, Guid objectId)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
@@ -145,7 +153,7 @@ public class ObjectService : IObjectService
     /// </summary>
     public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
     {
-        var session = _sessionService.GetSession(sessionId);
+        var session = GetValidSession(sessionId);
         if (session == null)
             return new MemberDepartureResult([], []);
 
