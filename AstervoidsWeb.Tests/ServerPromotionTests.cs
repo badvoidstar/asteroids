@@ -108,7 +108,7 @@ public class ServerPromotionTests : TestBase
     }
 
     [Fact]
-    public void ConcurrentJoinsAndLeaves_ShouldMaintainSessionIntegrity()
+    public async Task ConcurrentJoinsAndLeaves_ShouldMaintainSessionIntegrity()
     {
         // Arrange
         var (session, _) = CreateTestSession("server-conn");
@@ -119,7 +119,7 @@ public class ServerPromotionTests : TestBase
             .Select(i => Task.Run(() => SessionService.JoinSession(sessionId, $"client-{i}")))
             .ToArray();
 
-        Task.WaitAll(joinTasks);
+        await Task.WhenAll(joinTasks);
 
         // All joins should succeed
         var currentSession = SessionService.GetSession(sessionId);
@@ -130,7 +130,7 @@ public class ServerPromotionTests : TestBase
             .Select(i => Task.Run(() => SessionService.LeaveSession($"client-{i}")))
             .ToArray();
 
-        Task.WaitAll(leaveTasks);
+        await Task.WhenAll(leaveTasks);
 
         // Session should still exist with just the server
         currentSession = SessionService.GetSession(sessionId);
