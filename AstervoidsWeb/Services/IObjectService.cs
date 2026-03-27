@@ -52,7 +52,7 @@ public interface IObjectService
     /// <param name="departingMemberId">The member who is leaving.</param>
     /// <param name="remainingMemberIds">The remaining members eligible to receive session-scoped objects.</param>
     /// <returns>Result containing deleted and migrated object info.</returns>
-    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds);
+    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IReadOnlyList<Guid> remainingMemberIds);
 }
 
 /// <summary>

@@ -196,12 +196,18 @@ public class SessionService : ISessionService
             session.LastMemberLeftAt = DateTime.UtcNow;
         }
 
+        // Capture remaining member IDs atomically here — after removal and any promotion —
+        // so callers can use this list directly for object migration without a second
+        // GetSession() call that could race with concurrent joins or leaves.
+        var remainingMemberIds = session.Members.Keys.ToList();
+
         return new LeaveSessionResult(
             sessionId,
             session.Name,
             memberId,
             sessionDestroyed,
-            promotedMember
+            promotedMember,
+            remainingMemberIds
         );
     }
 

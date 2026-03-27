@@ -151,7 +151,7 @@ public class ObjectService : IObjectService
     /// objects is not departing. If voluntary ownership transfer is ever added, those
     /// patterns would need to account for concurrent ownership changes.
     /// </summary>
-    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IList<Guid> remainingMemberIds)
+    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IReadOnlyList<Guid> remainingMemberIds)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
