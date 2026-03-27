@@ -4,6 +4,13 @@ namespace AstervoidsWeb.Services;
 
 /// <summary>
 /// Service for managing synchronized objects within sessions.
+///
+/// Correctness contract
+/// ────────────────────
+/// All mutating operations (create, update, delete, replace) validate ownership and
+/// session lifecycle state atomically under the session's <c>Session.SyncRoot</c> lock.
+/// Hub-layer ownership pre-checks are NOT relied upon for correctness; they are only
+/// kept for fast early-return / logging purposes.
 /// </summary>
 public interface IObjectService
 {
@@ -14,24 +21,45 @@ public interface IObjectService
     /// <param name="creatorMemberId">The member creating the object.</param>
     /// <param name="scope">The lifetime scope of the object (Member or Session).</param>
     /// <param name="data">Initial object data.</param>
-    /// <returns>The created object, or null if session/member not found.</returns>
+    /// <param name="ownerMemberId">Optional override for the initial owner. Defaults to the creator.</param>
+    /// <returns>The created object, or null if session/member not found or session is not active.</returns>
     SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null);
 
     /// <summary>
-    /// Updates an existing object.
+    /// Updates an existing object (no ownership enforcement — use <see cref="UpdateObjects"/> for authoritative updates).
     /// </summary>
     SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null);
 
     /// <summary>
-    /// Batch updates multiple objects atomically.
+    /// Batch updates multiple objects owned by the specified member.
+    /// Ownership is validated atomically inside the session lock; hub-layer pre-filtering
+    /// is not required for correctness.
     /// </summary>
-    IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates);
+    IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates);
 
     /// <summary>
-    /// Deletes an object from a session.
+    /// Deletes an object from a session, enforcing ownership atomically.
+    /// Returns the deleted object, or null if the object was not found or is not owned by
+    /// <paramref name="ownerMemberId"/>.
     /// </summary>
-    /// <returns>The deleted object, or null if not found.</returns>
-    SessionObject? DeleteObject(Guid sessionId, Guid objectId);
+    SessionObject? DeleteObject(Guid sessionId, Guid objectId, Guid ownerMemberId);
+
+    /// <summary>
+    /// Atomically deletes an existing object and creates one or more replacement objects
+    /// in a single critical section.  Ownership of <paramref name="deleteObjectId"/> is
+    /// enforced before the delete; the whole operation is either committed or not started.
+    /// </summary>
+    /// <param name="sessionId">The session.</param>
+    /// <param name="deleteObjectId">Object to delete (must be owned by <paramref name="ownerMemberId"/>).</param>
+    /// <param name="ownerMemberId">Member asserting ownership of the deleted object.</param>
+    /// <param name="replacements">Specs for each replacement object to create.</param>
+    /// <returns>The list of created objects, or null if the operation could not be performed
+    /// (session not found/active, object not found, ownership mismatch).</returns>
+    IReadOnlyList<SessionObject>? ReplaceObject(
+        Guid sessionId,
+        Guid deleteObjectId,
+        Guid ownerMemberId,
+        IReadOnlyList<ReplacementObjectSpec> replacements);
 
     /// <summary>
     /// Gets all objects in a session.
@@ -42,18 +70,16 @@ public interface IObjectService
     /// Gets a specific object.
     /// </summary>
     SessionObject? GetObject(Guid sessionId, Guid objectId);
-
-    /// <summary>
-    /// Handles cleanup when a member departs a session.
-    /// Deletes member-scoped objects owned by the departing member.
-    /// Transfers session-scoped objects to remaining members (distributed round-robin or to a single member based on configuration).
-    /// </summary>
-    /// <param name="sessionId">The session.</param>
-    /// <param name="departingMemberId">The member who is leaving.</param>
-    /// <param name="remainingMemberIds">The remaining members eligible to receive session-scoped objects.</param>
-    /// <returns>Result containing deleted and migrated object info.</returns>
-    MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IReadOnlyList<Guid> remainingMemberIds);
 }
+
+/// <summary>
+/// Specifies the properties of a single replacement object in a <c>ReplaceObject</c> call.
+/// </summary>
+public record ReplacementObjectSpec(
+    ObjectScope Scope,
+    Dictionary<string, object?> Data,
+    Guid? OwnerOverride = null
+);
 
 /// <summary>
 /// Represents a batch update for an object.
@@ -76,6 +102,6 @@ public record ObjectMigration(Guid ObjectId, Guid NewOwnerId, long NewVersion);
 /// Result of handling a member's departure from a session.
 /// </summary>
 public record MemberDepartureResult(
-    IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<ObjectMigration> MigratedObjects
+    IReadOnlyList<Guid> DeletedObjectIds,
+    IReadOnlyList<ObjectMigration> MigratedObjects
 );

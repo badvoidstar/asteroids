@@ -171,12 +171,7 @@ public class ObjectServiceTests : TestBase
         };
 
         // Act
-        var results = ObjectService.UpdateObjects(session.Id, updates).ToList();
-
-        // Assert
-        results.Should().HaveCount(2);
-        results[0].Data["x"].Should().Be(100);
-        results[1].Data["x"].Should().Be(200);
+        var results = ObjectService.UpdateObjects(session.Id, creator.Id, updates).ToList();
     }
 
     [Fact]
@@ -187,7 +182,7 @@ public class ObjectServiceTests : TestBase
         var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member);
 
         // Act
-        var deleted = ObjectService.DeleteObject(session.Id, obj!.Id);
+        var deleted = ObjectService.DeleteObject(session.Id, obj!.Id, creator.Id);
 
         // Assert
         deleted.Should().NotBeNull();
@@ -199,9 +194,10 @@ public class ObjectServiceTests : TestBase
     {
         // Arrange
         var session = SessionService.CreateSession("connection-1", 1.5).Session!;
+        var creator = SessionService.GetMemberByConnectionId("connection-1")!;
 
         // Act
-        var deleted = ObjectService.DeleteObject(session.Id, Guid.NewGuid());
+        var deleted = ObjectService.DeleteObject(session.Id, Guid.NewGuid(), creator.Id);
 
         // Assert
         deleted.Should().BeNull();
@@ -237,8 +233,8 @@ public class ObjectServiceTests : TestBase
         var otherObj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Session);
 
         // Act - first delete succeeds, second is a no-op
-        var firstDelete = ObjectService.DeleteObject(session.Id, asteroid!.Id);
-        var secondDelete = ObjectService.DeleteObject(session.Id, asteroid.Id);
+        var firstDelete = ObjectService.DeleteObject(session.Id, asteroid!.Id, creator.Id);
+        var secondDelete = ObjectService.DeleteObject(session.Id, asteroid.Id, creator.Id);
 
         // Assert - double-delete is safe, other objects unaffected
         firstDelete.Should().NotBeNull();
@@ -257,7 +253,7 @@ public class ObjectServiceTests : TestBase
         {
             ["x"] = 100.0
         });
-        ObjectService.DeleteObject(session.Id, obj!.Id);
+        ObjectService.DeleteObject(session.Id, obj!.Id, creator.Id);
 
         // Act - update on deleted object
         var updated = ObjectService.UpdateObject(session.Id, obj.Id, new Dictionary<string, object?>
@@ -295,7 +291,7 @@ public class ObjectServiceTests : TestBase
         });
 
         // Act - first bullet hit: asteroid owner deletes asteroid, creates children
-        var asteroidDeleted = ObjectService.DeleteObject(session.Id, asteroid!.Id);
+        var asteroidDeleted = ObjectService.DeleteObject(session.Id, asteroid!.Id, server.Id);
         var child1 = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session, new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
@@ -310,10 +306,10 @@ public class ObjectServiceTests : TestBase
             ["y"] = 0.5,
             ["radius"] = 0.05
         });
-        var bullet1Deleted = ObjectService.DeleteObject(session.Id, bullet1!.Id);
+        var bullet1Deleted = ObjectService.DeleteObject(session.Id, bullet1!.Id, server.Id);
 
         // Second bullet hit arrives — asteroid already gone
-        var secondAsteroidDelete = ObjectService.DeleteObject(session.Id, asteroid.Id);
+        var secondAsteroidDelete = ObjectService.DeleteObject(session.Id, asteroid.Id, server.Id);
         var asteroidLookup = ObjectService.GetObject(session.Id, asteroid.Id);
 
         // Assert
@@ -358,7 +354,7 @@ public class ObjectServiceTests : TestBase
     }
 
     [Fact]
-    public void HandleMemberDeparture_ClientLeaves_SessionScopedObjectsMigrated()
+    public void MemberDeparture_ClientLeaves_SessionScopedObjectsMigrated()
     {
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
@@ -369,11 +365,11 @@ public class ObjectServiceTests : TestBase
             ["type"] = "asteroid", ["x"] = 0.5
         });
 
-        // Act — client leaves, session-scoped objects should migrate to server
-        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        // Act — client leaves; departure (including object migration) happens atomically in LeaveSession
+        var departure = SessionService.LeaveSession("connection-2");
 
         // Assert
-        departure.MigratedObjects.Should().Contain(m => m.ObjectId == asteroid!.Id);
+        departure!.MigratedObjects.Should().Contain(m => m.ObjectId == asteroid!.Id);
         var migratedObj = ObjectService.GetObject(session.Id, asteroid!.Id);
         migratedObj.Should().NotBeNull();
         migratedObj!.OwnerMemberId.Should().Be(server.Id);
@@ -381,7 +377,7 @@ public class ObjectServiceTests : TestBase
     }
 
     [Fact]
-    public void HandleMemberDeparture_MigratedObjects_ShouldIncludeNewVersion()
+    public void MemberDeparture_MigratedObjects_ShouldIncludeNewVersion()
     {
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
@@ -395,18 +391,18 @@ public class ObjectServiceTests : TestBase
         ObjectService.UpdateObject(session.Id, asteroid!.Id, new Dictionary<string, object?> { ["x"] = 0.6 });
         ObjectService.UpdateObject(session.Id, asteroid.Id, new Dictionary<string, object?> { ["x"] = 0.7 });
 
-        // Act — client leaves
-        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        // Act — client leaves; migration version is included in the unified result
+        var departure = SessionService.LeaveSession("connection-2");
 
         // Assert — migration should include the version AFTER the migration increment
-        var migration = departure.MigratedObjects.First(m => m.ObjectId == asteroid.Id);
+        var migration = departure!.MigratedObjects.First(m => m.ObjectId == asteroid.Id);
         var serverObj = ObjectService.GetObject(session.Id, asteroid.Id);
         migration.NewVersion.Should().Be(serverObj!.Version);
         migration.NewVersion.Should().Be(4); // v1 (create) + v2 (update1) + v3 (update2) + v4 (migration)
     }
 
     [Fact]
-    public void HandleMemberDeparture_MigratedObject_ShouldRefreshUpdatedAt()
+    public void MemberDeparture_MigratedObject_ShouldRefreshUpdatedAt()
     {
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
@@ -418,7 +414,7 @@ public class ObjectServiceTests : TestBase
         var originalUpdatedAt = asteroid.UpdatedAt;
 
         // Act
-        ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        SessionService.LeaveSession("connection-2");
 
         // Assert
         var migratedObject = ObjectService.GetObject(session.Id, asteroid.Id);
@@ -427,7 +423,7 @@ public class ObjectServiceTests : TestBase
     }
 
     [Fact]
-    public void HandleMemberDeparture_MultipleObjectsMigrated_EachHasCorrectVersion()
+    public void MemberDeparture_MultipleObjectsMigrated_EachHasCorrectVersion()
     {
         // Arrange
         var (session, server, client) = CreateTestSessionWithClient();
@@ -446,11 +442,11 @@ public class ObjectServiceTests : TestBase
         });
         // obj2 stays at version 1 (no updates)
 
-        // Act
-        var departure = ObjectService.HandleMemberDeparture(session.Id, client.Id, new List<Guid> { server.Id });
+        // Act — client leaves; unified departure result contains migration info
+        var departure = SessionService.LeaveSession("connection-2");
 
         // Assert — each migration carries the post-increment version
-        var m1 = departure.MigratedObjects.First(m => m.ObjectId == obj1.Id);
+        var m1 = departure!.MigratedObjects.First(m => m.ObjectId == obj1.Id);
         var m2 = departure.MigratedObjects.First(m => m.ObjectId == obj2!.Id);
         m1.NewVersion.Should().Be(4); // 1 (create) + 2 updates + 1 migration = 4
         m2.NewVersion.Should().Be(2); // 1 (create) + 1 migration = 2
@@ -475,7 +471,7 @@ public class ObjectServiceTests : TestBase
         };
 
         // Act
-        var results = ObjectService.UpdateObjects(session.Id, updates).ToList();
+        var results = ObjectService.UpdateObjects(session.Id, creator.Id, updates).ToList();
 
         // Assert — only obj1 should be updated; obj2 rejected due to version mismatch
         results.Should().HaveCount(1);

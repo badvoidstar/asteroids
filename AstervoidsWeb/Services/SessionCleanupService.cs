@@ -1,5 +1,6 @@
 using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Hubs;
+using AstervoidsWeb.Models;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 
@@ -73,11 +74,18 @@ public class SessionCleanupService : BackgroundService
         foreach (var session in sessions)
         {
             string? reason = null;
+            Func<Session, bool>? predicate = null;
 
             // Check absolute timeout first (takes priority)
             if (now - session.CreatedAt > _absoluteTimeout)
             {
                 reason = "Session exceeded maximum duration";
+                // Re-check the absolute timeout inside the lock to guard against a clock
+                // edge where CleanupExpiredSessions runs just before the deadline
+                var capturedNow = now;
+                var absoluteTimeout = _absoluteTimeout;
+                predicate = s => capturedNow - s.CreatedAt > absoluteTimeout;
+
                 _logger.LogInformation(
                     "Session {SessionName} ({SessionId}) exceeded absolute timeout ({AbsoluteTimeout}min). Created at {CreatedAt}.",
                     session.Name, session.Id, _absoluteTimeout.TotalMinutes, session.CreatedAt);
@@ -88,6 +96,14 @@ public class SessionCleanupService : BackgroundService
                      && now - session.LastMemberLeftAt.Value > _emptyTimeout)
             {
                 reason = "Session was empty for too long";
+                // Re-check inside the lock so a concurrent join that cleared
+                // LastMemberLeftAt prevents this session from being destroyed.
+                var capturedNow = now;
+                var emptyTimeout = _emptyTimeout;
+                predicate = s => s.Members.IsEmpty
+                              && s.LastMemberLeftAt.HasValue
+                              && capturedNow - s.LastMemberLeftAt.Value > emptyTimeout;
+
                 _logger.LogInformation(
                     "Session {SessionName} ({SessionId}) empty for {EmptyDuration}s (timeout: {EmptyTimeout}s). Destroying.",
                     session.Name, session.Id,
@@ -97,7 +113,7 @@ public class SessionCleanupService : BackgroundService
 
             if (reason != null)
             {
-                var result = _sessionService.ForceDestroySession(session.Id);
+                var result = _sessionService.ForceDestroySession(session.Id, predicate);
                 if (result != null)
                 {
                     sessionsDestroyed = true;

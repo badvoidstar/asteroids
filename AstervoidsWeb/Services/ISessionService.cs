@@ -24,12 +24,22 @@ public interface ISessionService
     JoinSessionResult JoinSession(Guid sessionId, string connectionId);
 
     /// <summary>
-    /// Removes a member from their session.
-    /// Triggers server promotion if the leaving member was the server.
+    /// Removes a member from their session, performs server promotion if needed, and
+    /// handles object cleanup (delete member-scoped, migrate session-scoped) — all in one
+    /// atomic operation under the session's <c>SyncRoot</c>.
+    /// This method is idempotent: a second call for the same connection returns null
+    /// without warnings.
     /// </summary>
     /// <param name="connectionId">SignalR connection ID of the leaving member.</param>
-    /// <returns>Result containing session info and promotion details if applicable.</returns>
-    LeaveSessionResult? LeaveSession(string connectionId);
+    /// <param name="distributeOrphanedObjects">
+    /// When true and multiple members remain, session-scoped objects are distributed
+    /// round-robin; otherwise all go to the first remaining member.
+    /// </param>
+    /// <returns>
+    /// Combined result with membership changes and object disposal info, or null if the
+    /// connection was not registered in any session (idempotent no-op).
+    /// </returns>
+    LeaveSessionResult? LeaveSession(string connectionId, bool distributeOrphanedObjects = true);
 
     /// <summary>
     /// Gets all active sessions that can be joined, along with capacity info.
@@ -75,18 +85,27 @@ public interface ISessionService
 
     /// <summary>
     /// Force-destroys a session, removing all members and cleaning up lookup dictionaries.
-    /// Used by the cleanup service for expired sessions.
+    /// The session lifecycle is set to <c>Destroying</c> before teardown and
+    /// <c>Destroyed</c> on completion, so concurrent operations see a consistent state.
+    /// This method is idempotent: a second call for the same session returns null.
     /// </summary>
     /// <param name="sessionId">The session to destroy.</param>
-    /// <returns>Result with connection IDs of removed members, or null if session not found.</returns>
-    ForceDestroySessionResult? ForceDestroySession(Guid sessionId);
+    /// <param name="shouldDestroy">
+    /// Optional predicate evaluated under the session lock to re-confirm the session
+    /// should still be destroyed (guards against join-vs-cleanup races).  When null the
+    /// session is always destroyed.
+    /// </param>
+    /// <returns>Result with connection IDs of removed members, or null if session not found
+    /// or already destroyed / predicate returned false.</returns>
+    ForceDestroySessionResult? ForceDestroySession(Guid sessionId, Func<Session, bool>? shouldDestroy = null);
 }
 
 /// <summary>
 /// Result of a member leaving a session.
-/// RemainingMemberIds is captured atomically inside LeaveSession() after member removal
-/// and any promotion, so it can be used directly for object migration without a
-/// second GetSession() call that could race with concurrent joins/leaves.
+/// Contains both membership changes (promotion) and object disposal (deleted/migrated
+/// objects) so the hub can broadcast a single coherent <c>OnMemberLeft</c> event.
+/// All fields are captured atomically inside <see cref="ISessionService.LeaveSession"/>
+/// so callers do not need to make a second service call to retrieve object info.
 /// </summary>
 public record LeaveSessionResult(
     Guid SessionId,
@@ -94,7 +113,11 @@ public record LeaveSessionResult(
     Guid MemberId,
     bool SessionDestroyed,
     Member? PromotedMember,
-    IReadOnlyList<Guid> RemainingMemberIds
+    IReadOnlyList<Guid> RemainingMemberIds,
+    /// <summary>IDs of member-scoped objects that were deleted on departure.</summary>
+    IReadOnlyList<Guid> DeletedObjectIds,
+    /// <summary>Session-scoped objects that were migrated to other members on departure.</summary>
+    IReadOnlyList<ObjectMigration> MigratedObjects
 );
 
 /// <summary>

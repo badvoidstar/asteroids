@@ -6,31 +6,40 @@ namespace AstervoidsWeb.Services;
 
 /// <summary>
 /// In-memory implementation of object management.
+///
+/// Correctness guarantees
+/// ──────────────────────
+/// • All object mutations (create, update, delete, replace) execute under the session's
+///   <c>Session.SyncRoot</c> lock, making version checks, ownership checks, and data
+///   writes atomic.
+/// • <c>SessionObject.Data</c> is replaced with a new dictionary on every mutation
+///   (copy-on-write) so that snapshot reads outside the lock observe a stable copy.
+/// • Batch update (<see cref="UpdateObjects"/>) succeeds/fails per object; partial
+///   success is intentional and documented.  Each individual object mutation is still
+///   fully atomic.
+/// • Member departure and object ownership migration are handled atomically inside
+///   <see cref="SessionService.LeaveSession"/>, not here.
 /// </summary>
 public class ObjectService : IObjectService
 {
     private readonly ISessionService _sessionService;
-    private readonly bool _distributeOrphanedObjects;
 
     public ObjectService(ISessionService sessionService)
     {
         _sessionService = sessionService;
-        _distributeOrphanedObjects = true;
     }
 
     public ObjectService(ISessionService sessionService, IOptions<SessionSettings> settings)
     {
         _sessionService = sessionService;
-        _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
+        // DistributeOrphanedObjects is now used by SessionService directly; no field needed here.
     }
 
     /// <summary>
     /// Validates that a session exists. Returns the session if valid, or null if not found.
     /// </summary>
     private Session? GetValidSession(Guid sessionId)
-    {
-        return _sessionService.GetSession(sessionId);
-    }
+        => _sessionService.GetSession(sessionId);
 
     public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null)
     {
@@ -38,39 +47,63 @@ public class ObjectService : IObjectService
         if (session == null)
             return null;
 
-        if (!session.Members.TryGetValue(creatorMemberId, out _))
-            return null;
-
-        var effectiveOwner = ownerMemberId ?? creatorMemberId;
-        if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
-            return null;
-
-        var obj = new SessionObject
+        lock (session.SyncRoot)
         {
-            SessionId = sessionId,
-            CreatorMemberId = creatorMemberId,
-            OwnerMemberId = effectiveOwner,
-            Scope = scope,
-            Data = data ?? new Dictionary<string, object?>()
-        };
+            if (session.LifecycleState != SessionLifecycleState.Active)
+                return null;
 
-        session.Objects.TryAdd(obj.Id, obj);
-        return obj;
+            if (!session.Members.TryGetValue(creatorMemberId, out _))
+                return null;
+
+            var effectiveOwner = ownerMemberId ?? creatorMemberId;
+            if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
+                return null;
+
+            var obj = new SessionObject
+            {
+                SessionId = sessionId,
+                CreatorMemberId = creatorMemberId,
+                OwnerMemberId = effectiveOwner,
+                Scope = scope,
+                // Clone the caller-supplied data to prevent the caller mutating it after the fact
+                Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>()
+            };
+
+            session.Objects.TryAdd(obj.Id, obj);
+            return obj;
+        }
     }
 
+    /// <summary>
+    /// Updates a single object without ownership enforcement.
+    /// Used internally and by tests.  The hub uses <see cref="UpdateObjects"/> which
+    /// enforces ownership inside the lock.
+    /// </summary>
     public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
-        if (!session.Objects.TryGetValue(objectId, out var obj))
-            return null;
+        lock (session.SyncRoot)
+        {
+            if (!session.Objects.TryGetValue(objectId, out var obj))
+                return null;
 
-        return ApplyUpdate(obj, data, expectedVersion) ? obj : null;
+            return ApplyUpdate(obj, data, expectedVersion) ? obj : null;
+        }
     }
 
-    public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, IEnumerable<ObjectUpdate> updates)
+    /// <summary>
+    /// Batch-updates multiple objects owned by <paramref name="ownerMemberId"/>.
+    ///
+    /// Partial-success semantics (by design): each object update is attempted
+    /// independently.  Objects whose version check fails or that are not owned by the
+    /// caller are silently skipped.  Successfully updated objects are returned.  This
+    /// matches the frontend's optimistic update model where stale-version rejections are
+    /// reconciled on the next <c>GetSessionState</c> cycle.
+    /// </summary>
+    public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -78,14 +111,22 @@ public class ObjectService : IObjectService
 
         var results = new List<SessionObject>();
 
-        foreach (var update in updates)
+        lock (session.SyncRoot)
         {
-            if (!session.Objects.TryGetValue(update.ObjectId, out var obj))
-                continue;
+            if (session.LifecycleState != SessionLifecycleState.Active)
+                return results;
 
-            if (ApplyUpdate(obj, update.Data, update.ExpectedVersion))
+            foreach (var update in updates)
             {
-                results.Add(obj);
+                if (!session.Objects.TryGetValue(update.ObjectId, out var obj))
+                    continue;
+
+                // Ownership check inside the lock — not TOCTOU-prone
+                if (obj.OwnerMemberId != ownerMemberId)
+                    continue;
+
+                if (ApplyUpdate(obj, update.Data, update.ExpectedVersion))
+                    results.Add(obj);
             }
         }
 
@@ -93,35 +134,76 @@ public class ObjectService : IObjectService
     }
 
     /// <summary>
-    /// Applies a data merge + version bump to a single object if the optimistic concurrency check passes.
+    /// Deletes an object, enforcing that <paramref name="ownerMemberId"/> is the current
+    /// owner.  The ownership check and deletion are atomic under <c>session.SyncRoot</c>.
     /// </summary>
-    private static bool ApplyUpdate(SessionObject obj, Dictionary<string, object?> data, long? expectedVersion)
-    {
-        if (expectedVersion.HasValue && obj.Version != expectedVersion.Value)
-            return false;
-
-        foreach (var kvp in data)
-        {
-            obj.Data[kvp.Key] = kvp.Value;
-        }
-
-        BumpObjectVersion(obj);
-        return true;
-    }
-
-    private static void BumpObjectVersion(SessionObject obj)
-    {
-        obj.Version++;
-        obj.UpdatedAt = DateTime.UtcNow;
-    }
-
-    public SessionObject? DeleteObject(Guid sessionId, Guid objectId)
+    public SessionObject? DeleteObject(Guid sessionId, Guid objectId, Guid ownerMemberId)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
             return null;
 
-        return session.Objects.TryRemove(objectId, out var obj) ? obj : null;
+        lock (session.SyncRoot)
+        {
+            if (!session.Objects.TryGetValue(objectId, out var obj))
+                return null;
+
+            if (obj.OwnerMemberId != ownerMemberId)
+                return null;
+
+            return session.Objects.TryRemove(objectId, out _) ? obj : null;
+        }
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<SessionObject>? ReplaceObject(
+        Guid sessionId,
+        Guid deleteObjectId,
+        Guid ownerMemberId,
+        IReadOnlyList<ReplacementObjectSpec> replacements)
+    {
+        var session = GetValidSession(sessionId);
+        if (session == null)
+            return null;
+
+        lock (session.SyncRoot)
+        {
+            if (session.LifecycleState != SessionLifecycleState.Active)
+                return null;
+
+            // Verify ownership of the object being replaced — atomic with the delete below
+            if (!session.Objects.TryGetValue(deleteObjectId, out var objToDelete))
+                return null;
+            if (objToDelete.OwnerMemberId != ownerMemberId)
+                return null;
+
+            // Determine effective owner for replacements (must be a current member)
+            var created = new List<SessionObject>(replacements.Count);
+            foreach (var spec in replacements)
+            {
+                var effectiveOwner = spec.OwnerOverride.HasValue
+                    && session.Members.ContainsKey(spec.OwnerOverride.Value)
+                    ? spec.OwnerOverride.Value
+                    : ownerMemberId;
+
+                var obj = new SessionObject
+                {
+                    SessionId = sessionId,
+                    CreatorMemberId = ownerMemberId,
+                    OwnerMemberId = effectiveOwner,
+                    Scope = spec.Scope,
+                    // Clone data so spec mutations after the call don't corrupt the stored object
+                    Data = new Dictionary<string, object?>(spec.Data)
+                };
+                session.Objects.TryAdd(obj.Id, obj);
+                created.Add(obj);
+            }
+
+            // Delete the original — we already verified ownership above
+            session.Objects.TryRemove(deleteObjectId, out _);
+
+            return created;
+        }
     }
 
     public IEnumerable<SessionObject> GetSessionObjects(Guid sessionId)
@@ -142,58 +224,27 @@ public class ObjectService : IObjectService
         return session.Objects.TryGetValue(objectId, out var obj) ? obj : null;
     }
 
+    // ── Private helpers ────────────────────────────────────────────────────────────
+
     /// <summary>
-    /// Handles object cleanup when a member departs. This is the ONLY path through which
-    /// object ownership changes. Member-scoped objects are deleted; session-scoped objects
-    /// are redistributed via round-robin to remaining members.
-    /// Frontend local-first patterns (deleteObject) and response-first patterns (createObject)
-    /// are safe because they cannot race with this: a member actively creating/deleting
-    /// objects is not departing. If voluntary ownership transfer is ever added, those
-    /// patterns would need to account for concurrent ownership changes.
+    /// Applies a data merge (copy-on-write) + version bump to a single object if the
+    /// optimistic concurrency check passes.  Must be called while holding
+    /// <c>session.SyncRoot</c>.
     /// </summary>
-    public MemberDepartureResult HandleMemberDeparture(Guid sessionId, Guid departingMemberId, IReadOnlyList<Guid> remainingMemberIds)
+    private static bool ApplyUpdate(SessionObject obj, Dictionary<string, object?> data, long? expectedVersion)
     {
-        var session = GetValidSession(sessionId);
-        if (session == null)
-            return new MemberDepartureResult([], []);
+        if (expectedVersion.HasValue && obj.Version != expectedVersion.Value)
+            return false;
 
-        var deletedIds = new List<Guid>();
-        var migratedObjects = new List<ObjectMigration>();
-        var roundRobinIndex = 0;
+        // Copy-on-write: create a new dictionary so readers outside the lock observe
+        // a stable snapshot rather than a partially-written dictionary.
+        var newData = new Dictionary<string, object?>(obj.Data);
+        foreach (var kvp in data)
+            newData[kvp.Key] = kvp.Value;
 
-        foreach (var obj in session.Objects.Values.ToList())
-        {
-            if (obj.OwnerMemberId != departingMemberId)
-                continue;
-
-            if (obj.Scope == ObjectScope.Member)
-            {
-                // Member-scoped: delete
-                if (session.Objects.TryRemove(obj.Id, out _))
-                {
-                    deletedIds.Add(obj.Id);
-                }
-            }
-            else if (obj.Scope == ObjectScope.Session && remainingMemberIds.Count > 0)
-            {
-                // Session-scoped: distribute across remaining members
-                Guid newOwnerId;
-                if (_distributeOrphanedObjects && remainingMemberIds.Count > 1)
-                {
-                    newOwnerId = remainingMemberIds[roundRobinIndex % remainingMemberIds.Count];
-                    roundRobinIndex++;
-                }
-                else
-                {
-                    newOwnerId = remainingMemberIds[0];
-                }
-
-                obj.OwnerMemberId = newOwnerId;
-                BumpObjectVersion(obj);
-                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version));
-            }
-        }
-
-        return new MemberDepartureResult(deletedIds, migratedObjects);
+        obj.Data = newData;
+        obj.Version++;
+        obj.UpdatedAt = DateTime.UtcNow;
+        return true;
     }
 }
