@@ -131,6 +131,14 @@ public class SessionHub : Hub
         var session = result.Session!;
         var member = result.Member!;
 
+        // Capture snapshot BEFORE adding to group so the joining client receives a consistent
+        // point-in-time view. If the snapshot were taken after AddToGroupAsync, concurrent
+        // object creations or updates would already be broadcast to the new connection, and the
+        // same objects would then appear again in the snapshot response — producing duplicate
+        // application on the joining client. Taking the snapshot first means any object changes
+        // that happen between the snapshot and group add will only arrive once, via live events.
+        var (members, objects) = ToSessionSnapshot(session);
+
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
         var memberSequence = NextMemberSequence(member);
@@ -147,9 +155,6 @@ public class SessionHub : Hub
 
         // Broadcast session list update to all connected clients
         await BroadcastSessionsChanged();
-
-        // Return session state including existing objects
-        var (members, objects) = ToSessionSnapshot(session);
 
         return new JoinSessionResponse(
             session.Id,
