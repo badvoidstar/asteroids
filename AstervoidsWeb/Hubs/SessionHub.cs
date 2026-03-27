@@ -39,6 +39,8 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Looks up an object and verifies ownership by the given member.
+    /// This is a fast early-return check only; ownership is also enforced atomically
+    /// inside the service layer so correctness does not depend on this pre-check.
     /// Returns null and logs a warning if the object doesn't exist or isn't owned by the member.
     /// </summary>
     private SessionObject? GetOwnedObject(Member member, Guid objectId)
@@ -60,11 +62,30 @@ public class SessionHub : Hub
     private static MemberInfo ToMemberInfo(Member member) =>
         new(member.Id, member.Role.ToString(), member.JoinedAt);
 
+    /// <summary>
+    /// Converts a <see cref="SessionObject"/> to a <see cref="ObjectInfo"/> DTO.
+    /// Clones <c>Data</c> so the caller receives a stable snapshot that cannot be
+    /// mutated by concurrent object updates.
+    /// </summary>
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
-        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(), o.Data, o.Version);
+        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(),
+            new Dictionary<string, object?>(o.Data), o.Version);
 
-    private static (MemberInfo[] Members, ObjectInfo[] Objects) ToSessionSnapshot(Session session) =>
-        ([.. session.Members.Values.Select(ToMemberInfo)], [.. session.Objects.Values.Select(ToObjectInfo)]);
+    /// <summary>
+    /// Takes a consistent point-in-time snapshot of a session's members and objects.
+    /// Acquires <c>session.SyncRoot</c> for the duration of the read so that no
+    /// concurrent mutation can produce a torn snapshot.
+    /// </summary>
+    private static (MemberInfo[] Members, ObjectInfo[] Objects) ToSessionSnapshot(Session session)
+    {
+        lock (session.SyncRoot)
+        {
+            return (
+                [.. session.Members.Values.Select(ToMemberInfo)],
+                [.. session.Objects.Values.Select(ToObjectInfo)]
+            );
+        }
+    }
 
     private static ObjectScope ParseScope(string scope) =>
         scope.Equals("Session", StringComparison.OrdinalIgnoreCase) ? ObjectScope.Session : ObjectScope.Member;
@@ -169,21 +190,21 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Leaves the current session.
+    /// All object cleanup (member-scoped deletion, session-scoped migration) and server
+    /// promotion happen atomically inside <see cref="ISessionService.LeaveSession"/>.
+    /// A duplicate call (explicit leave overlapping with <c>OnDisconnectedAsync</c>) is
+    /// a no-op and does not emit warnings.
     /// </summary>
     public async Task LeaveSession()
     {
         var result = _sessionService.LeaveSession(Context.ConnectionId);
         if (result == null)
         {
-            _logger.LogWarning("Failed to leave session - member not found for connection {ConnectionId}", Context.ConnectionId);
+            // Expected when explicit leave and disconnect overlap — no warning needed.
+            _logger.LogDebug("LeaveSession: no session found for connection {ConnectionId} (already departed)",
+                Context.ConnectionId);
             return;
         }
-
-        // Use the remaining member IDs captured atomically inside LeaveSession() —
-        // this avoids a separate GetSession() call that could race with concurrent joins/leaves.
-        var remainingMemberIds = result.RemainingMemberIds;
-        var departureResult = _objectService.HandleMemberDeparture(
-            result.SessionId, result.MemberId, remainingMemberIds);
 
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, result.SessionId.ToString());
 
@@ -191,30 +212,32 @@ public class SessionHub : Hub
         {
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-            // Notify remaining members with enriched departure info
-            // Use departing member's ID as sender (this runs on their connection)
+            // Notify remaining members with enriched departure info.
+            // Promotion info and object disposal are all in the single LeaveSessionResult,
+            // captured atomically by the service.
             await Clients.Group(result.SessionId.ToString()).SendAsync("OnMemberLeft",
                 new MemberLeftInfo(
                     result.MemberId,
                     result.PromotedMember?.Id,
                     result.PromotedMember?.Role.ToString(),
-                    departureResult.DeletedObjectIds,
-                    departureResult.MigratedObjects
+                    result.DeletedObjectIds,
+                    result.MigratedObjects
                 ),
                 result.MemberId, (long)0, serverTimestamp);
 
             if (result.PromotedMember != null)
             {
                 _logger.LogInformation(
-                    "Member {PromotedMemberId} promoted to Server in session {SessionName}. Migrated {MigratedCount} objects, deleted {DeletedCount} objects.",
+                    "Member {PromotedMemberId} promoted to Server in session {SessionName}. " +
+                    "Migrated {MigratedCount} objects, deleted {DeletedCount} objects.",
                     result.PromotedMember.Id, result.SessionName,
-                    departureResult.MigratedObjects.Count(),
-                    departureResult.DeletedObjectIds.Count());
+                    result.MigratedObjects.Count,
+                    result.DeletedObjectIds.Count);
             }
         }
-        else
+        else if (result.RemainingMemberIds.Count == 0)
         {
-            _logger.LogInformation("Session {SessionName} ({SessionId}) destroyed - no members remaining",
+            _logger.LogInformation("Session {SessionName} ({SessionId}) is now empty",
                 result.SessionName, result.SessionId);
         }
 
@@ -290,7 +313,8 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Updates multiple objects atomically.
-    /// Only allows updates to objects owned by the caller.
+    /// Ownership is enforced inside the service layer (atomically with the update) so
+    /// correctness does not depend on this hub's pre-checks.
     /// </summary>
     public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null, long? senderSendIntervalMs = null)
     {
@@ -300,20 +324,11 @@ public class SessionHub : Hub
             _logger.LogWarning("UpdateObjects failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-        var (member, session) = ctx.Value;
+        var (member, _) = ctx.Value;
 
-        // Filter to only objects owned by the caller
-        var authorizedUpdates = new List<ObjectUpdate>();
-        foreach (var u in updates)
-        {
-            var obj = _objectService.GetObject(member.SessionId, u.ObjectId);
-            if (obj != null && obj.OwnerMemberId == member.Id)
-            {
-                authorizedUpdates.Add(new ObjectUpdate(u.ObjectId, u.Data, u.ExpectedVersion));
-            }
-        }
-
-        var updatedObjects = _objectService.UpdateObjects(member.SessionId, authorizedUpdates);
+        // Map hub request type to service type; ownership enforcement is inside the service.
+        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data, u.ExpectedVersion));
+        var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates).ToList();
 
         var objectInfos = updatedObjects.Select(ToObjectInfo).ToList();
 
@@ -323,7 +338,9 @@ public class SessionHub : Hub
         {
             memberSequence = NextMemberSequence(member);
             serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var requestDataByObjectId = authorizedUpdates
+            // Build a map from objectId → requested data for the broadcast payload.
+            // Use the service updates (which own the data dictionaries we passed in).
+            var requestDataByObjectId = serviceUpdates
                 .GroupBy(u => u.ObjectId)
                 .ToDictionary(g => g.Key, g => g.Last().Data);
             var updateInfos = updatedObjects
@@ -347,13 +364,9 @@ public class SessionHub : Hub
     /// a broadcast echo. Lost response would leave sender's sequence map stale until
     /// reconciliation. See trackMemberSequence() in object-sync.js.
     ///
-    /// Ownership safety: the local-first deletion is safe because ownership only changes
-    /// via HandleMemberDeparture (when a member leaves). A member that is actively deleting
-    /// objects is not departing, so no concurrent ownership migration can occur. The hub
-    /// enforces ownership (OwnerMemberId == member.Id) and rejects the delete if ownership
-    /// has changed, but the local Map would already be out of sync until reconciliation.
-    /// If voluntary ownership transfer is ever added, local-first deletion would need to
-    /// check ownership locally before removing, or defer removal until server confirms.
+    /// Ownership is enforced atomically inside <see cref="IObjectService.DeleteObject"/>
+    /// under the session lock, so the hub-level <c>GetOwnedObject</c> pre-check is only a
+    /// fast early-return and cannot be TOCTOU-exploited.
     /// </summary>
     public async Task<DeleteObjectResponse?> DeleteObject(Guid objectId)
     {
@@ -365,14 +378,14 @@ public class SessionHub : Hub
         }
         var (member, _) = ctx.Value;
 
-        // Verify ownership before deleting
-        var obj = GetOwnedObject(member, objectId);
-        if (obj == null)
-            return null;
-
-        var deletedObj = _objectService.DeleteObject(member.SessionId, objectId);
+        // Ownership is enforced atomically inside the service.
+        var deletedObj = _objectService.DeleteObject(member.SessionId, objectId, member.Id);
         if (deletedObj == null)
+        {
+            _logger.LogWarning("DeleteObject rejected - object {ObjectId} not found or not owned by member {MemberId}",
+                objectId, member.Id);
             return null;
+        }
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -389,6 +402,8 @@ public class SessionHub : Hub
     /// <summary>
     /// Atomically deletes an object and creates replacement objects in a single broadcast.
     /// Used for splitting objects where all members need to see the deletion and creation together.
+    /// Ownership check, creation of replacements, and deletion of the original all happen
+    /// atomically under the session lock inside the service layer.
     /// </summary>
     public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null)
     {
@@ -400,42 +415,19 @@ public class SessionHub : Hub
         }
         var (member, _) = ctx.Value;
 
-        // Verify ownership of the object being replaced
-        var existingObj = GetOwnedObject(member, deleteObjectId);
-        if (existingObj == null)
-            return null;
-
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
 
-        // Create all replacements first (so we can roll back if any fail)
-        var createdObjects = new List<SessionObject>();
-        foreach (var data in replacements)
-        {
-            var obj = _objectService.CreateObject(member.SessionId, member.Id, objectScope, data, ownerGuid);
-            if (obj == null)
-            {
-                // Roll back any objects we already created
-                foreach (var created in createdObjects)
-                {
-                    _objectService.DeleteObject(member.SessionId, created.Id);
-                }
-                _logger.LogWarning("ReplaceObject failed - could not create replacement object");
-                return null;
-            }
-            createdObjects.Add(obj);
-        }
+        // Build replacement specs; service enforces ownership atomically
+        var specs = replacements
+            .Select(data => new ReplacementObjectSpec(objectScope, data, ownerGuid))
+            .ToList();
 
-        // Delete the original object
-        var deletedObj = _objectService.DeleteObject(member.SessionId, deleteObjectId);
-        if (deletedObj == null)
+        var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs);
+        if (createdObjects == null)
         {
-            // Roll back created objects
-            foreach (var created in createdObjects)
-            {
-                _objectService.DeleteObject(member.SessionId, created.Id);
-            }
-            _logger.LogWarning("ReplaceObject failed - could not delete original object");
+            _logger.LogWarning("ReplaceObject failed - object {ObjectId} not found, not owned by member {MemberId}, or session not active",
+                deleteObjectId, member.Id);
             return null;
         }
 

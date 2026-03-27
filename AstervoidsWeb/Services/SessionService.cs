@@ -8,6 +8,25 @@ namespace AstervoidsWeb.Services;
 
 /// <summary>
 /// In-memory implementation of session management.
+///
+/// Locking strategy
+/// ────────────────
+/// <c>_sessionLock</c> (global): serialises session creation and join capacity checks.
+///   It must never be held at the same time as a per-session lock on another session.
+///
+/// <c>session.SyncRoot</c> (per-session): serialises all mutations local to one session
+///   (member add/remove, promotion, object create/update/delete/migrate, lifecycle
+///   transitions, and <see cref="Session.LastMemberLeftAt"/> updates).
+///
+/// When both locks are needed the acquisition order is always
+///   <c>_sessionLock</c> → <c>session.SyncRoot</c>.
+///
+/// Idempotency guarantee
+/// ─────────────────────
+/// Duplicate <see cref="LeaveSession"/> calls (e.g. explicit leave overlapping with
+/// <c>OnDisconnectedAsync</c>) are handled cleanly: the first call removes the connection
+/// from <c>_connectionToMember</c> and completes the departure; subsequent calls find no
+/// entry and return null at Debug level without emitting warnings.
 /// </summary>
 public class SessionService : ISessionService
 {
@@ -19,6 +38,7 @@ public class SessionService : ISessionService
     private readonly ILogger<SessionService>? _logger;
     private readonly int _maxSessions;
     private readonly int _maxMembersPerSession;
+    private readonly bool _distributeOrphanedObjects;
 
     public int MaxSessions => _maxSessions;
     public int MaxMembersPerSession => _maxMembersPerSession;
@@ -41,30 +61,24 @@ public class SessionService : ISessionService
     {
         _maxSessions = 6;
         _maxMembersPerSession = 4;
+        _distributeOrphanedObjects = true;
     }
 
     public SessionService(IOptions<SessionSettings> settings, ILogger<SessionService> logger)
     {
         _maxSessions = settings.Value.MaxSessions;
         _maxMembersPerSession = settings.Value.MaxMembersPerSession;
+        _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
         _logger = logger;
     }
 
-    /// <summary>
-    /// Creates a failed CreateSessionResult with the specified error message.
-    /// </summary>
+    /// <summary>Creates a failed CreateSessionResult with the specified error message.</summary>
     private static CreateSessionResult CreateSessionFailure(string errorMessage)
-    {
-        return new CreateSessionResult(false, null, null, errorMessage);
-    }
+        => new(false, null, null, errorMessage);
 
-    /// <summary>
-    /// Creates a failed JoinSessionResult with the specified error message.
-    /// </summary>
+    /// <summary>Creates a failed JoinSessionResult with the specified error message.</summary>
     private static JoinSessionResult JoinSessionFailure(string errorMessage)
-    {
-        return new JoinSessionResult(false, null, null, errorMessage);
-    }
+        => new(false, null, null, errorMessage);
 
     public CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio)
     {
@@ -121,94 +135,144 @@ public class SessionService : ISessionService
                 return JoinSessionFailure("Session not found");
             }
 
-            // Check if session is full
-            if (session.Members.Count >= _maxMembersPerSession)
+            // Per-session checks and mutation under SyncRoot while _sessionLock prevents
+            // concurrent joins from racing on the capacity check.
+            lock (session.SyncRoot)
             {
-                _logger?.LogWarning("JoinSession failed: session {SessionId} is full ({MaxMembers} members)", sessionId, _maxMembersPerSession);
-                return JoinSessionFailure($"Session is full (maximum {_maxMembersPerSession} members)");
-            }
+                if (session.LifecycleState != SessionLifecycleState.Active)
+                {
+                    _logger?.LogWarning("JoinSession failed: session {SessionId} is not active (state: {State})",
+                        sessionId, session.LifecycleState);
+                    return JoinSessionFailure("Session is no longer available.");
+                }
 
-            // Assign Server role if session has no members (rejoining an empty session)
-            var role = session.Members.IsEmpty ? MemberRole.Server : MemberRole.Client;
-            var member = RegisterMember(connectionId, session, role);
+                // Check if session is full
+                if (session.Members.Count >= _maxMembersPerSession)
+                {
+                    _logger?.LogWarning("JoinSession failed: session {SessionId} is full ({MaxMembers} members)", sessionId, _maxMembersPerSession);
+                    return JoinSessionFailure($"Session is full (maximum {_maxMembersPerSession} members)");
+                }
 
-            // Clear empty-session tracking since we now have a member
-            if (session.LastMemberLeftAt.HasValue)
+                // Assign Server role if session has no members (rejoining an empty session)
+                var role = session.Members.IsEmpty ? MemberRole.Server : MemberRole.Client;
+                var member = RegisterMember(connectionId, session, role);
+
+                // Clear empty-session tracking since we now have a member
                 session.LastMemberLeftAt = null;
 
-            _logger?.LogInformation("Member {MemberId} joined session {SessionName} as {Role}", 
-                member.Id, session.Name, role);
+                _logger?.LogInformation("Member {MemberId} joined session {SessionName} ({SessionId}) as {Role}",
+                    member.Id, session.Name, session.Id, role);
 
-            return new JoinSessionResult(true, session, member, null);
+                return new JoinSessionResult(true, session, member, null);
+            }
         }
     }
 
-    public LeaveSessionResult? LeaveSession(string connectionId)
+    /// <inheritdoc/>
+    public LeaveSessionResult? LeaveSession(string connectionId, bool distributeOrphanedObjects = true)
     {
-        if (!_connectionToMember.TryRemove(connectionId, out var memberId))
+        // ── Tentative lookups (no lock, read-only) ─────────────────────────────────
+        // These establish the likely session without mutating anything.  We re-validate
+        // under session.SyncRoot before committing.
+        if (!_connectionToMember.TryGetValue(connectionId, out var memberId))
         {
-            _logger?.LogWarning("LeaveSession failed: connection {ConnectionId} not found", connectionId);
+            // Connection not registered — either never joined or already departed.
+            // This is expected when explicit LeaveSession() overlaps OnDisconnectedAsync().
+            _logger?.LogDebug("LeaveSession: connection {ConnectionId} not found (already departed or never joined)",
+                connectionId);
             return null;
         }
 
-        if (!_memberToSession.TryRemove(memberId, out var sessionId))
+        if (!_memberToSession.TryGetValue(memberId, out var sessionId))
             return null;
 
         if (!_sessions.TryGetValue(sessionId, out var session))
             return null;
 
-        if (!session.Members.TryRemove(memberId, out var member))
-            return null;
-
-        Member? promotedMember = null;
-
-        // If the leaving member was the server, promote a client
-        if (member.Role == MemberRole.Server && session.Members.Count > 0)
+        // ── Atomic departure under session.SyncRoot ────────────────────────────────
+        lock (session.SyncRoot)
         {
-            lock (session.PromotionLock)
+            // Re-validate under the lock (idempotent: someone else may have already removed this connection)
+            if (!_connectionToMember.ContainsKey(connectionId))
             {
-                // Double-check there's still no server
-                var hasServer = session.Members.Values.Any(m => m.Role == MemberRole.Server);
-                if (!hasServer)
-                {
-                    // Select random client to promote
-                    var clients = session.Members.Values.ToList();
-                    if (clients.Count > 0)
-                    {
-                        var selectedIndex = _random.Next(clients.Count);
-                        promotedMember = clients[selectedIndex];
-                        promotedMember.Role = MemberRole.Server;
-
-                        _logger?.LogInformation("Member {MemberId} promoted to Server in session {SessionName}", 
-                            promotedMember.Id, session.Name);
-
-                        session.Version++;
-                    }
-                }
+                _logger?.LogDebug(
+                    "LeaveSession: connection {ConnectionId} already removed (concurrent departure)",
+                    connectionId);
+                return null;
             }
+
+            if (session.LifecycleState == SessionLifecycleState.Destroyed)
+            {
+                // Session is already gone — clean up stale index entries silently
+                _connectionToMember.TryRemove(connectionId, out _);
+                _memberToSession.TryRemove(memberId, out _);
+                return null;
+            }
+
+            // Remove the member from global indexes and session.Members atomically
+            _connectionToMember.TryRemove(connectionId, out _);
+            _memberToSession.TryRemove(memberId, out _);
+
+            if (!session.Members.TryRemove(memberId, out var member))
+            {
+                // Member was already removed (should not normally happen given the
+                // connection check above, but guard anyway)
+                return null;
+            }
+
+            // ── Server promotion ───────────────────────────────────────────────────
+            // If the departing member was the server, promote the oldest remaining
+            // member (deterministic: earliest JoinedAt, then lowest Id as tie-breaker).
+            Member? promotedMember = null;
+            if (member.Role == MemberRole.Server && session.Members.Count > 0)
+            {
+                var promoted = session.Members.Values
+                    .OrderBy(m => m.JoinedAt)
+                    .ThenBy(m => m.Id)
+                    .First();
+                promoted.Role = MemberRole.Server;
+                promotedMember = promoted;
+                session.Version++;
+
+                _logger?.LogInformation(
+                    "Member {PromotedMemberId} promoted to Server in session {SessionName} ({SessionId})",
+                    promoted.Id, session.Name, session.Id);
+            }
+
+            // Snapshot remaining member IDs *after* removal and promotion
+            var remainingMemberIds = session.Members.Keys.ToList();
+
+            // ── Object cleanup ─────────────────────────────────────────────────────
+            // Performed inside SyncRoot so that no concurrent update/delete/replace
+            // can race between membership change and object migration.
+            var (deletedObjectIds, migratedObjects) = HandleObjectDeparture(
+                session, memberId, remainingMemberIds, distributeOrphanedObjects);
+
+            // ── Empty-session bookkeeping ──────────────────────────────────────────
+            // If the last member has left, mark the session for deferred cleanup.
+            // Empty sessions are kept alive to allow auto-rejoin within the timeout
+            // window (see SessionCleanupService).  Any remaining objects owned by the
+            // departed member stay in the session without an owner until cleanup.
+            if (session.Members.IsEmpty)
+                session.LastMemberLeftAt = DateTime.UtcNow;
+
+            _logger?.LogInformation(
+                "Member {MemberId} left session {SessionName} ({SessionId}). " +
+                "Deleted {DeletedCount} objects, migrated {MigratedCount} objects.",
+                member.Id, session.Name, session.Id,
+                deletedObjectIds.Count, migratedObjects.Count);
+
+            return new LeaveSessionResult(
+                sessionId,
+                session.Name,
+                memberId,
+                false,
+                promotedMember,
+                remainingMemberIds,
+                deletedObjectIds,
+                migratedObjects
+            );
         }
-
-        // If no members left, mark session for cleanup instead of destroying immediately.
-        // The cleanup service will destroy it after the configured empty timeout.
-        var sessionDestroyed = false;
-        if (session.Members.IsEmpty)
-        {
-            session.LastMemberLeftAt = DateTime.UtcNow;
-        }
-
-        // Capture remaining member IDs atomically here — after removal and any promotion —
-        // so callers can use this list directly for object migration without a second
-        // GetSession() call that could race with concurrent joins or leaves.
-        var remainingMemberIds = session.Members.Keys.ToList();
-
-        return new LeaveSessionResult(
-            sessionId,
-            session.Name,
-            memberId,
-            sessionDestroyed,
-            promotedMember,
-            remainingMemberIds
-        );
     }
 
     public ActiveSessionsResult GetActiveSessions()
@@ -227,9 +291,7 @@ public class SessionService : ISessionService
     }
 
     public Session? GetSession(Guid sessionId)
-    {
-        return _sessions.TryGetValue(sessionId, out var session) ? session : null;
-    }
+        => _sessions.TryGetValue(sessionId, out var session) ? session : null;
 
     public Member? GetMemberByConnectionId(string connectionId)
     {
@@ -251,28 +313,50 @@ public class SessionService : ISessionService
     }
 
     public IEnumerable<Session> GetAllSessions()
-    {
-        return _sessions.Values.ToList();
-    }
+        => _sessions.Values.ToList();
 
-    public ForceDestroySessionResult? ForceDestroySession(Guid sessionId)
+    /// <inheritdoc/>
+    public ForceDestroySessionResult? ForceDestroySession(Guid sessionId, Func<Session, bool>? shouldDestroy = null)
     {
-        if (!_sessions.TryRemove(sessionId, out var session))
+        if (!_sessions.TryGetValue(sessionId, out var session))
             return null;
 
-        var connectionIds = new List<string>();
-        foreach (var member in session.Members.Values)
+        lock (session.SyncRoot)
         {
-            _memberToSession.TryRemove(member.Id, out _);
-            _connectionToMember.TryRemove(member.ConnectionId, out _);
-            connectionIds.Add(member.ConnectionId);
+            // Idempotent: already being destroyed by another concurrent call
+            if (session.LifecycleState != SessionLifecycleState.Active)
+                return null;
+
+            // Re-check the caller's condition while holding the lock (guards join-vs-cleanup races)
+            if (shouldDestroy != null && !shouldDestroy(session))
+                return null;
+
+            // Mark as destroying before making any changes visible to other operations
+            session.LifecycleState = SessionLifecycleState.Destroying;
+
+            // Remove from global sessions dict so new joins cannot find this session
+            _sessions.TryRemove(sessionId, out _);
+
+            // Remove all members from global indexes
+            var connectionIds = new List<string>();
+            foreach (var member in session.Members.Values)
+            {
+                _memberToSession.TryRemove(member.Id, out _);
+                _connectionToMember.TryRemove(member.ConnectionId, out _);
+                connectionIds.Add(member.ConnectionId);
+            }
+
+            session.LifecycleState = SessionLifecycleState.Destroyed;
+
+            _logger?.LogInformation(
+                "Session {SessionName} ({SessionId}) force-destroyed. Removed {MemberCount} members.",
+                session.Name, session.Id, connectionIds.Count);
+
+            return new ForceDestroySessionResult(connectionIds, session.Name);
         }
-
-        _logger?.LogInformation("Session {SessionName} ({SessionId}) force-destroyed. Removed {MemberCount} members.",
-            session.Name, session.Id, connectionIds.Count);
-
-        return new ForceDestroySessionResult(connectionIds, session.Name);
     }
+
+    // ── Private helpers ────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Resolves a connection ID to its member ID and session.
@@ -292,6 +376,8 @@ public class SessionService : ISessionService
 
     /// <summary>
     /// Creates a member, adds it to the session, and registers it in the lookup dictionaries.
+    /// Must be called while holding either <c>_sessionLock</c> (for creates/joins)
+    /// or <c>session.SyncRoot</c>.
     /// </summary>
     private Member RegisterMember(string connectionId, Session session, MemberRole role)
     {
@@ -307,6 +393,62 @@ public class SessionService : ISessionService
         _memberToSession.TryAdd(member.Id, session.Id);
 
         return member;
+    }
+
+    /// <summary>
+    /// Handles object cleanup for a departing member inside a session lock.
+    /// Member-scoped objects are deleted; session-scoped objects are migrated to remaining
+    /// members (round-robin when distribute is true and multiple members remain; to the
+    /// first member otherwise).
+    ///
+    /// Must be called while holding <c>session.SyncRoot</c>.
+    /// </summary>
+    private (List<Guid> DeletedObjectIds, List<ObjectMigration> MigratedObjects) HandleObjectDeparture(
+        Session session,
+        Guid departingMemberId,
+        IReadOnlyList<Guid> remainingMemberIds,
+        bool distribute)
+    {
+        var deletedIds = new List<Guid>();
+        var migratedObjects = new List<ObjectMigration>();
+        var roundRobinIndex = 0;
+
+        foreach (var obj in session.Objects.Values.ToList())
+        {
+            if (obj.OwnerMemberId != departingMemberId)
+                continue;
+
+            if (obj.Scope == ObjectScope.Member)
+            {
+                if (session.Objects.TryRemove(obj.Id, out _))
+                    deletedIds.Add(obj.Id);
+            }
+            else if (obj.Scope == ObjectScope.Session && remainingMemberIds.Count > 0)
+            {
+                Guid newOwnerId;
+                if (distribute && remainingMemberIds.Count > 1)
+                {
+                    newOwnerId = remainingMemberIds[roundRobinIndex % remainingMemberIds.Count];
+                    roundRobinIndex++;
+                }
+                else
+                {
+                    newOwnerId = remainingMemberIds[0];
+                }
+
+                obj.OwnerMemberId = newOwnerId;
+                // Replace Data with a new dictionary so snapshot reads outside the lock
+                // see a stable copy (copy-on-write pattern).
+                obj.Data = new Dictionary<string, object?>(obj.Data);
+                obj.Version++;
+                obj.UpdatedAt = DateTime.UtcNow;
+                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version));
+            }
+            // If scope == Session but no remaining members, leave the object in place;
+            // it will be cleaned up when the session is eventually destroyed.
+        }
+
+        return (deletedIds, migratedObjects);
     }
 
     private string GenerateUniqueFruitName()

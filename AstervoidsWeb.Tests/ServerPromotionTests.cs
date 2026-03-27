@@ -41,18 +41,14 @@ public class ServerPromotionTests : TestBase
         var serverSessionObj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session);
         var clientObj = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Member);
 
-        // Act
+        // Act — departure info (deleted/migrated objects) is now part of the unified LeaveSession result
         var leaveResult = SessionService.LeaveSession("server-conn");
-        var remainingIds = leaveResult!.PromotedMember != null 
-            ? new List<Guid> { leaveResult.PromotedMember.Id } 
-            : new List<Guid>();
-        var departureResult = ObjectService.HandleMemberDeparture(session.Id, server.Id, remainingIds);
 
         // Assert
-        departureResult.DeletedObjectIds.Should().Contain(serverMemberObj!.Id);
-        departureResult.MigratedObjects.Select(m => m.ObjectId).Should().Contain(serverSessionObj!.Id);
-        departureResult.DeletedObjectIds.Should().NotContain(clientObj!.Id);
-        departureResult.MigratedObjects.Select(m => m.ObjectId).Should().NotContain(clientObj.Id);
+        leaveResult!.DeletedObjectIds.Should().Contain(serverMemberObj!.Id);
+        leaveResult.MigratedObjects.Select(m => m.ObjectId).Should().Contain(serverSessionObj!.Id);
+        leaveResult.DeletedObjectIds.Should().NotContain(clientObj!.Id);
+        leaveResult.MigratedObjects.Select(m => m.ObjectId).Should().NotContain(clientObj.Id);
     }
 
     [Fact]
@@ -243,16 +239,14 @@ public class ServerPromotionTests : TestBase
         // Act — server leaves; use the atomically captured remaining IDs from the result
         var leaveResult = SessionService.LeaveSession("server-conn");
         leaveResult.Should().NotBeNull();
-        var remainingIds = leaveResult!.RemainingMemberIds;
-        var departureResult = ObjectService.HandleMemberDeparture(session.Id, server.Id, remainingIds);
 
-        // Assert — all 6 objects migrated, none deleted
-        departureResult.DeletedObjectIds.Should().BeEmpty();
-        departureResult.MigratedObjects.Should().HaveCount(6);
+        // Assert — all 6 objects migrated, none deleted (departure result is now inline in LeaveSession)
+        leaveResult!.DeletedObjectIds.Should().BeEmpty();
+        leaveResult.MigratedObjects.Should().HaveCount(6);
 
         // Every migrated object must be owned by one of the three remaining clients
-        var remainingIdSet = new HashSet<Guid>(remainingIds);
-        foreach (var migration in departureResult.MigratedObjects)
+        var remainingIdSet = new HashSet<Guid>(leaveResult.RemainingMemberIds);
+        foreach (var migration in leaveResult.MigratedObjects)
         {
             remainingIdSet.Should().Contain(migration.NewOwnerId,
                 "migrated objects must only go to valid remaining members");
@@ -274,13 +268,11 @@ public class ServerPromotionTests : TestBase
         ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?> { ["x"] = 1.0 });
         // version is now 2
 
-        // Act
+        // Act — departure result (including migration info) is now unified in LeaveSession
         var leaveResult = SessionService.LeaveSession("server-conn");
-        var departureResult = ObjectService.HandleMemberDeparture(
-            session.Id, server.Id, leaveResult!.RemainingMemberIds);
 
         // Assert — version incremented exactly once during migration (2 → 3)
-        var migration = departureResult.MigratedObjects.First(m => m.ObjectId == obj.Id);
+        var migration = leaveResult!.MigratedObjects.First(m => m.ObjectId == obj.Id);
         migration.NewVersion.Should().Be(3,
             "migration must increment the version exactly once");
         var storedObj = ObjectService.GetObject(session.Id, obj.Id);
@@ -304,21 +296,18 @@ public class ServerPromotionTests : TestBase
         var leaveResult = SessionService.LeaveSession("server-conn");
         leaveResult.Should().NotBeNull();
 
-        var departureResult = ObjectService.HandleMemberDeparture(
-            session.Id, server.Id, leaveResult!.RemainingMemberIds);
-
         // Assert — promoted member is in the remaining list so it can receive objects
-        leaveResult.PromotedMember.Should().NotBeNull();
+        leaveResult!.PromotedMember.Should().NotBeNull();
         leaveResult.RemainingMemberIds.Should().Contain(leaveResult.PromotedMember!.Id);
 
         // At least one migrated object should have gone to the promoted member
-        var promotedMemberGotObject = departureResult.MigratedObjects
+        var promotedMemberGotObject = leaveResult.MigratedObjects
             .Any(m => m.NewOwnerId == leaveResult.PromotedMember.Id);
         promotedMemberGotObject.Should().BeTrue(
             "the promoted server must be eligible to receive migrated objects");
 
         // No object should reference the departed server
-        departureResult.MigratedObjects
+        leaveResult.MigratedObjects
             .Should().NotContain(m => m.NewOwnerId == server.Id,
                 "departed member must not be assigned any migrated objects");
     }

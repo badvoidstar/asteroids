@@ -37,6 +37,9 @@ public class SessionObject
 
     /// <summary>
     /// Arbitrary data associated with this object.
+    /// Updated via whole-dictionary replacement (copy-on-write) under the session's
+    /// <see cref="Session.SyncRoot"/> lock so that snapshot reads outside the lock
+    /// always observe a stable, complete dictionary.
     /// </summary>
     public Dictionary<string, object?> Data { get; set; } = new();
 
