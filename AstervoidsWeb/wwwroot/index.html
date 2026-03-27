@@ -3029,17 +3029,34 @@
                 game.multiplayer.myColorIndex = colorIndex;
             }
             
-            // Use shared lives pool for multiplayer
-            game.lives = CONFIG.MULTIPLAYER_LIVES;
-            
             if (isAuthority()) {
                 // Server: start fresh game and create GameState
+                game.lives = CONFIG.MULTIPLAYER_LIVES;
                 game.astervoids = [];
                 game.bullets = [];
                 game.score = 0;
                 game.wave = 0;
+            } else if (isGameStateOwner()) {
+                // Non-server GS owner (spectator who inherited ownership): adopt the
+                // actual game state from the GameState object rather than using
+                // hardcoded defaults, which would corrupt the synced state for all
+                // clients when syncGameState() broadcasts them.
+                const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+                game.lives = gsObj?.data?.lives ?? CONFIG.MULTIPLAYER_LIVES;
+                game.wave = gsObj?.data?.wave ?? game.wave;
+                game.score = gsObj?.data?.score ?? game.score;
+                game.speedMultiplier = gsObj?.data?.speedMultiplier ?? game.speedMultiplier;
+                game.state = gsObj?.data?.state ?? 'playing';
+                if (gsObj?.data?.waveDelayTimer !== undefined) {
+                    game.waveDelayTimer = gsObj.data.waveDelayTimer;
+                }
+                game.astervoids = [];
+                game.bullets = [];
+                updateAstervoidsFromSync();
+                updateBulletsFromSync();
             } else {
-                // Non-server: sync existing state
+                // Non-server non-GS-owner: sync existing state from GameState object
+                game.lives = CONFIG.MULTIPLAYER_LIVES;
                 game.astervoids = [];
                 game.bullets = [];
                 updateAstervoidsFromSync();
@@ -3056,8 +3073,13 @@
             game.wave = 0;
         }
         
-        game.state = 'playing';
-        game.speedMultiplier = 1;
+        // Only set initial defaults for authority (fresh game) or solo mode.
+        // Non-authority session players adopt state and speed from the GameState
+        // object sync so that mid-game joins don't corrupt the synced wave state.
+        if (!isSessionMode() || isAuthority()) {
+            game.state = 'playing';
+            game.speedMultiplier = 1;
+        }
         
         // Hide start screen
         startScreen.classList.add('hidden');
