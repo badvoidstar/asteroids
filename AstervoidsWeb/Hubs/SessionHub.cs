@@ -131,6 +131,17 @@ public class SessionHub : Hub
         var session = result.Session!;
         var member = result.Member!;
 
+        // Materialise the snapshot BEFORE adding the caller to the SignalR group.
+        // Once AddToGroupAsync completes the joiner will begin receiving broadcast events
+        // (OnObjectCreated, OnObjectDeleted, etc.) from other members.  Taking the
+        // snapshot here guarantees that every event the joiner subsequently receives
+        // represents a change that occurred strictly after the snapshot — eliminating
+        // the double-delivery window where an object could appear in both an event and
+        // the snapshot, or where the joiner could receive a delete event for an object
+        // it has not yet seen.  The joiner is already present in session.Members (added
+        // inside the service call under its lock), so it will appear in the member list.
+        var (members, objects) = ToSessionSnapshot(session);
+
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
         var memberSequence = NextMemberSequence(member);
@@ -147,9 +158,6 @@ public class SessionHub : Hub
 
         // Broadcast session list update to all connected clients
         await BroadcastSessionsChanged();
-
-        // Return session state including existing objects
-        var (members, objects) = ToSessionSnapshot(session);
 
         return new JoinSessionResponse(
             session.Id,
