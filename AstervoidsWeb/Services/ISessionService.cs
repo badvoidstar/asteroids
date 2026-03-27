@@ -84,13 +84,17 @@ public interface ISessionService
 
 /// <summary>
 /// Result of a member leaving a session.
+/// RemainingMemberIds is captured atomically inside LeaveSession() after member removal
+/// and any promotion, so it can be used directly for object migration without a
+/// second GetSession() call that could race with concurrent joins/leaves.
 /// </summary>
 public record LeaveSessionResult(
     Guid SessionId,
     string SessionName,
     Guid MemberId,
     bool SessionDestroyed,
-    Member? PromotedMember
+    Member? PromotedMember,
+    IReadOnlyList<Guid> RemainingMemberIds
 );
 
 /// <summary>

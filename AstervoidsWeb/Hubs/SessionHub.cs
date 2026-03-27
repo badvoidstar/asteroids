@@ -174,23 +174,15 @@ public class SessionHub : Hub
             return;
         }
 
-        // Handle object cleanup — gather remaining member IDs for round-robin distribution
-        var remainingMemberIds = new List<Guid>();
-        Session? session = null;
-        if (!result.SessionDestroyed)
-        {
-            session = _sessionService.GetSession(result.SessionId);
-            if (session != null)
-            {
-                remainingMemberIds = session.Members.Keys.ToList();
-            }
-        }
+        // Use the remaining member IDs captured atomically inside LeaveSession() —
+        // this avoids a separate GetSession() call that could race with concurrent joins/leaves.
+        var remainingMemberIds = result.RemainingMemberIds;
         var departureResult = _objectService.HandleMemberDeparture(
             result.SessionId, result.MemberId, remainingMemberIds);
 
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, result.SessionId.ToString());
 
-        if (!result.SessionDestroyed && session != null)
+        if (!result.SessionDestroyed && result.RemainingMemberIds.Count > 0)
         {
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
