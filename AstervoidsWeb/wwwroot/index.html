@@ -3009,6 +3009,10 @@
      * Ship starts at center (normalized 0.5, 0.5)
      */
     async function init() {
+        // Track whether we're entering an in-progress game vs starting fresh.
+        // Used to guard state resets and wave spawning below.
+        let freshGameStart = true;
+        
         // Determine if we're the authority (Server role in session mode)
         if (isSessionMode()) {
             const member = SessionClient.getCurrentMember();
@@ -3029,33 +3033,42 @@
                 game.multiplayer.myColorIndex = colorIndex;
             }
             
-            if (isAuthority()) {
-                // Server: start fresh game and create GameState
+            // Detect whether we're entering an in-progress game (GameState already exists)
+            // vs starting a brand-new game. A promoted Server who inherited GS ownership
+            // must adopt the existing state — not reset to defaults.
+            const existingGsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
+            const gameAlreadyInProgress = !!existingGsObj;
+            
+            if (isAuthority() && !gameAlreadyInProgress) {
+                // Server starting a fresh game — reset everything
                 game.lives = CONFIG.MULTIPLAYER_LIVES;
                 game.astervoids = [];
                 game.bullets = [];
                 game.score = 0;
                 game.wave = 0;
             } else if (isGameStateOwner()) {
-                // Non-server GS owner (spectator who inherited ownership): adopt the
+                // GS owner entering an in-progress game (either promoted Server
+                // or non-server spectator who inherited ownership): adopt the
                 // actual game state from the GameState object rather than using
                 // hardcoded defaults, which would corrupt the synced state for all
                 // clients when syncGameState() broadcasts them.
-                const gsObj = ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE);
-                game.lives = gsObj?.data?.lives ?? CONFIG.MULTIPLAYER_LIVES;
-                game.wave = gsObj?.data?.wave ?? game.wave;
-                game.score = gsObj?.data?.score ?? game.score;
-                game.speedMultiplier = gsObj?.data?.speedMultiplier ?? game.speedMultiplier;
-                game.state = gsObj?.data?.state ?? 'playing';
-                if (gsObj?.data?.waveDelayTimer !== undefined) {
-                    game.waveDelayTimer = gsObj.data.waveDelayTimer;
+                freshGameStart = false;
+                game.lives = existingGsObj?.data?.lives ?? CONFIG.MULTIPLAYER_LIVES;
+                game.wave = existingGsObj?.data?.wave ?? 0;
+                game.score = existingGsObj?.data?.score ?? 0;
+                game.speedMultiplier = existingGsObj?.data?.speedMultiplier ?? 1;
+                game.state = existingGsObj?.data?.state ?? 'playing';
+                if (existingGsObj?.data?.waveDelayTimer !== undefined) {
+                    game.waveDelayTimer = existingGsObj.data.waveDelayTimer;
                 }
+                game.multiplayer.gameStateObjectId = existingGsObj?.id;
                 game.astervoids = [];
                 game.bullets = [];
                 updateAstervoidsFromSync();
                 updateBulletsFromSync();
             } else {
                 // Non-server non-GS-owner: sync existing state from GameState object
+                freshGameStart = false;
                 game.lives = CONFIG.MULTIPLAYER_LIVES;
                 game.astervoids = [];
                 game.bullets = [];
@@ -3073,10 +3086,10 @@
             game.wave = 0;
         }
         
-        // Only set initial defaults for authority (fresh game) or solo mode.
-        // Non-authority session players adopt state and speed from the GameState
-        // object sync so that mid-game joins don't corrupt the synced wave state.
-        if (!isSessionMode() || isAuthority()) {
+        // Only set initial defaults for fresh game starts (authority starting new game
+        // or solo mode). When entering an in-progress game, state and speed come from
+        // the GameState object sync — overwriting them would corrupt the game for everyone.
+        if (freshGameStart) {
             game.state = 'playing';
             game.speedMultiplier = 1;
         }
@@ -3092,13 +3105,16 @@
         AudioSystem.beat.stop();
         AudioSystem.beat.start();
         
-        // Start first wave (only authority spawns astervoids in multiplayer)
-        if (!isSessionMode() || isAuthority()) {
-            await spawnWave();
-            
-            // Create synced GameState (authority only)
-            if (isSessionMode()) {
-                await createSyncedGameState();
+        // Start first wave and create GameState only for fresh starts.
+        // When entering an in-progress game, the wave and GameState already exist.
+        if (freshGameStart) {
+            if (!isSessionMode() || isAuthority()) {
+                await spawnWave();
+                
+                // Create synced GameState (authority only)
+                if (isSessionMode()) {
+                    await createSyncedGameState();
+                }
             }
         }
         
