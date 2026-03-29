@@ -239,7 +239,9 @@
             document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"><\/script>');
         }
     </script>
-    
+    <!-- SignalR MessagePack hub protocol (binary encoding; smaller payloads than JSON) -->
+    <script src="/js/signalr-protocol-msgpack.min.js"></script>
+
     <!-- Session modules -->
     <script src="/js/session-client.js"></script>
     <script src="/js/object-sync.js"></script>

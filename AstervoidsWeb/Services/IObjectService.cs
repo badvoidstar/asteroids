@@ -1,4 +1,5 @@
 using AstervoidsWeb.Models;
+using MessagePack;
 
 namespace AstervoidsWeb.Services;
 
@@ -96,7 +97,11 @@ public record ObjectUpdate(
 /// guessing with a local increment (which can drift if the client's
 /// version was already stale before the migration).
 /// </summary>
-public record ObjectMigration(Guid ObjectId, Guid NewOwnerId, long NewVersion);
+[MessagePackObject]
+public record ObjectMigration(
+    [property: Key("objectId")] Guid ObjectId,
+    [property: Key("newOwnerId")] Guid NewOwnerId,
+    [property: Key("newVersion")] long NewVersion);
 
 /// <summary>
 /// Result of handling a member's departure from a session.
