@@ -39,9 +39,18 @@ classDiagram
         +double AspectRatio [0.25, 4.0]
         +long Version (incremented on promotion)
         +DateTime CreatedAt
+        +DateTime? LastMemberLeftAt
+        +SessionLifecycleState LifecycleState
         +ConcurrentDictionary~Guid,Member~ Members
         +ConcurrentDictionary~Guid,SessionObject~ Objects
-        -object PromotionLock
+        -object SyncRoot
+    }
+
+    class SessionLifecycleState {
+        <<enumeration>>
+        Active
+        Destroying
+        Destroyed
     }
 
     class Member {
@@ -68,6 +77,7 @@ classDiagram
     Session "1" --> "*" Member : Members
     Session "1" --> "*" SessionObject : Objects
     Member "1" --> "*" SessionObject : owns (OwnerMemberId)
+    Session --> SessionLifecycleState : LifecycleState
 ```
 
 ## Service Layer
@@ -84,6 +94,12 @@ graph TB
         direction TB
         OS_OPS["Operations:<br/>CreateObject → Id, Version=1, Owner<br/>UpdateObject → Version check, merge, Version++<br/>UpdateObjects → Batch (skip failures, partial success)<br/>DeleteObject → TryRemove (no ownership check)<br/>HandleMemberDeparture → Delete/Migrate"]
         OS_CFG["Config:<br/>DistributeOrphanedObjects: true<br/>(round-robin vs first-member)"]
+    end
+
+    subgraph "SessionCleanupService (BackgroundService)"
+        direction TB
+        SCS_OPS["Runs every 10 seconds<br/>Empty timeout: destroy sessions with no members for N seconds<br/>Absolute timeout: destroy sessions exceeding max lifetime<br/>Notifies connected members via SignalR OnSessionExpired<br/>Broadcasts OnSessionsChanged on any cleanup"]
+        SCS_CFG["Config (SessionSettings):<br/>EmptyTimeoutSeconds: 60<br/>AbsoluteTimeoutMinutes: 20"]
     end
 ```
 
@@ -832,17 +848,19 @@ astervoids/
 │   │   └── SessionSettings.cs  # MaxSessions, MaxMembersPerSession, DistributeOrphanedObjects
 │   │
 │   ├── Models/
-│   │   ├── Session.cs          # Session entity (Members, Objects, PromotionLock)
-│   │   ├── Member.cs           # Member entity (Role, EventSequence)
-│   │   ├── SessionObject.cs    # Synced object (Scope, Version, Data dictionary)
-│   │   ├── MemberRole.cs       # Enum: Server, Client
-│   │   └── ObjectScope.cs      # Enum: Member, Session
+│   │   ├── Session.cs                  # Session entity (Members, Objects, SyncRoot, LifecycleState)
+│   │   ├── Member.cs                   # Member entity (Role, EventSequence)
+│   │   ├── SessionObject.cs            # Synced object (Scope, Version, Data dictionary)
+│   │   ├── MemberRole.cs               # Enum: Server, Client
+│   │   ├── ObjectScope.cs              # Enum: Member, Session
+│   │   └── SessionLifecycleState.cs    # Enum: Active, Destroying, Destroyed
 │   │
 │   ├── Services/
-│   │   ├── ISessionService.cs  # Interface + result records (Create/Join/Leave/ActiveSessions)
-│   │   ├── SessionService.cs   # In-memory session management (ConcurrentDictionary)
-│   │   ├── IObjectService.cs   # Interface + ObjectUpdate/ObjectMigration/MemberDepartureResult
-│   │   └── ObjectService.cs    # Object CRUD, version control, member departure handling
+│   │   ├── ISessionService.cs          # Interface + result records (Create/Join/Leave/ActiveSessions)
+│   │   ├── SessionService.cs           # In-memory session management (ConcurrentDictionary)
+│   │   ├── IObjectService.cs           # Interface + ObjectUpdate/ObjectMigration/MemberDepartureResult
+│   │   ├── ObjectService.cs            # Object CRUD, version control, member departure handling
+│   │   └── SessionCleanupService.cs    # Background service: expires empty and long-lived sessions
 │   │
 │   ├── Hubs/
 │   │   ├── SessionHub.cs       # SignalR hub: game-agnostic session/object API
@@ -851,6 +869,7 @@ astervoids/
 │   └── wwwroot/
 │       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~4800 lines)
 │       ├── session-test.html   # Session management test harness
+│       ├── manifest.json       # PWA web app manifest
 │       ├── debug/
 │       │   └── index.html      # Real-time network metrics debug page
 │       └── js/
@@ -858,11 +877,14 @@ astervoids/
 │           ├── object-sync.js     # Object registry, delta encoding, sync timing
 │           └── signalr.min.js     # SignalR client library (local copy)
 │
-├── AstervoidsWeb.Tests/        # xUnit test project (45 tests)
+├── AstervoidsWeb.Tests/        # xUnit test project (79 tests)
 │   ├── AstervoidsWeb.Tests.csproj  # Test dependencies: xUnit, FluentAssertions, Moq
-│   ├── SessionServiceTests.cs      # Session create/join/leave/naming (18 tests)
-│   ├── ObjectServiceTests.cs       # Object CRUD/versioning/departure (20 tests)
-│   └── ServerPromotionTests.cs     # Server role promotion scenarios (7 tests)
+│   ├── TestBase.cs                 # Shared test base: CreateTestSession / CreateTestSessionWithClient helpers
+│   ├── SessionServiceTests.cs      # Session create/join/leave/naming (24 tests)
+│   ├── ObjectServiceTests.cs       # Object CRUD/versioning/departure (21 tests)
+│   ├── ServerPromotionTests.cs     # Server role promotion scenarios (13 tests)
+│   ├── ConcurrencyTests.cs         # Concurrency / thread-safety tests (17 tests)
+│   └── SessionHubTests.cs          # SessionHub unit tests (4 tests)
 │
 ├── infra/                      # Azure infrastructure (Bicep IaC)
 │   ├── main.bicep              # Three deployment paths: production, branch, standalone
@@ -879,6 +901,8 @@ astervoids/
 │
 └── .github/
     ├── copilot-instructions.md     # AI coding assistant instructions
+    ├── agents/
+    │   └── race-condition-reviewer.agent.md  # Race condition review agent
     ├── scripts/
     │   └── sanitize-branch-name.sh # Branch name sanitization for deployments
     └── workflows/
