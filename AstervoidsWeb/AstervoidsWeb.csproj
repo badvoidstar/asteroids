@@ -7,4 +7,8 @@
     <UserSecretsId>31143911-8edd-4435-9a95-b28d6d8722b1</UserSecretsId>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Protocols.MessagePack" Version="10.0.5" />
+  </ItemGroup>
+
 </Project>

@@ -1,39 +1,104 @@
 using AstervoidsWeb.Services;
+using MessagePack;
 
 namespace AstervoidsWeb.Hubs;
 
 // Session responses
-public record CreateSessionResponse(Guid SessionId, string SessionName, Guid MemberId, string Role, double AspectRatio);
+[MessagePackObject]
+public record CreateSessionResponse(
+    [property: Key("sessionId")] Guid SessionId,
+    [property: Key("sessionName")] string SessionName,
+    [property: Key("memberId")] Guid MemberId,
+    [property: Key("role")] string Role,
+    [property: Key("aspectRatio")] double AspectRatio);
+
+[MessagePackObject]
 public record JoinSessionResponse(
-    Guid SessionId,
-    string SessionName,
-    Guid MemberId,
-    string Role,
-    IEnumerable<MemberInfo> Members,
-    IEnumerable<ObjectInfo> Objects,
-    double AspectRatio
+    [property: Key("sessionId")] Guid SessionId,
+    [property: Key("sessionName")] string SessionName,
+    [property: Key("memberId")] Guid MemberId,
+    [property: Key("role")] string Role,
+    [property: Key("members")] IEnumerable<MemberInfo> Members,
+    [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
+    [property: Key("aspectRatio")] double AspectRatio
 );
-public record ActiveSessionsResponse(IEnumerable<SessionListItem> Sessions, int MaxSessions, bool CanCreateSession);
-public record SessionListItem(Guid Id, string Name, int MemberCount, int MaxMembers, DateTime CreatedAt);
-public record SessionStateSnapshot(IEnumerable<MemberInfo> Members, IEnumerable<ObjectInfo> Objects, Dictionary<string, long> MemberSequences);
+
+[MessagePackObject]
+public record ActiveSessionsResponse(
+    [property: Key("sessions")] IEnumerable<SessionListItem> Sessions,
+    [property: Key("maxSessions")] int MaxSessions,
+    [property: Key("canCreateSession")] bool CanCreateSession);
+
+[MessagePackObject]
+public record SessionListItem(
+    [property: Key("id")] Guid Id,
+    [property: Key("name")] string Name,
+    [property: Key("memberCount")] int MemberCount,
+    [property: Key("maxMembers")] int MaxMembers,
+    [property: Key("createdAt")] DateTime CreatedAt);
+
+[MessagePackObject]
+public record SessionStateSnapshot(
+    [property: Key("members")] IEnumerable<MemberInfo> Members,
+    [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
+    [property: Key("memberSequences")] Dictionary<string, long> MemberSequences);
 
 // Member info
-public record MemberInfo(Guid Id, string Role, DateTime JoinedAt);
+[MessagePackObject]
+public record MemberInfo(
+    [property: Key("id")] Guid Id,
+    [property: Key("role")] string Role,
+    [property: Key("joinedAt")] DateTime JoinedAt);
+
+[MessagePackObject]
 public record MemberLeftInfo(
-    Guid MemberId,
-    Guid? PromotedMemberId,
-    string? PromotedRole,
-    IEnumerable<Guid> DeletedObjectIds,
-    IEnumerable<ObjectMigration> MigratedObjects
+    [property: Key("memberId")] Guid MemberId,
+    [property: Key("promotedMemberId")] Guid? PromotedMemberId,
+    [property: Key("promotedRole")] string? PromotedRole,
+    [property: Key("deletedObjectIds")] IEnumerable<Guid> DeletedObjectIds,
+    [property: Key("migratedObjects")] IEnumerable<ObjectMigration> MigratedObjects
 );
 
 // Object info and operations
-public record ObjectInfo(Guid Id, Guid CreatorMemberId, Guid OwnerMemberId, string Scope, Dictionary<string, object?> Data, long Version);
-public record ObjectUpdateInfo(Guid Id, Dictionary<string, object?> Data, long Version);
-public record ObjectUpdateRequest(Guid ObjectId, Dictionary<string, object?> Data, long? ExpectedVersion = null);
-public record ObjectReplacedEvent(Guid DeletedObjectId, List<ObjectInfo> CreatedObjects);
+[MessagePackObject]
+public record ObjectInfo(
+    [property: Key("id")] Guid Id,
+    [property: Key("creatorMemberId")] Guid CreatorMemberId,
+    [property: Key("ownerMemberId")] Guid OwnerMemberId,
+    [property: Key("scope")] string Scope,
+    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("version")] long Version);
+
+[MessagePackObject]
+public record ObjectUpdateInfo(
+    [property: Key("id")] Guid Id,
+    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("version")] long Version);
+
+[MessagePackObject]
+public record ObjectUpdateRequest(
+    [property: Key("objectId")] Guid ObjectId,
+    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("expectedVersion")] long? ExpectedVersion = null);
+
+[MessagePackObject]
+public record ObjectReplacedEvent(
+    [property: Key("deletedObjectId")] Guid DeletedObjectId,
+    [property: Key("createdObjects")] List<ObjectInfo> CreatedObjects);
 
 // Operation responses
-public record CreateObjectResponse(ObjectInfo ObjectInfo, long MemberSequence);
-public record UpdateObjectsResponse(Dictionary<string, long> Versions, long MemberSequence, long ServerTimestamp);
-public record DeleteObjectResponse(bool Success, long MemberSequence);
+[MessagePackObject]
+public record CreateObjectResponse(
+    [property: Key("objectInfo")] ObjectInfo ObjectInfo,
+    [property: Key("memberSequence")] long MemberSequence);
+
+[MessagePackObject]
+public record UpdateObjectsResponse(
+    [property: Key("versions")] Dictionary<string, long> Versions,
+    [property: Key("memberSequence")] long MemberSequence,
+    [property: Key("serverTimestamp")] long ServerTimestamp);
+
+[MessagePackObject]
+public record DeleteObjectResponse(
+    [property: Key("success")] bool Success,
+    [property: Key("memberSequence")] long MemberSequence);

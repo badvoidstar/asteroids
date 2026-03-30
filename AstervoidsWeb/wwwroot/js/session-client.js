@@ -61,6 +61,7 @@ const SessionClient = (function() {
         try {
             connection = new signalR.HubConnectionBuilder()
                 .withUrl('/sessionHub')
+                .withHubProtocol(new signalR.protocols.msgpack.MessagePackHubProtocol())
                 .withAutomaticReconnect({
                     nextRetryDelayInMilliseconds: retryContext => {
                         if (retryContext.previousRetryCount >= maxReconnectAttempts) {

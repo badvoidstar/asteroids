@@ -1,6 +1,8 @@
 using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Hubs;
 using AstervoidsWeb.Services;
+using MessagePack;
+using MessagePack.Resolvers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,20 +24,20 @@ builder.Services.AddResponseCompression(options =>
     options.EnableForHttps = true;
 });
 
-// Add SignalR (using default JSON protocol)
+// Add SignalR with MessagePack protocol (camelCase names to preserve JS client contract)
 //
 // Wire format optimization notes:
 // - WebSocket per-message compression (permessage-deflate) is NOT available through
 //   SignalR's API. SignalR manages WebSocket connections internally and does not expose
 //   the DangerousEnableCompression flag from WebSocketAcceptContext. HTTP-level
 //   compression is handled above via response compression middleware.
-// - MessagePack protocol (.AddMessagePackProtocol()) would give ~25-30% smaller payloads
-//   but requires casing alignment: MessagePack is case-sensitive, so all JS property
-//   accesses would need to match C# PascalCase, or a custom resolver would be needed.
-//   The Dictionary<string, object?> data payloads also need round-trip testing.
-//   Current delta encoding + static/dynamic split already reduces payloads significantly,
-//   making MessagePack a diminishing-returns optimization at current payload sizes (~700
-//   bytes per flush).
+// - MessagePack protocol gives ~25-30% smaller payloads vs JSON.
+//   Hub DTOs are annotated with [MessagePackObject] + [Key("camelCaseName")] so the
+//   binary wire format uses camelCase property names, preserving the existing JS client
+//   contract without any frontend changes.
+//   ContractlessStandardResolver handles unannotated types (primitives, collections,
+//   Dictionary<K,V>) and includes AttributeFormatterResolver for annotated DTOs.
+//   UntrustedData security guard is enabled as recommended by the MessagePack docs.
 builder.Services.AddSignalR(options =>
 {
     // Mobile browsers aggressively suspend WebSocket connections when backgrounded.
@@ -44,6 +46,13 @@ builder.Services.AddSignalR(options =>
     // Defaults: ClientTimeoutInterval=30s, KeepAliveInterval=15s
     options.ClientTimeoutInterval = TimeSpan.FromSeconds(90);
     options.KeepAliveInterval = TimeSpan.FromSeconds(45);
+}).AddMessagePackProtocol(options =>
+{
+    // ContractlessStandardResolver includes AttributeFormatterResolver (picks up
+    // [MessagePackObject]/[Key] on hub DTOs) and BuiltinResolver (serializes Guid as
+    // string, which JS reads correctly). UntrustedData rejects malformed msgpack.
+    options.SerializerOptions = ContractlessStandardResolver.Options
+        .WithSecurity(MessagePackSecurity.UntrustedData);
 });
 
 var app = builder.Build();
