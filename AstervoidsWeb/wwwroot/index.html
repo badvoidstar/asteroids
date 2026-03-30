@@ -3278,9 +3278,22 @@
                 Math.sin(angle) * childSpeed
             );
 
-            // Override random spin: distribute angular momentum proportional to child inertia
+            // Override random spin: distribute angular momentum asymmetrically between children
+            // while conserving total angular momentum exactly: Σ(I_i × ω_i) = totalAngularMomentum
             if (totalChildInertia > 0) {
-                childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia;
+                if (children.length === 2) {
+                    // Child 0 gets a bonus spin from the bullet's angular momentum contribution;
+                    // child 1 compensates with the opposite adjustment to conserve the total exactly.
+                    if (index === 0) {
+                        childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia + bulletAngularMomentum / totalChildInertia;
+                    } else {
+                        const I0 = children[0] ** 4;
+                        const childInertia = childRadius ** 4;
+                        childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia - bulletAngularMomentum * I0 / (totalChildInertia * childInertia);
+                    }
+                } else {
+                    childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia;
+                }
             }
             childAsteroid.angle = asteroid.angle;
             
@@ -3459,7 +3472,9 @@
                             }
                             const offsetX = bullet.x - asteroid.x;
                             const offsetY = bullet.y - asteroid.y;
-                            const impactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
+                            const relVelX = bullet.velocityX - asteroid.velocityX;
+                            const relVelY = bullet.velocityY - asteroid.velocityY;
+                            const impactTorque = offsetX * relVelY - offsetY * relVelX;
                             // Split sends to server — OnObjectReplaced handles asteroid state for all clients
                             splitAsteroid(asteroid, null, impactTorque);
                             // Self-award score on own ship
@@ -3473,7 +3488,9 @@
                             bullet.pendingPoints = asteroid.getPoints();
                             const offsetX = bullet.x - asteroid.x;
                             const offsetY = bullet.y - asteroid.y;
-                            bullet.hitImpactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
+                            const relVelX = bullet.velocityX - asteroid.velocityX;
+                            const relVelY = bullet.velocityY - asteroid.velocityY;
+                            bullet.hitImpactTorque = offsetX * relVelY - offsetY * relVelX;
                             if (bullet.syncObjectId) {
                                 ObjectSync.updateObject(bullet.syncObjectId, bullet.toUpdateData(), true);
                             }
@@ -3488,7 +3505,9 @@
                         AudioSystem.playExplosion(explosionSize);
                         const offsetX = bullet.x - asteroid.x;
                         const offsetY = bullet.y - asteroid.y;
-                        const impactTorque = offsetX * bullet.velocityY - offsetY * bullet.velocityX;
+                        const relVelX = bullet.velocityX - asteroid.velocityX;
+                        const relVelY = bullet.velocityY - asteroid.velocityY;
+                        const impactTorque = offsetX * relVelY - offsetY * relVelX;
                         splitAsteroid(asteroid, null, impactTorque);
                     }
                     
