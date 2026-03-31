@@ -14,9 +14,8 @@ namespace AstervoidsWeb.Services;
 ///   writes atomic.
 /// • <c>SessionObject.Data</c> is replaced with a new dictionary on every mutation
 ///   (copy-on-write) so that snapshot reads outside the lock observe a stable copy.
-/// • Batch update (<see cref="UpdateObjects"/>) succeeds/fails per object; partial
-///   success is intentional and documented.  Each individual object mutation is still
-///   fully atomic.
+/// • Batch update (<see cref="UpdateObjects"/>) skips objects not owned by the caller.
+///   Each individual object mutation is still fully atomic.
 /// • Member departure and object ownership migration are handled atomically inside
 ///   <see cref="SessionService.LeaveSession"/>, not here.
 /// </summary>
@@ -79,7 +78,7 @@ public class ObjectService : IObjectService
     /// Used internally and by tests.  The hub uses <see cref="UpdateObjects"/> which
     /// enforces ownership inside the lock.
     /// </summary>
-    public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null)
+    public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -90,18 +89,16 @@ public class ObjectService : IObjectService
             if (!session.Objects.TryGetValue(objectId, out var obj))
                 return null;
 
-            return ApplyUpdate(obj, data, expectedVersion) ? obj : null;
+            ApplyUpdate(obj, data);
+            return obj;
         }
     }
 
     /// <summary>
     /// Batch-updates multiple objects owned by <paramref name="ownerMemberId"/>.
     ///
-    /// Partial-success semantics (by design): each object update is attempted
-    /// independently.  Objects whose version check fails or that are not owned by the
-    /// caller are silently skipped.  Successfully updated objects are returned.  This
-    /// matches the frontend's optimistic update model where stale-version rejections are
-    /// reconciled on the next <c>GetSessionState</c> cycle.
+    /// Objects not owned by the caller are silently skipped.  Successfully updated
+    /// objects are returned.
     /// </summary>
     public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates)
     {
@@ -125,8 +122,8 @@ public class ObjectService : IObjectService
                 if (obj.OwnerMemberId != ownerMemberId)
                     continue;
 
-                if (ApplyUpdate(obj, update.Data, update.ExpectedVersion))
-                    results.Add(obj);
+                ApplyUpdate(obj, update.Data);
+                results.Add(obj);
             }
         }
 
@@ -227,15 +224,11 @@ public class ObjectService : IObjectService
     // ── Private helpers ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Applies a data merge (copy-on-write) + version bump to a single object if the
-    /// optimistic concurrency check passes.  Must be called while holding
-    /// <c>session.SyncRoot</c>.
+    /// Applies a data merge (copy-on-write) + version bump to a single object.
+    /// Must be called while holding <c>session.SyncRoot</c>.
     /// </summary>
-    private static bool ApplyUpdate(SessionObject obj, Dictionary<string, object?> data, long? expectedVersion)
+    private static void ApplyUpdate(SessionObject obj, Dictionary<string, object?> data)
     {
-        if (expectedVersion.HasValue && obj.Version != expectedVersion.Value)
-            return false;
-
         // Copy-on-write: create a new dictionary so readers outside the lock observe
         // a stable snapshot rather than a partially-written dictionary.
         var newData = new Dictionary<string, object?>(obj.Data);
@@ -245,6 +238,5 @@ public class ObjectService : IObjectService
         obj.Data = newData;
         obj.Version++;
         obj.UpdatedAt = DateTime.UtcNow;
-        return true;
     }
 }

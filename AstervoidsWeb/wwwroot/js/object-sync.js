@@ -63,6 +63,45 @@
  */
 
 const ObjectSync = (function() {
+    // ── Field name compression for network traffic ─────────────────────────
+    // Maps readable field names to short wire names. Applied at the sync
+    // boundary (compress before send, expand after receive) so all game
+    // logic uses the full readable names internally.
+    const FIELD_MAP = {
+        type: 't', x: 'x', y: 'y', angle: 'a',
+        velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',
+        thrusting: 'th', invulnerable: 'iv', colorIndex: 'ci',
+        memberId: 'mi', score: 'sc', hitCount: 'hc',
+        radius: 'r', seed: 'sd',
+        lifetime: 'lt', ownerMemberId: 'om',
+        pendingHit: 'ph', hitTargetId: 'ht', hitImpactTorque: 'hi',
+        gameStarted: 'gs', wave: 'w', state: 'st', lives: 'lv',
+        speedMultiplier: 'sm', waveDelayTimer: 'wd',
+        processedHits: 'pi', processedScores: 'ps',
+        groupScore: 'gr', peakShipCount: 'pk'
+    };
+    const REVERSE_MAP = Object.fromEntries(
+        Object.entries(FIELD_MAP).map(([k, v]) => [v, k])
+    );
+
+    function compressData(data) {
+        if (!data) return data;
+        const out = {};
+        for (const key in data) {
+            out[FIELD_MAP[key] || key] = data[key];
+        }
+        return out;
+    }
+
+    function expandData(data) {
+        if (!data) return data;
+        const out = {};
+        for (const key in data) {
+            out[REVERSE_MAP[key] || key] = data[key];
+        }
+        return out;
+    }
+
     // Local object registry
     const objects = new Map();
     
@@ -300,6 +339,7 @@ const ObjectSync = (function() {
 
         if (session.objects) {
             for (const obj of session.objects) {
+                obj.data = expandData(obj.data);
                 registerObject(obj, false);
             }
         }
@@ -320,6 +360,7 @@ const ObjectSync = (function() {
      */
     function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
+        objectInfo.data = expandData(objectInfo.data);
         
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -356,6 +397,7 @@ const ObjectSync = (function() {
         }
         // Updates contain only id, data, version (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
+            update.data = expandData(update.data);
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
@@ -492,6 +534,7 @@ const ObjectSync = (function() {
             const serverObjectIds = new Set();
             for (const obj of (snapshot.objects || [])) {
                 serverObjectIds.add(obj.id);
+                obj.data = expandData(obj.data);
                 
                 const existing = objects.get(obj.id);
                 if (existing) {
@@ -556,10 +599,11 @@ const ObjectSync = (function() {
         }
 
         try {
-            const response = await SessionClient.createObject(data, scope, ownerMemberId);
+            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId);
             if (!response || !response.objectInfo) return null;
 
             const objectInfo = response.objectInfo;
+            objectInfo.data = expandData(objectInfo.data);
 
             // Auto-cleanup: if caller's object was destroyed during async creation
             if (isStillNeeded && !isStillNeeded()) {
@@ -600,7 +644,8 @@ const ObjectSync = (function() {
         }
 
         try {
-            const createdInfos = await SessionClient.replaceObject(deleteObjectId, replacements, scope, ownerMemberId);
+            const compressedReplacements = replacements.map(r => compressData(r));
+            const createdInfos = await SessionClient.replaceObject(deleteObjectId, compressedReplacements, scope, ownerMemberId);
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {
@@ -633,7 +678,7 @@ const ObjectSync = (function() {
             updateTypeIndex(obj, oldType, data.type);
         }
 
-        // Queue for batch sync (expectedVersion resolved at flush time, not here)
+        // Queue for batch sync
         const existingUpdate = pendingUpdates.find(u => u.objectId === objectId);
         if (existingUpdate) {
             Object.assign(existingUpdate.data, data);
@@ -731,8 +776,7 @@ const ObjectSync = (function() {
 
     /**
      * Flush all pending updates to the server.
-     * Resolves expectedVersion at flush time from current object state to avoid
-     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
+     * Guarded to prevent overlapping flushes.
      *
      * Delta encoding defers lastSentData updates until the server confirms the batch.
      * On partial success, only confirmed objects update their delta baseline.
@@ -756,24 +800,18 @@ const ObjectSync = (function() {
             for (const update of pendingUpdates) {
                 const delta = computeDelta(update.objectId, update.data, forceFullSync);
                 if (delta) {
-                    const obj = objects.get(update.objectId);
                     updates.push({
                         objectId: update.objectId,
-                        data: delta,
-                        expectedVersion: obj ? obj.version : undefined
+                        data: delta
                     });
                     sentDeltas.set(update.objectId, delta);
                 }
             }
         } else {
-            updates = pendingUpdates.map(update => {
-                const obj = objects.get(update.objectId);
-                return {
-                    objectId: update.objectId,
-                    data: update.data,
-                    expectedVersion: obj ? obj.version : undefined
-                };
-            });
+            updates = pendingUpdates.map(update => ({
+                objectId: update.objectId,
+                data: update.data
+            }));
         }
         pendingUpdates = [];
 
@@ -782,8 +820,13 @@ const ObjectSync = (function() {
         flushInProgress = true;
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
+        // Compress field names for the wire — game logic stays readable
+        const wireUpdates = updates.map(u => ({
+            objectId: u.objectId,
+            data: compressData(u.data)
+        }));
         try {
-            const response = await SessionClient.updateObjects(updates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
+            const response = await SessionClient.updateObjects(wireUpdates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
             // Capture response timestamp immediately — before processing
             // versions or sequences — so RTT reflects only the network
             // round-trip and not client-side processing overhead.

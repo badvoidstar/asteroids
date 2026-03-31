@@ -117,46 +117,6 @@ public class ObjectServiceTests : TestBase
     }
 
     [Fact]
-    public void UpdateObject_WithExpectedVersion_ShouldSucceed()
-    {
-        // Arrange
-        var (session, creator) = CreateTestSession();
-        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
-        {
-            ["x"] = 100.0
-        });
-
-        // Act
-        var updated = ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
-        {
-            ["x"] = 150.0
-        }, expectedVersion: 1);
-
-        // Assert
-        updated.Should().NotBeNull();
-    }
-
-    [Fact]
-    public void UpdateObject_WithWrongVersion_ShouldFail()
-    {
-        // Arrange
-        var (session, creator) = CreateTestSession();
-        var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?>
-        {
-            ["x"] = 100.0
-        });
-
-        // Act
-        var updated = ObjectService.UpdateObject(session.Id, obj!.Id, new Dictionary<string, object?>
-        {
-            ["x"] = 150.0
-        }, expectedVersion: 999);
-
-        // Assert
-        updated.Should().BeNull();
-    }
-
-    [Fact]
     public void UpdateObjects_ShouldBatchUpdate()
     {
         // Arrange
@@ -452,35 +412,4 @@ public class ObjectServiceTests : TestBase
         m2.NewVersion.Should().Be(2); // 1 (create) + 1 migration = 2
     }
 
-    [Fact]
-    public void UpdateObjects_WithVersionMismatch_ShouldPartiallySucceed()
-    {
-        // Arrange — simulates version drift where one object's version has advanced
-        var (session, creator) = CreateTestSession();
-        var obj1 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
-        var obj2 = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member, new Dictionary<string, object?> { ["x"] = 0 });
-
-        // Advance obj2's version by updating it directly
-        ObjectService.UpdateObject(session.Id, obj2!.Id, new Dictionary<string, object?> { ["x"] = 50 });
-        // obj2 is now at version 2
-
-        var updates = new List<ObjectUpdate>
-        {
-            new(obj1!.Id, new Dictionary<string, object?> { ["x"] = 100 }, ExpectedVersion: 1), // correct version
-            new(obj2.Id, new Dictionary<string, object?> { ["x"] = 200 }, ExpectedVersion: 1)   // stale version (should be 2)
-        };
-
-        // Act
-        var results = ObjectService.UpdateObjects(session.Id, creator.Id, updates).ToList();
-
-        // Assert — only obj1 should be updated; obj2 rejected due to version mismatch
-        results.Should().HaveCount(1);
-        results[0].Id.Should().Be(obj1.Id);
-        results[0].Data["x"].Should().Be(100);
-
-        // obj2 should remain unchanged
-        var obj2State = ObjectService.GetObject(session.Id, obj2.Id);
-        obj2State!.Data["x"].Should().Be(50);
-        obj2State.Version.Should().Be(2);
-    }
 }

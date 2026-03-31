@@ -29,7 +29,7 @@ public interface IObjectService
     /// <summary>
     /// Updates an existing object (no ownership enforcement — use <see cref="UpdateObjects"/> for authoritative updates).
     /// </summary>
-    SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? expectedVersion = null);
+    SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data);
 
     /// <summary>
     /// Batch updates multiple objects owned by the specified member.
@@ -87,8 +87,7 @@ public record ReplacementObjectSpec(
 /// </summary>
 public record ObjectUpdate(
     Guid ObjectId,
-    Dictionary<string, object?> Data,
-    long? ExpectedVersion = null
+    Dictionary<string, object?> Data
 );
 
 /// <summary>

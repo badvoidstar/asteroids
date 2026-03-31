@@ -78,8 +78,7 @@ public record ObjectUpdateInfo(
 [MessagePackObject]
 public record ObjectUpdateRequest(
     [property: Key("objectId")] Guid ObjectId,
-    [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("expectedVersion")] long? ExpectedVersion = null);
+    [property: Key("data")] Dictionary<string, object?> Data);
 
 [MessagePackObject]
 public record ObjectReplacedEvent(

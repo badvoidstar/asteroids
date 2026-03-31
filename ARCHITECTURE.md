@@ -185,31 +185,28 @@ flowchart TB
     L9 -->|No| L11
 ```
 
-## ObjectService: Optimistic Concurrency
+## ObjectService: Update Flow
 
 ```mermaid
 flowchart TB
-    subgraph "UpdateObject (single)"
-        U1["UpdateObject(sessionId, objectId,<br/>data, expectedVersion)"]
+    subgraph "UpdateObject (single, no ownership check)"
+        U1["UpdateObject(sessionId, objectId, data)"]
         U2{"Session exists?<br/>Object exists?"}
-        U3{"expectedVersion provided<br/>AND obj.Version ≠ expected?"}
         U4["Merge data into obj.Data<br/>obj.Version++<br/>obj.UpdatedAt = now"]
         U5["Return updated SessionObject"]
         UF["Return null (failure)"]
 
         U1 --> U2
         U2 -->|No| UF
-        U2 -->|Yes| U3
-        U3 -->|Mismatch| UF
-        U3 -->|Match or none| U4 --> U5
+        U2 -->|Yes| U4 --> U5
     end
 
-    subgraph "UpdateObjects (batch)"
+    subgraph "UpdateObjects (batch, ownership enforced)"
         B1["For each update in batch:"]
-        B2{"Object exists AND<br/>version matches?"}
+        B2{"Object exists AND<br/>owned by caller?"}
         B3["Merge, Version++"]
         B4["Skip (continue)"]
-        B5["Return list of ONLY<br/>successfully updated objects<br/>(partial success allowed)"]
+        B5["Return list of ONLY<br/>successfully updated objects"]
 
         B1 --> B2
         B2 -->|Yes| B3 --> B5
@@ -462,7 +459,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph "SessionObject"
-        OBJ["Id: Guid<br/>Type: string<br/>Scope: Member | Session<br/>CreatorMemberId: Guid (immutable)<br/>OwnerMemberId: Guid (mutable)<br/>Version: long (optimistic concurrency)<br/>Data: Dictionary&lt;string, object?&gt;"]
+        OBJ["Id: Guid<br/>Type: string<br/>Scope: Member | Session<br/>CreatorMemberId: Guid (immutable)<br/>OwnerMemberId: Guid (mutable)<br/>Version: long (change counter)<br/>Data: Dictionary&lt;string, object?&gt;"]
     end
 
     subgraph "Member Departure"
@@ -724,6 +721,8 @@ sequenceDiagram
     end
 
     Note over OS: Full sync forced every 6000 frames<br/>(FULL_SYNC_INTERVAL) — bypasses delta,<br/>sends complete object state
+
+    Note over OS: Field name compression (FIELD_MAP) is applied<br/>after delta computation — wire payloads use short<br/>keys (e.g. velocityX→vx) while game logic uses<br/>readable names. expandData() reverses on receive.
 ```
 
 ## Type Index (ObjectSync)

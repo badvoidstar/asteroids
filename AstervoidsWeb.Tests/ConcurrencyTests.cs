@@ -134,22 +134,20 @@ public class ConcurrencyTests : TestBase
     // ── Object concurrency ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Invariant: two concurrent UpdateObjects calls with the same expected version
-    /// must not both succeed — only the first commit wins.
+    /// Two concurrent UpdateObjects calls from the same owner both succeed (last-write-wins)
+    /// since ownership is the sole guard — no optimistic concurrency check.
     /// </summary>
     [Fact]
-    public async Task ConcurrentUpdates_SameExpectedVersion_OnlyOneSucceeds()
+    public async Task ConcurrentUpdates_SameOwner_BothSucceed()
     {
         // Arrange
         var (session, creator) = CreateTestSession();
         var obj = ObjectService.CreateObject(session.Id, creator.Id, ObjectScope.Member,
             new Dictionary<string, object?> { ["x"] = 0 });
 
-        const int expectedVersion = 1;
-
-        // Act — two concurrent updates, both claiming version 1
-        var update1 = new ObjectUpdate(obj!.Id, new Dictionary<string, object?> { ["x"] = 100 }, expectedVersion);
-        var update2 = new ObjectUpdate(obj.Id, new Dictionary<string, object?> { ["x"] = 200 }, expectedVersion);
+        // Act — two concurrent updates from the same owner
+        var update1 = new ObjectUpdate(obj!.Id, new Dictionary<string, object?> { ["x"] = 100 });
+        var update2 = new ObjectUpdate(obj.Id, new Dictionary<string, object?> { ["x"] = 200 });
 
         var task1 = Task.Run(() => ObjectService.UpdateObjects(session.Id, creator.Id, [update1]).ToList());
         var task2 = Task.Run(() => ObjectService.UpdateObjects(session.Id, creator.Id, [update2]).ToList());
@@ -157,16 +155,12 @@ public class ConcurrencyTests : TestBase
         var results1 = await task1;
         var results2 = await task2;
 
-        // Assert — exactly one succeeds; version incremented exactly once
+        // Assert — both succeed; version incremented twice (once per update)
         var totalSuccesses = results1.Count + results2.Count;
-        totalSuccesses.Should().Be(1, "only one of the two concurrent updates may commit");
+        totalSuccesses.Should().Be(2, "both updates succeed since ownership is the sole guard");
 
         var stored = ObjectService.GetObject(session.Id, obj.Id)!;
-        stored.Version.Should().Be(2, "version must be incremented exactly once");
-
-        // The winning update's value must be stored
-        var winnerValue = results1.Count == 1 ? 100 : 200;
-        stored.Data["x"].Should().Be(winnerValue);
+        stored.Version.Should().Be(3, "version must be incremented twice (one per update)");
     }
 
     /// <summary>
@@ -212,7 +206,7 @@ public class ConcurrencyTests : TestBase
         // Act — server leaves (asteroid migrates to client) THEN server tries to update
         SessionService.LeaveSession("connection-1");
 
-        var update = new ObjectUpdate(asteroid!.Id, new Dictionary<string, object?> { ["x"] = 99.0 }, null);
+        var update = new ObjectUpdate(asteroid!.Id, new Dictionary<string, object?> { ["x"] = 99.0 });
         var updateResult = ObjectService.UpdateObjects(session.Id, server.Id, [update]).ToList();
 
         // Assert — update must be rejected because server.Id no longer owns the asteroid
