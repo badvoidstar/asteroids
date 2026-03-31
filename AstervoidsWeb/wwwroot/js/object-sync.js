@@ -633,7 +633,7 @@ const ObjectSync = (function() {
             updateTypeIndex(obj, oldType, data.type);
         }
 
-        // Queue for batch sync (expectedVersion resolved at flush time, not here)
+        // Queue for batch sync
         const existingUpdate = pendingUpdates.find(u => u.objectId === objectId);
         if (existingUpdate) {
             Object.assign(existingUpdate.data, data);
@@ -731,8 +731,7 @@ const ObjectSync = (function() {
 
     /**
      * Flush all pending updates to the server.
-     * Resolves expectedVersion at flush time from current object state to avoid
-     * stale versions from queue-time capture. Guarded to prevent overlapping flushes.
+     * Guarded to prevent overlapping flushes.
      *
      * Delta encoding defers lastSentData updates until the server confirms the batch.
      * On partial success, only confirmed objects update their delta baseline.
@@ -756,24 +755,18 @@ const ObjectSync = (function() {
             for (const update of pendingUpdates) {
                 const delta = computeDelta(update.objectId, update.data, forceFullSync);
                 if (delta) {
-                    const obj = objects.get(update.objectId);
                     updates.push({
                         objectId: update.objectId,
-                        data: delta,
-                        expectedVersion: obj ? obj.version : undefined
+                        data: delta
                     });
                     sentDeltas.set(update.objectId, delta);
                 }
             }
         } else {
-            updates = pendingUpdates.map(update => {
-                const obj = objects.get(update.objectId);
-                return {
-                    objectId: update.objectId,
-                    data: update.data,
-                    expectedVersion: obj ? obj.version : undefined
-                };
-            });
+            updates = pendingUpdates.map(update => ({
+                objectId: update.objectId,
+                data: update.data
+            }));
         }
         pendingUpdates = [];
 

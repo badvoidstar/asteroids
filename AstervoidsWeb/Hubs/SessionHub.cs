@@ -327,7 +327,7 @@ public class SessionHub : Hub
         var (member, _) = ctx.Value;
 
         // Map hub request type to service type; ownership enforcement is inside the service.
-        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data, u.ExpectedVersion));
+        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data));
         var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates).ToList();
 
         var objectInfos = updatedObjects.Select(ToObjectInfo).ToList();
