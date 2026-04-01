@@ -99,7 +99,7 @@ graph TB
     subgraph "SessionCleanupService (BackgroundService)"
         direction TB
         SCS_OPS["Runs every 10 seconds<br/>Empty timeout: destroy sessions with no members for N seconds<br/>Absolute timeout: destroy sessions exceeding max lifetime<br/>Notifies connected members via SignalR OnSessionExpired<br/>Broadcasts OnSessionsChanged on any cleanup"]
-        SCS_CFG["Config (SessionSettings):<br/>EmptyTimeoutSeconds: 60<br/>AbsoluteTimeoutMinutes: 20"]
+        SCS_CFG["Config (SessionSettings):<br/>EmptyTimeoutSeconds: 30<br/>AbsoluteTimeoutMinutes: 20"]
     end
 ```
 
@@ -762,7 +762,7 @@ sequenceDiagram
 
     Note over C,SR: Connection lost (network interruption)
 
-    SR->>SR: withAutomaticReconnect<br/>Exponential backoff: 1s, 2s, 4s, 8s, 16s<br/>Max 5 attempts, cap at 30s
+    SR->>SR: withAutomaticReconnect<br/>Linear 1s interval<br/>Max 10 attempts (10s window)
 
     SR->>C: onreconnecting(error)
 

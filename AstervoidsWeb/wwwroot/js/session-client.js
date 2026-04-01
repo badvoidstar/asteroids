@@ -9,8 +9,8 @@ const SessionClient = (function() {
     let currentMember = null;
     let lastSessionId = null; // Track for auto-rejoin after unexpected disconnect
     let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const baseReconnectDelay = 1000;
+    const maxReconnectAttempts = 10;
+    const reconnectDelay = 1000;
 
     // Event callbacks
     const callbacks = {
@@ -65,9 +65,9 @@ const SessionClient = (function() {
                 .withAutomaticReconnect({
                     nextRetryDelayInMilliseconds: retryContext => {
                         if (retryContext.previousRetryCount >= maxReconnectAttempts) {
-                            return null; // Stop retrying
+                            return null; // Stop retrying — triggers onclose → auto-rejoin
                         }
-                        return Math.min(baseReconnectDelay * Math.pow(2, retryContext.previousRetryCount), 30000);
+                        return reconnectDelay;
                     }
                 })
                 .configureLogging(signalR.LogLevel.Information)
@@ -76,10 +76,9 @@ const SessionClient = (function() {
             // Register event handlers
             setupEventHandlers();
 
-            // Mobile browsers suspend connections when backgrounded.
-            // Match server-side timeouts: ClientTimeoutInterval=90s, KeepAliveInterval=45s.
-            connection.serverTimeoutInMilliseconds = 90000;
-            connection.keepAliveIntervalInMilliseconds = 45000;
+            // Match server-side timeouts: ClientTimeoutInterval=20s, KeepAliveInterval=10s.
+            connection.serverTimeoutInMilliseconds = 20000;
+            connection.keepAliveIntervalInMilliseconds = 10000;
 
             await connection.start();
             // console.log('[SessionClient] Connected to session hub');
