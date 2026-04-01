@@ -15,6 +15,7 @@ const SessionClient = (function() {
     // Event callbacks
     const callbacks = {
         onConnected: null,
+        onReconnecting: null,
         onDisconnected: null,
         onSessionCreated: null,
         onSessionJoined: null,
@@ -131,6 +132,9 @@ const SessionClient = (function() {
 
         connection.onreconnecting(guard(error => {
             // console.log('[SessionClient] Reconnecting...', error);
+            if (callbacks.onReconnecting) {
+                callbacks.onReconnecting(error);
+            }
         }));
 
         connection.onreconnected(guard(connectionId => {

@@ -99,6 +99,36 @@
             display: flex;
         }
 
+        #reconnecting-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #fff;
+            z-index: 10;
+        }
+
+        #reconnecting-overlay.visible {
+            display: flex;
+        }
+
+        #reconnecting-overlay h1 {
+            font-size: 48px;
+            margin-bottom: 30px;
+            letter-spacing: 4px;
+        }
+
+        #reconnecting-overlay .status-text {
+            font-size: 20px;
+            color: #888;
+        }
+
         #pause-menu h1 {
             font-size: 48px;
             margin-bottom: 30px;
@@ -499,6 +529,12 @@
             <div class="menu-item desktop-only"><span>SPACE</span> - Shoot</div>
             <div class="menu-item touch-only">Tap <span>❚❚</span> to Resume</div>
             <div class="menu-item touch-only"><button id="pause-restart-btn">RESTART</button></div>
+        </div>
+
+        <!-- Reconnecting overlay (shown when multiplayer connection is lost during gameplay) -->
+        <div id="reconnecting-overlay">
+            <h1>CONNECTION LOST</h1>
+            <div class="status-text">Reconnecting...</div>
         </div>
 
         <!-- Start screen overlay -->
@@ -2358,7 +2394,9 @@
             processedPendingBullets: new Set()  // Track pendingHit bullets we've already processed
         },
         // Cosmetic astervoids for start screen (separate from game astervoids)
-        cosmeticAstervoids: []
+        cosmeticAstervoids: [],
+        // Connection-loss flag: true when multiplayer connection is lost during gameplay
+        connectionLost: false
     };
     
     // Helper to check if in session mode
@@ -2399,6 +2437,9 @@
 
     // Pause menu element reference
     const pauseMenu = document.getElementById('pause-menu');
+    
+    // Reconnecting overlay element reference
+    const reconnectingOverlay = document.getElementById('reconnecting-overlay');
     
     // Start screen element reference
     const startScreen = document.getElementById('start-screen');
@@ -3729,15 +3770,23 @@
         const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
         const dt = Math.min(elapsed / targetFrameTime, 3); // Cap at 3x to prevent huge jumps
         
+        // Connection-loss freeze: when multiplayer connection is lost, skip all
+        // gameplay updates so the player doesn't continue in a broken state where
+        // interactions with non-owned objects silently fail. The render phase
+        // still runs so the player sees the frozen game under the overlay.
+        const frozenForReconnect = isSessionMode() && game.connectionLost;
+
         // Tick ObjectSync frame counter for frame-count-based network sends
-        if (isSessionMode()) {
+        if (isSessionMode() && !frozenForReconnect) {
             ObjectSync.tick(elapsed / 1000);
         }
         
         // --- UPDATE PHASE ---
         
         // Handle player input
-        handleInput(dt);
+        if (!frozenForReconnect) {
+            handleInput(dt);
+        }
         
         // Update cosmetic astervoids only on start screen (not in session)
         if (game.state === 'start' && !isSessionMode()) {
@@ -3750,7 +3799,7 @@
         // game.state tracks the actual game state for both spectators and entered players,
         // so no separate lobby spectator paths are needed for state management.
         const lobbySpectating = isLobbySpectating();
-        if (game.state === 'playing' || game.state === 'waveDelay') {
+        if (!frozenForReconnect && (game.state === 'playing' || game.state === 'waveDelay')) {
 
             // --- GAMEPLAY (only when lives > 0) ---
             if (game.lives > 0) {
@@ -3877,7 +3926,7 @@
         // the GameState object to transition game.state to the actual state.
         // This runs once — after the first sync, game.state becomes 'playing'/'waveDelay'
         // and the main game loop block above takes over.
-        if (game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
+        if (!frozenForReconnect && game.state === 'lobby' && isSessionMode() && sessionPicker.gameStarted) {
             updateGameStateFromSync();
             updateHUD();
         }
@@ -4653,6 +4702,8 @@
         game.wave = 0;
         spawningWave = false;
         pauseMenu.classList.remove('visible');
+        reconnectingOverlay.classList.remove('visible');
+        game.connectionLost = false;
         startScreen.classList.remove('hidden');
 
         // Stop audio
@@ -4776,6 +4827,9 @@
                             obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
                         );
                         sessionPicker.connected = true;
+                        game.connectionLost = false;
+                        game.lastFrameTime = 0; // Reset to prevent delta time jump
+                        reconnectingOverlay.classList.remove('visible');
                         resizeCanvas(true);
 
                         if (wasPlaying && sessionPicker.gameStarted) {
@@ -4808,6 +4862,28 @@
         }
     }
 
+    // Freeze gameplay when SignalR enters reconnecting state
+    SessionClient.on('onReconnecting', (error) => {
+        if (isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+            game.connectionLost = true;
+            reconnectingOverlay.classList.add('visible');
+            // Stop audio while frozen
+            AudioSystem.beat.stop();
+            AudioSystem.thrustSound.stop();
+            if (game.ship) game.ship.thrusting = false;
+        }
+    });
+
+    // Clear connection-lost state when SignalR reconnects (or initial connect)
+    SessionClient.on('onConnected', () => {
+        if (game.connectionLost) {
+            game.connectionLost = false;
+            game.lastFrameTime = 0; // Reset to prevent delta time jump
+            reconnectingOverlay.classList.remove('visible');
+        }
+        sessionPicker.connected = true;
+    });
+
     SessionClient.on('onDisconnected', (error) => {
         sessionPicker.connected = false;
         const lostSessionId = sessionPicker.currentSessionId;
@@ -4815,6 +4891,15 @@
         sessionPicker.isServer = false;
         sessionPicker.gameStarted = false;
         
+        // Ensure gameplay is frozen if still in a playing state
+        if (lostSessionId && (game.state === 'playing' || game.state === 'waveDelay')) {
+            game.connectionLost = true;
+            reconnectingOverlay.classList.add('visible');
+            AudioSystem.beat.stop();
+            AudioSystem.thrustSound.stop();
+            if (game.ship) game.ship.thrusting = false;
+        }
+
         if (lostSessionId) {
             // Lost connection while in a session — attempt auto-rejoin
             attemptAutoRejoin(lostSessionId);
