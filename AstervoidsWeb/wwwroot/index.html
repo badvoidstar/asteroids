@@ -4876,7 +4876,10 @@
 
     // Clear connection-lost state when SignalR reconnects (or initial connect)
     SessionClient.on('onConnected', () => {
-        if (game.connectionLost) {
+        if (game.connectionLost && SessionClient.isInSession()) {
+            // Only unfreeze here for SignalR auto-reconnect (member still in session).
+            // For full disconnect + auto-rejoin, attemptAutoRejoin clears the flag
+            // after joinSession() succeeds, ensuring networking is fully restored.
             game.connectionLost = false;
             game.lastFrameTime = 0; // Reset to prevent delta time jump
             reconnectingOverlay.classList.remove('visible');
