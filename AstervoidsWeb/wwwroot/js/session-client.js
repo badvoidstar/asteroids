@@ -491,6 +491,16 @@ const SessionClient = (function() {
         return lastSessionId;
     }
 
+    /**
+     * Clear stale session/member state without disconnecting.
+     * Used when reconciliation fails after auto-reconnect: the transport is alive
+     * but the server no longer recognizes this connection as a session member.
+     */
+    function clearSessionState() {
+        currentSession = null;
+        currentMember = null;
+    }
+
     // Public API
     return {
         connect,
@@ -509,7 +519,8 @@ const SessionClient = (function() {
         getCurrentMember,
         isConnected,
         isInSession,
-        getLastSessionId
+        getLastSessionId,
+        clearSessionState
     };
 })();
 

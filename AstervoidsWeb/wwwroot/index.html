@@ -4456,6 +4456,26 @@
                         updatePickerButtons();
                     }
                 });
+                // Handle reconciliation failure after auto-reconnect: the transport
+                // reconnected but the server already processed our disconnect (member
+                // removed). Trigger full rejoin to restore session membership.
+                ObjectSync.on('onReconciliationFailed', () => {
+                    console.warn('[Session] Reconciliation failed — server no longer recognizes this connection. Triggering full rejoin.');
+                    const lostSessionId = sessionPicker.currentSessionId || SessionClient.getLastSessionId();
+                    if (lostSessionId) {
+                        // Re-freeze gameplay: onConnected may have unfrozen the game,
+                        // but the session is broken. Keep the player frozen until rejoin.
+                        if (game.state === 'playing' || game.state === 'waveDelay') {
+                            game.connectionLost = true;
+                            reconnectingOverlay.classList.add('visible');
+                        }
+                        // Clear stale session state so SessionClient knows we're not in a session
+                        SessionClient.clearSessionState();
+                        attemptAutoRejoin(lostSessionId);
+                    } else {
+                        returnToStartScreen('Session lost during reconnection');
+                    }
+                });
                 // Apply configured sync timing
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
