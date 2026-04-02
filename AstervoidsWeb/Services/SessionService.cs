@@ -412,12 +412,10 @@ public class SessionService : ISessionService
         _memberToSession.TryRemove(memberId, out _);
         session.Members.TryRemove(memberId, out _);
 
-        // Delete all objects owned by the evicted member (member- and session-scoped).
-        // Session-scoped objects will be re-adopted by the new joiner via
-        // AdoptOrphanedObjects if the session becomes empty, or will remain
-        // orphaned-owner objects that AdoptOrphanedObjects picks up.
-        // Instead of deleting session-scoped objects, just leave them — they'll be
-        // adopted after the new member joins.
+        // Clean up objects owned by the evicted member:
+        // - Member-scoped objects are deleted (ship, bullets — not useful after eviction).
+        // - Session-scoped objects are left in place for adoption by the new joiner
+        //   via AdoptOrphanedObjects (asteroids, GameState, etc.).
         foreach (var obj in session.Objects.Values.ToList())
         {
             if (obj.OwnerMemberId != memberId)
