@@ -20,8 +20,14 @@ public interface ISessionService
     /// </summary>
     /// <param name="sessionId">The session to join.</param>
     /// <param name="connectionId">SignalR connection ID of the joining member.</param>
+    /// <param name="evictMemberId">
+    /// Optional member ID to evict before joining (for reconnection scenarios where the
+    /// server hasn't yet detected the old connection's death). If the member exists in the
+    /// session and its connection differs from <paramref name="connectionId"/>, it is
+    /// removed atomically before the new member is added.
+    /// </param>
     /// <returns>Result indicating success/failure with session and member if successful.</returns>
-    JoinSessionResult JoinSession(Guid sessionId, string connectionId);
+    JoinSessionResult JoinSession(Guid sessionId, string connectionId, Guid? evictMemberId = null);
 
     /// <summary>
     /// Removes a member from their session, performs server promotion if needed, and

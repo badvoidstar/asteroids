@@ -328,11 +328,11 @@ const SessionClient = (function() {
     /**
      * Join an existing session.
      */
-    async function joinSession(sessionId) {
+    async function joinSession(sessionId, evictMemberId = null) {
         ensureConnected();
 
         try {
-            const response = await connection.invoke('JoinSession', sessionId);
+            const response = await connection.invoke('JoinSession', sessionId, evictMemberId);
             if (!response) {
                 // console.log('[SessionClient] JoinSession failed - session full or already in a session');
                 return null;

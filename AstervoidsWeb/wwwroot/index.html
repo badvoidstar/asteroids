@@ -4792,6 +4792,10 @@
         if (rejoinInProgress) return;
         rejoinInProgress = true;
         const wasPlaying = game.state === 'playing' || game.state === 'waveDelay';
+        // Capture old memberId before reconnection so the server can evict the stale
+        // member if it hasn't detected the dead connection yet (race condition: server's
+        // ClientTimeoutInterval can be longer than the client's reconnect retry window).
+        const oldMemberId = game.sessionInfo?.memberId ?? null;
         setPickerStatus('Connection lost - reconnecting...', 'error');
 
         const maxAttempts = 3;
@@ -4809,8 +4813,8 @@
                     }
                     if (!SessionClient.isConnected()) continue;
 
-                    // Try to rejoin the same session
-                    const result = await SessionClient.joinSession(sessionId);
+                    // Try to rejoin the same session, evicting the stale old member
+                    const result = await SessionClient.joinSession(sessionId, oldMemberId);
                     if (result) {
                         // Successfully rejoined — restore game/lobby state
                         game.mode = 'session';

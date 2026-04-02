@@ -118,7 +118,7 @@ public class SessionService : ISessionService
         }
     }
 
-    public JoinSessionResult JoinSession(Guid sessionId, string connectionId)
+    public JoinSessionResult JoinSession(Guid sessionId, string connectionId, Guid? evictMemberId = null)
     {
         lock (_sessionLock)
         {
@@ -144,6 +144,22 @@ public class SessionService : ISessionService
                     _logger?.LogWarning("JoinSession failed: session {SessionId} is not active (state: {State})",
                         sessionId, session.LifecycleState);
                     return JoinSessionFailure("Session is no longer available.");
+                }
+
+                // ── Evict stale member (reconnection support) ─────────────────────
+                // When a client reconnects after a network drop, the server may not
+                // have detected the old connection's death yet (up to ClientTimeoutInterval).
+                // The client passes its old memberId so we can evict the stale entry
+                // before adding the new one, avoiding a window where objects are owned
+                // by a ghost member.
+                if (evictMemberId.HasValue && session.Members.TryGetValue(evictMemberId.Value, out var staleMember))
+                {
+                    // Only evict if the stale member's connection differs from the joining one
+                    // (safety: never evict the caller's own active connection)
+                    if (staleMember.ConnectionId != connectionId)
+                    {
+                        EvictMemberInternal(session, evictMemberId.Value, staleMember);
+                    }
                 }
 
                 // Check if session is full
@@ -379,6 +395,41 @@ public class SessionService : ISessionService
             return null;
 
         return _sessions.TryGetValue(sessionId, out var session) ? (memberId, session) : null;
+    }
+
+    /// <summary>
+    /// Forcefully removes a stale member from a session during reconnection.
+    /// Removes global index entries, the member from <c>session.Members</c>, and
+    /// deletes all objects owned by the member (no migration — the caller will join
+    /// immediately after and adopt orphaned session-scoped objects).
+    ///
+    /// Must be called while holding both <c>_sessionLock</c> and <c>session.SyncRoot</c>.
+    /// </summary>
+    private void EvictMemberInternal(Session session, Guid memberId, Member member)
+    {
+        // Remove from global indexes
+        _connectionToMember.TryRemove(member.ConnectionId, out _);
+        _memberToSession.TryRemove(memberId, out _);
+        session.Members.TryRemove(memberId, out _);
+
+        // Delete all objects owned by the evicted member (member- and session-scoped).
+        // Session-scoped objects will be re-adopted by the new joiner via
+        // AdoptOrphanedObjects if the session becomes empty, or will remain
+        // orphaned-owner objects that AdoptOrphanedObjects picks up.
+        // Instead of deleting session-scoped objects, just leave them — they'll be
+        // adopted after the new member joins.
+        foreach (var obj in session.Objects.Values.ToList())
+        {
+            if (obj.OwnerMemberId != memberId)
+                continue;
+            if (obj.Scope == ObjectScope.Member)
+                session.Objects.TryRemove(obj.Id, out _);
+            // Session-scoped objects are left in place for adoption
+        }
+
+        _logger?.LogInformation(
+            "Evicted stale member {MemberId} (connection {ConnectionId}) from session {SessionName} ({SessionId}) during rejoin",
+            memberId, member.ConnectionId, session.Name, session.Id);
     }
 
     /// <summary>

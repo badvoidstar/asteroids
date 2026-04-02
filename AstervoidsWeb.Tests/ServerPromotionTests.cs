@@ -438,4 +438,149 @@ public class ServerPromotionTests : TestBase
         var storedObj = ObjectService.GetObject(session.Id, obj.Id);
         storedObj!.Data["wave"].Should().Be(5);
     }
+
+    // ── Stale member eviction during rejoin ─────────────────────────────────
+
+    [Fact]
+    public void JoinWithEvict_StaleMemberEvicted_NewMemberBecomesServer()
+    {
+        // Arrange — solo player creates session
+        var (session, server) = CreateTestSession("server-conn");
+        var oldMemberId = server.Id;
+        ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState", ["wave"] = 3 });
+        ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Act — reconnect with new connectionId, evicting old member
+        var rejoinResult = SessionService.JoinSession(session.Id, "new-conn", oldMemberId);
+
+        // Assert — new member becomes Server (session was effectively empty after eviction)
+        rejoinResult.Success.Should().BeTrue();
+        rejoinResult.Member!.Role.Should().Be(MemberRole.Server);
+        session.Members.Should().HaveCount(1);
+        session.Members.Should().NotContainKey(oldMemberId);
+    }
+
+    [Fact]
+    public void JoinWithEvict_OrphanedObjectsAdopted()
+    {
+        // Arrange — solo player with session-scoped objects
+        var (session, server) = CreateTestSession("server-conn");
+        var gs = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState" });
+        var asteroid = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Act — rejoin with eviction
+        var rejoinResult = SessionService.JoinSession(session.Id, "new-conn", server.Id);
+        var newMemberId = rejoinResult.Member!.Id;
+
+        // Assert — session-scoped objects adopted by new member
+        var storedGs = ObjectService.GetObject(session.Id, gs!.Id);
+        storedGs!.OwnerMemberId.Should().Be(newMemberId);
+        var storedAsteroid = ObjectService.GetObject(session.Id, asteroid!.Id);
+        storedAsteroid!.OwnerMemberId.Should().Be(newMemberId);
+    }
+
+    [Fact]
+    public void JoinWithEvict_MemberScopedObjectsDeleted()
+    {
+        // Arrange — solo player with member-scoped objects (ship, bullets)
+        var (session, server) = CreateTestSession("server-conn");
+        var ship = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Member,
+            new Dictionary<string, object?> { ["type"] = "ship" });
+        var bullet = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Member,
+            new Dictionary<string, object?> { ["type"] = "bullet" });
+        var asteroid = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Act — rejoin with eviction
+        var rejoinResult = SessionService.JoinSession(session.Id, "new-conn", server.Id);
+
+        // Assert — member-scoped objects deleted, session-scoped adopted
+        ObjectService.GetObject(session.Id, ship!.Id).Should().BeNull();
+        ObjectService.GetObject(session.Id, bullet!.Id).Should().BeNull();
+        ObjectService.GetObject(session.Id, asteroid!.Id).Should().NotBeNull();
+        ObjectService.GetObject(session.Id, asteroid!.Id)!.OwnerMemberId
+            .Should().Be(rejoinResult.Member!.Id);
+    }
+
+    [Fact]
+    public void JoinWithEvict_DoesNotEvictDifferentMember()
+    {
+        // Arrange — two players in session
+        var (session, server, client) = CreateTestSessionWithClient("server-conn", "client-conn");
+        var bogusId = Guid.NewGuid(); // Non-existent member ID
+
+        // Act — new player joins with a bogus evict ID
+        var joinResult = SessionService.JoinSession(session.Id, "new-conn", bogusId);
+
+        // Assert — both original members still present, new member added
+        joinResult.Success.Should().BeTrue();
+        session.Members.Should().HaveCount(3);
+        session.Members.Should().ContainKey(server.Id);
+        session.Members.Should().ContainKey(client.Id);
+    }
+
+    [Fact]
+    public void JoinWithEvict_DoesNotEvictSameConnection()
+    {
+        // Arrange — solo player
+        var (session, server) = CreateTestSession("server-conn");
+
+        // Act — try to join with same connectionId and evict self
+        // (This should fail because the connection is already in a session)
+        var joinResult = SessionService.JoinSession(session.Id, "server-conn", server.Id);
+
+        // Assert — join fails (already in a session), no eviction
+        joinResult.Success.Should().BeFalse();
+        session.Members.Should().HaveCount(1);
+        session.Members.Should().ContainKey(server.Id);
+    }
+
+    [Fact]
+    public void JoinWithEvict_MultiplayerSession_EvictsOnlyTargetMember()
+    {
+        // Arrange — server + client, server creates objects
+        var (session, server, client) = CreateTestSessionWithClient("server-conn", "client-conn");
+        var serverAsteroid = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+        var clientAsteroid = ObjectService.CreateObject(session.Id, client.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Act — new connection joins, evicting server
+        var rejoinResult = SessionService.JoinSession(session.Id, "new-conn", server.Id);
+
+        // Assert — server evicted, client stays, new member joins
+        rejoinResult.Success.Should().BeTrue();
+        session.Members.Should().HaveCount(2);
+        session.Members.Should().NotContainKey(server.Id);
+        session.Members.Should().ContainKey(client.Id);
+        session.Members.Should().ContainKey(rejoinResult.Member!.Id);
+
+        // Server's asteroid is orphaned (owner no longer exists) but still in session.
+        // Client's asteroid is untouched.
+        var storedClientAsteroid = ObjectService.GetObject(session.Id, clientAsteroid!.Id);
+        storedClientAsteroid!.OwnerMemberId.Should().Be(client.Id);
+    }
+
+    [Fact]
+    public void JoinWithEvict_NewMemberCanUpdateAdoptedObjects()
+    {
+        // Arrange — solo player with GameState
+        var (session, server) = CreateTestSession("server-conn");
+        var gs = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState", ["wave"] = 1 });
+
+        // Act — rejoin with eviction, then update the adopted object
+        var rejoinResult = SessionService.JoinSession(session.Id, "new-conn", server.Id);
+        var newMemberId = rejoinResult.Member!.Id;
+        var updated = ObjectService.UpdateObjects(session.Id, newMemberId,
+            [new ObjectUpdate(gs!.Id, new Dictionary<string, object?> { ["wave"] = 5 })]).ToList();
+
+        // Assert — update succeeds
+        updated.Should().HaveCount(1);
+        ObjectService.GetObject(session.Id, gs.Id)!.Data["wave"].Should().Be(5);
+    }
 }

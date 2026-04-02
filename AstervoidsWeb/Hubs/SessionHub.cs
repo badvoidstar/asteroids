@@ -140,9 +140,17 @@ public class SessionHub : Hub
     /// <summary>
     /// Joins an existing session as a client.
     /// </summary>
-    public async Task<JoinSessionResponse?> JoinSession(Guid sessionId)
+    /// <param name="sessionId">The session to join.</param>
+    /// <param name="evictMemberId">
+    /// Optional member ID to evict before joining. Used during auto-rejoin after a
+    /// network drop: the old member may still be in the session because the server
+    /// hasn't detected the dead connection yet (up to ClientTimeoutInterval).
+    /// Passing the old member ID lets the server clean it up atomically before
+    /// adding the new member.
+    /// </param>
+    public async Task<JoinSessionResponse?> JoinSession(Guid sessionId, Guid? evictMemberId = null)
     {
-        var result = _sessionService.JoinSession(sessionId, Context.ConnectionId);
+        var result = _sessionService.JoinSession(sessionId, Context.ConnectionId, evictMemberId);
         if (!result.Success)
         {
             _logger.LogWarning("Failed to join session {SessionId}: {Error}", sessionId, result.ErrorMessage);
