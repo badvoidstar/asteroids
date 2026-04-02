@@ -311,4 +311,131 @@ public class ServerPromotionTests : TestBase
             .Should().NotContain(m => m.NewOwnerId == server.Id,
                 "departed member must not be assigned any migrated objects");
     }
+
+    // ── Orphaned object adoption on rejoin ──────────────────────────────────
+
+    [Fact]
+    public void RejoinEmptySession_OrphanedSessionScopedObjectsAdoptedByNewMember()
+    {
+        // Arrange — solo player creates session with session-scoped objects
+        var (session, server) = CreateTestSession("server-conn");
+        var gs = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState", ["wave"] = 3 });
+        var asteroid = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Server disconnects — session becomes empty, objects orphaned
+        SessionService.LeaveSession("server-conn");
+        session.Members.Should().BeEmpty();
+        session.Objects.Should().HaveCount(2,
+            "both session-scoped objects remain (member-scoped would be deleted)");
+
+        // Act — same player reconnects with a new connectionId
+        var rejoinResult = SessionService.JoinSession(session.Id, "server-conn-2");
+
+        // Assert — new member adopted orphaned objects
+        rejoinResult.Success.Should().BeTrue();
+        rejoinResult.Member!.Role.Should().Be(MemberRole.Server);
+        var newMemberId = rejoinResult.Member.Id;
+
+        var storedGs = ObjectService.GetObject(session.Id, gs!.Id);
+        storedGs.Should().NotBeNull();
+        storedGs!.OwnerMemberId.Should().Be(newMemberId,
+            "GameState should be adopted by the rejoining member");
+
+        var storedAsteroid = ObjectService.GetObject(session.Id, asteroid!.Id);
+        storedAsteroid.Should().NotBeNull();
+        storedAsteroid!.OwnerMemberId.Should().Be(newMemberId,
+            "asteroid should be adopted by the rejoining member");
+    }
+
+    [Fact]
+    public void RejoinEmptySession_AdoptedObjectsHaveIncrementedVersion()
+    {
+        // Arrange
+        var (session, server) = CreateTestSession("server-conn");
+        var obj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState" });
+        var versionBeforeLeave = obj!.Version;
+
+        SessionService.LeaveSession("server-conn");
+
+        // Act
+        SessionService.JoinSession(session.Id, "server-conn-2");
+
+        // Assert — version incremented so clients see it as updated
+        var stored = ObjectService.GetObject(session.Id, obj.Id);
+        stored!.Version.Should().Be(versionBeforeLeave + 1,
+            "adopted objects must have their version incremented");
+    }
+
+    [Fact]
+    public void RejoinEmptySession_MemberScopedObjectsNotAdopted()
+    {
+        // Arrange — create both member-scoped and session-scoped objects
+        var (session, server) = CreateTestSession("server-conn");
+        var memberObj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Member,
+            new Dictionary<string, object?> { ["type"] = "ship" });
+        var sessionObj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState" });
+
+        // Server leaves — member-scoped objects deleted, session-scoped orphaned
+        SessionService.LeaveSession("server-conn");
+
+        // Member-scoped object should be deleted
+        ObjectService.GetObject(session.Id, memberObj!.Id).Should().BeNull();
+
+        // Act — rejoin
+        var rejoinResult = SessionService.JoinSession(session.Id, "server-conn-2");
+
+        // Assert — only session-scoped object was adopted
+        var storedSession = ObjectService.GetObject(session.Id, sessionObj!.Id);
+        storedSession!.OwnerMemberId.Should().Be(rejoinResult.Member!.Id);
+    }
+
+    [Fact]
+    public void RejoinNonEmptySession_DoesNotAdoptObjects()
+    {
+        // Arrange — two players, one leaves while the other stays
+        var (session, server, client) = CreateTestSessionWithClient("server-conn", "client-conn");
+        var obj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" });
+
+        // Server leaves — object migrated to client
+        SessionService.LeaveSession("server-conn");
+        var stored = ObjectService.GetObject(session.Id, obj!.Id);
+        stored!.OwnerMemberId.Should().Be(client.Id, "object migrated to remaining client");
+
+        // Act — new player joins (non-empty session, becomes Client)
+        var joinResult = SessionService.JoinSession(session.Id, "new-conn");
+
+        // Assert — joining a non-empty session does NOT adopt objects
+        joinResult.Member!.Role.Should().Be(MemberRole.Client);
+        stored = ObjectService.GetObject(session.Id, obj.Id);
+        stored!.OwnerMemberId.Should().Be(client.Id,
+            "object should still be owned by the existing client, not the new joiner");
+    }
+
+    [Fact]
+    public void RejoinEmptySession_NewMemberCanUpdateAdoptedObjects()
+    {
+        // Arrange
+        var (session, server) = CreateTestSession("server-conn");
+        var obj = ObjectService.CreateObject(session.Id, server.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "GameState", ["wave"] = 1 });
+
+        SessionService.LeaveSession("server-conn");
+
+        // Act — rejoin and try to update the adopted object
+        var rejoinResult = SessionService.JoinSession(session.Id, "server-conn-2");
+        var newMemberId = rejoinResult.Member!.Id;
+
+        var updated = ObjectService.UpdateObjects(session.Id, newMemberId,
+            [new ObjectUpdate(obj!.Id, new Dictionary<string, object?> { ["wave"] = 5 })]).ToList();
+
+        // Assert — update succeeds (ownership is correct)
+        updated.Should().HaveCount(1);
+        var storedObj = ObjectService.GetObject(session.Id, obj.Id);
+        storedObj!.Data["wave"].Should().Be(5);
+    }
 }

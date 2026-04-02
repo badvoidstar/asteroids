@@ -154,8 +154,15 @@ public class SessionService : ISessionService
                 }
 
                 // Assign Server role if session has no members (rejoining an empty session)
-                var role = session.Members.IsEmpty ? MemberRole.Server : MemberRole.Client;
+                var wasEmpty = session.Members.IsEmpty;
+                var role = wasEmpty ? MemberRole.Server : MemberRole.Client;
                 var member = RegisterMember(connectionId, session, role);
+
+                // When rejoining an empty session, adopt orphaned session-scoped objects.
+                // These were left without a valid owner when the last member departed
+                // (HandleObjectDeparture can't migrate when there are no remaining members).
+                if (wasEmpty)
+                    AdoptOrphanedObjects(session, member.Id);
 
                 // Clear empty-session tracking since we now have a member
                 session.LastMemberLeftAt = null;
@@ -449,6 +456,41 @@ public class SessionService : ISessionService
         }
 
         return (deletedIds, migratedObjects);
+    }
+
+    /// <summary>
+    /// Reassigns orphaned session-scoped objects to the given new owner.
+    /// An object is "orphaned" when its <c>OwnerMemberId</c> no longer matches
+    /// any current session member.  This happens when the last member leaves:
+    /// <see cref="HandleObjectDeparture"/> can't migrate session-scoped objects
+    /// when <c>remainingMemberIds</c> is empty, so they stay with the departed
+    /// member's ID.  When a new member joins the empty session, this method
+    /// transfers those objects so the game can resume.
+    /// Must be called under <c>session.SyncRoot</c>.
+    /// </summary>
+    private void AdoptOrphanedObjects(Session session, Guid newOwnerId)
+    {
+        var memberIds = session.Members.Keys.ToHashSet();
+        var adopted = 0;
+
+        foreach (var obj in session.Objects.Values)
+        {
+            if (obj.Scope == ObjectScope.Session && !memberIds.Contains(obj.OwnerMemberId))
+            {
+                obj.OwnerMemberId = newOwnerId;
+                obj.Data = new Dictionary<string, object?>(obj.Data); // copy-on-write
+                obj.Version++;
+                obj.UpdatedAt = DateTime.UtcNow;
+                adopted++;
+            }
+        }
+
+        if (adopted > 0)
+        {
+            _logger?.LogInformation(
+                "Adopted {Count} orphaned session-scoped objects for new member {MemberId} in session {SessionName} ({SessionId})",
+                adopted, newOwnerId, session.Name, session.Id);
+        }
     }
 
     private string GenerateUniqueFruitName()
