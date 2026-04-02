@@ -9,12 +9,13 @@ const SessionClient = (function() {
     let currentMember = null;
     let lastSessionId = null; // Track for auto-rejoin after unexpected disconnect
     let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const baseReconnectDelay = 1000;
+    const maxReconnectAttempts = 10;
+    const reconnectDelay = 1000;
 
     // Event callbacks
     const callbacks = {
         onConnected: null,
+        onReconnecting: null,
         onDisconnected: null,
         onSessionCreated: null,
         onSessionJoined: null,
@@ -65,9 +66,9 @@ const SessionClient = (function() {
                 .withAutomaticReconnect({
                     nextRetryDelayInMilliseconds: retryContext => {
                         if (retryContext.previousRetryCount >= maxReconnectAttempts) {
-                            return null; // Stop retrying
+                            return null; // Stop retrying — triggers onclose → auto-rejoin
                         }
-                        return Math.min(baseReconnectDelay * Math.pow(2, retryContext.previousRetryCount), 30000);
+                        return reconnectDelay;
                     }
                 })
                 .configureLogging(signalR.LogLevel.Information)
@@ -76,10 +77,9 @@ const SessionClient = (function() {
             // Register event handlers
             setupEventHandlers();
 
-            // Mobile browsers suspend connections when backgrounded.
-            // Match server-side timeouts: ClientTimeoutInterval=90s, KeepAliveInterval=45s.
-            connection.serverTimeoutInMilliseconds = 90000;
-            connection.keepAliveIntervalInMilliseconds = 45000;
+            // Match server-side timeouts: ClientTimeoutInterval=20s, KeepAliveInterval=10s.
+            connection.serverTimeoutInMilliseconds = 20000;
+            connection.keepAliveIntervalInMilliseconds = 10000;
 
             await connection.start();
             // console.log('[SessionClient] Connected to session hub');
@@ -132,6 +132,9 @@ const SessionClient = (function() {
 
         connection.onreconnecting(guard(error => {
             // console.log('[SessionClient] Reconnecting...', error);
+            if (callbacks.onReconnecting) {
+                callbacks.onReconnecting(error);
+            }
         }));
 
         connection.onreconnected(guard(connectionId => {
@@ -325,11 +328,11 @@ const SessionClient = (function() {
     /**
      * Join an existing session.
      */
-    async function joinSession(sessionId) {
+    async function joinSession(sessionId, evictMemberId = null) {
         ensureConnected();
 
         try {
-            const response = await connection.invoke('JoinSession', sessionId);
+            const response = await connection.invoke('JoinSession', sessionId, evictMemberId);
             if (!response) {
                 // console.log('[SessionClient] JoinSession failed - session full or already in a session');
                 return null;
@@ -488,6 +491,16 @@ const SessionClient = (function() {
         return lastSessionId;
     }
 
+    /**
+     * Clear stale session/member state without disconnecting.
+     * Used when reconciliation fails after auto-reconnect: the transport is alive
+     * but the server no longer recognizes this connection as a session member.
+     */
+    function clearSessionState() {
+        currentSession = null;
+        currentMember = null;
+    }
+
     // Public API
     return {
         connect,
@@ -506,7 +519,8 @@ const SessionClient = (function() {
         getCurrentMember,
         isConnected,
         isInSession,
-        getLastSessionId
+        getLastSessionId,
+        clearSessionState
     };
 })();
 

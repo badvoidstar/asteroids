@@ -118,7 +118,7 @@ public class SessionService : ISessionService
         }
     }
 
-    public JoinSessionResult JoinSession(Guid sessionId, string connectionId)
+    public JoinSessionResult JoinSession(Guid sessionId, string connectionId, Guid? evictMemberId = null)
     {
         lock (_sessionLock)
         {
@@ -146,6 +146,23 @@ public class SessionService : ISessionService
                     return JoinSessionFailure("Session is no longer available.");
                 }
 
+                // ── Evict stale member (reconnection support) ─────────────────────
+                // When a client reconnects after a network drop, the server may not
+                // have detected the old connection's death yet (up to ClientTimeoutInterval).
+                // The client passes its old memberId so we can evict the stale entry
+                // before adding the new one, avoiding a window where objects are owned
+                // by a ghost member.
+                EvictionInfo? eviction = null;
+                if (evictMemberId.HasValue && session.Members.TryGetValue(evictMemberId.Value, out var staleMember))
+                {
+                    // Only evict if the stale member's connection differs from the joining one
+                    // (safety: never evict the caller's own active connection)
+                    if (staleMember.ConnectionId != connectionId)
+                    {
+                        eviction = EvictMemberInternal(session, evictMemberId.Value, staleMember);
+                    }
+                }
+
                 // Check if session is full
                 if (session.Members.Count >= _maxMembersPerSession)
                 {
@@ -154,8 +171,15 @@ public class SessionService : ISessionService
                 }
 
                 // Assign Server role if session has no members (rejoining an empty session)
-                var role = session.Members.IsEmpty ? MemberRole.Server : MemberRole.Client;
+                var wasEmpty = session.Members.IsEmpty;
+                var role = wasEmpty ? MemberRole.Server : MemberRole.Client;
                 var member = RegisterMember(connectionId, session, role);
+
+                // When rejoining an empty session, adopt orphaned session-scoped objects.
+                // These were left without a valid owner when the last member departed
+                // (HandleObjectDeparture can't migrate when there are no remaining members).
+                if (wasEmpty)
+                    AdoptOrphanedObjects(session, member.Id);
 
                 // Clear empty-session tracking since we now have a member
                 session.LastMemberLeftAt = null;
@@ -163,7 +187,7 @@ public class SessionService : ISessionService
                 _logger?.LogInformation("Member {MemberId} joined session {SessionName} ({SessionId}) as {Role}",
                     member.Id, session.Name, session.Id, role);
 
-                return new JoinSessionResult(true, session, member, null);
+                return new JoinSessionResult(true, session, member, null, eviction);
             }
         }
     }
@@ -375,6 +399,55 @@ public class SessionService : ISessionService
     }
 
     /// <summary>
+    /// Forcefully removes a stale member from a session during reconnection.
+    /// Removes global index entries, the member from <c>session.Members</c>,
+    /// promotes a new server if the evicted member was the server, and handles
+    /// object cleanup via <see cref="HandleObjectDeparture"/> — deleting
+    /// member-scoped objects and migrating session-scoped objects to remaining
+    /// members so they are not orphaned.
+    ///
+    /// Must be called while holding both <c>_sessionLock</c> and <c>session.SyncRoot</c>.
+    /// </summary>
+    private EvictionInfo EvictMemberInternal(Session session, Guid memberId, Member member)
+    {
+        // Remove from global indexes
+        _connectionToMember.TryRemove(member.ConnectionId, out _);
+        _memberToSession.TryRemove(memberId, out _);
+        session.Members.TryRemove(memberId, out _);
+
+        // ── Server promotion ───────────────────────────────────────────────────
+        // If the evicted member was the server, promote the oldest remaining
+        // member (same deterministic logic as LeaveSession).
+        Member? promotedMember = null;
+        if (member.Role == MemberRole.Server && session.Members.Count > 0)
+        {
+            var promoted = session.Members.Values
+                .OrderBy(m => m.JoinedAt)
+                .ThenBy(m => m.Id)
+                .First();
+            promoted.Role = MemberRole.Server;
+            promotedMember = promoted;
+            session.Version++;
+        }
+
+        // ── Object cleanup ─────────────────────────────────────────────────────
+        // Use the same HandleObjectDeparture logic as LeaveSession so that
+        // member-scoped objects are deleted and session-scoped objects are
+        // properly migrated to remaining members (not left orphaned).
+        var remainingMemberIds = session.Members.Keys.ToList();
+        var (deletedIds, migratedObjects) = HandleObjectDeparture(
+            session, memberId, remainingMemberIds, _distributeOrphanedObjects);
+
+        _logger?.LogInformation(
+            "Evicted stale member {MemberId} (connection {ConnectionId}) from session {SessionName} ({SessionId}) during rejoin. " +
+            "Deleted {DeletedCount} objects, migrated {MigratedCount} objects.",
+            memberId, member.ConnectionId, session.Name, session.Id,
+            deletedIds.Count, migratedObjects.Count);
+
+        return new EvictionInfo(memberId, member.ConnectionId, promotedMember, deletedIds, migratedObjects);
+    }
+
+    /// <summary>
     /// Creates a member, adds it to the session, and registers it in the lookup dictionaries.
     /// Must be called while holding either <c>_sessionLock</c> (for creates/joins)
     /// or <c>session.SyncRoot</c>.
@@ -449,6 +522,41 @@ public class SessionService : ISessionService
         }
 
         return (deletedIds, migratedObjects);
+    }
+
+    /// <summary>
+    /// Reassigns orphaned session-scoped objects to the given new owner.
+    /// An object is "orphaned" when its <c>OwnerMemberId</c> no longer matches
+    /// any current session member.  This happens when the last member leaves:
+    /// <see cref="HandleObjectDeparture"/> can't migrate session-scoped objects
+    /// when <c>remainingMemberIds</c> is empty, so they stay with the departed
+    /// member's ID.  When a new member joins the empty session, this method
+    /// transfers those objects so the game can resume.
+    /// Must be called under <c>session.SyncRoot</c>.
+    /// </summary>
+    private void AdoptOrphanedObjects(Session session, Guid newOwnerId)
+    {
+        var memberIds = session.Members.Keys.ToHashSet();
+        var adopted = 0;
+
+        foreach (var obj in session.Objects.Values)
+        {
+            if (obj.Scope == ObjectScope.Session && !memberIds.Contains(obj.OwnerMemberId))
+            {
+                obj.OwnerMemberId = newOwnerId;
+                obj.Data = new Dictionary<string, object?>(obj.Data); // copy-on-write
+                obj.Version++;
+                obj.UpdatedAt = DateTime.UtcNow;
+                adopted++;
+            }
+        }
+
+        if (adopted > 0)
+        {
+            _logger?.LogInformation(
+                "Adopted {Count} orphaned session-scoped objects for new member {MemberId} in session {SessionName} ({SessionId})",
+                adopted, newOwnerId, session.Name, session.Id);
+        }
     }
 
     private string GenerateUniqueFruitName()

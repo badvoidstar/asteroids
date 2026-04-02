@@ -40,12 +40,12 @@ builder.Services.AddResponseCompression(options =>
 //   UntrustedData security guard is enabled as recommended by the MessagePack docs.
 builder.Services.AddSignalR(options =>
 {
-    // Mobile browsers aggressively suspend WebSocket connections when backgrounded.
-    // Longer timeouts give clients more time to resume before the server declares
-    // the connection dead and removes the player from the session.
+    // This is a fast-paced game that doesn't benefit from protracted reconnection windows.
+    // The 2× relationship (20 = 2 × 10) is preserved so a single missed keep-alive ping
+    // doesn't kill the connection. Mobile recovery works well via the auto-rejoin fallback.
     // Defaults: ClientTimeoutInterval=30s, KeepAliveInterval=15s
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(90);
-    options.KeepAliveInterval = TimeSpan.FromSeconds(45);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(20);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(10);
 }).AddMessagePackProtocol(options =>
 {
     // ContractlessStandardResolver includes AttributeFormatterResolver (picks up

@@ -20,8 +20,14 @@ public interface ISessionService
     /// </summary>
     /// <param name="sessionId">The session to join.</param>
     /// <param name="connectionId">SignalR connection ID of the joining member.</param>
+    /// <param name="evictMemberId">
+    /// Optional member ID to evict before joining (for reconnection scenarios where the
+    /// server hasn't yet detected the old connection's death). If the member exists in the
+    /// session and its connection differs from <paramref name="connectionId"/>, it is
+    /// removed atomically before the new member is added.
+    /// </param>
     /// <returns>Result indicating success/failure with session and member if successful.</returns>
-    JoinSessionResult JoinSession(Guid sessionId, string connectionId);
+    JoinSessionResult JoinSession(Guid sessionId, string connectionId, Guid? evictMemberId = null);
 
     /// <summary>
     /// Removes a member from their session, performs server promotion if needed, and
@@ -157,7 +163,25 @@ public record JoinSessionResult(
     bool Success,
     Session? Session,
     Member? Member,
-    string? ErrorMessage
+    string? ErrorMessage,
+    /// <summary>
+    /// When non-null, a stale member was evicted during this join (reconnection path).
+    /// The hub must broadcast <c>OnMemberLeft</c> with this info so remaining members
+    /// can remove the ghost member's objects from their local state.
+    /// </summary>
+    EvictionInfo? Eviction = null
+);
+
+/// <summary>
+/// Information about a stale member that was evicted during <see cref="ISessionService.JoinSession"/>.
+/// Contains everything needed to broadcast an <c>OnMemberLeft</c> event to remaining members.
+/// </summary>
+public record EvictionInfo(
+    Guid EvictedMemberId,
+    string EvictedConnectionId,
+    Member? PromotedMember,
+    IReadOnlyList<Guid> DeletedObjectIds,
+    IReadOnlyList<ObjectMigration> MigratedObjects
 );
 
 /// <summary>

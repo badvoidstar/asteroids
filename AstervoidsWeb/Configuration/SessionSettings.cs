@@ -25,9 +25,9 @@ public class SessionSettings
 
     /// <summary>
     /// How long (in seconds) a session can remain empty (no connected members) before being destroyed.
-    /// Default is 60 seconds.
+    /// Default is 30 seconds.
     /// </summary>
-    public int EmptyTimeoutSeconds { get; set; } = 60;
+    public int EmptyTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
     /// Maximum lifetime (in minutes) for any session, regardless of member activity.

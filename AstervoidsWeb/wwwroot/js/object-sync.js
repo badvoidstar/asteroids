@@ -142,7 +142,8 @@ const ObjectSync = (function() {
         onObjectUpdated: null,
         onObjectDeleted: null,
         onBatchReceived: null,
-        onSyncError: null
+        onSyncError: null,
+        onReconciliationFailed: null
     };
     
     /**
@@ -520,7 +521,16 @@ const ObjectSync = (function() {
         try {
             // console.log('[ObjectSync] Reconciling state...');
             const snapshot = await SessionClient.getSessionState();
-            if (!snapshot) return;
+            if (!snapshot) {
+                // Server doesn't recognize this connection as a session member.
+                // This happens when auto-reconnect restores the transport but the
+                // server already processed the disconnect (member removed).
+                // Signal the game to trigger a full rejoin.
+                if (callbacks.onReconciliationFailed) {
+                    callbacks.onReconciliationFailed();
+                }
+                return;
+            }
             
             // Restore per-member sequences from snapshot
             memberSequences.clear();

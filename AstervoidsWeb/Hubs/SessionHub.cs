@@ -140,9 +140,17 @@ public class SessionHub : Hub
     /// <summary>
     /// Joins an existing session as a client.
     /// </summary>
-    public async Task<JoinSessionResponse?> JoinSession(Guid sessionId)
+    /// <param name="sessionId">The session to join.</param>
+    /// <param name="evictMemberId">
+    /// Optional member ID to evict before joining. Used during auto-rejoin after a
+    /// network drop: the old member may still be in the session because the server
+    /// hasn't detected the dead connection yet (up to ClientTimeoutInterval).
+    /// Passing the old member ID lets the server clean it up atomically before
+    /// adding the new member.
+    /// </param>
+    public async Task<JoinSessionResponse?> JoinSession(Guid sessionId, Guid? evictMemberId = null)
     {
-        var result = _sessionService.JoinSession(sessionId, Context.ConnectionId);
+        var result = _sessionService.JoinSession(sessionId, Context.ConnectionId, evictMemberId);
         if (!result.Success)
         {
             _logger.LogWarning("Failed to join session {SessionId}: {Error}", sessionId, result.ErrorMessage);
@@ -151,6 +159,37 @@ public class SessionHub : Hub
 
         var session = result.Session!;
         var member = result.Member!;
+
+        // ── Broadcast eviction to remaining members ────────────────────────────
+        // When a stale member was evicted during this join, notify the group
+        // BEFORE adding the new member. This ensures remaining members remove
+        // the ghost member's objects (ship, bullets) and process any migrations
+        // of session-scoped objects (asteroids). The joining member is not yet
+        // in the group, so they won't receive this — they get the full snapshot.
+        if (result.Eviction is { } eviction)
+        {
+            var evictTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            // Remove the evicted member's dead connection from the group so
+            // SignalR doesn't try to deliver to a stale transport.
+            await Groups.RemoveFromGroupAsync(eviction.EvictedConnectionId, session.Id.ToString());
+
+            await Clients.Group(session.Id.ToString()).SendAsync("OnMemberLeft",
+                new MemberLeftInfo(
+                    eviction.EvictedMemberId,
+                    eviction.PromotedMember?.Id,
+                    eviction.PromotedMember?.Role.ToString(),
+                    eviction.DeletedObjectIds,
+                    eviction.MigratedObjects
+                ),
+                eviction.EvictedMemberId, (long)0, evictTimestamp);
+
+            _logger.LogInformation(
+                "Broadcast eviction of stale member {EvictedMemberId} from session {SessionName}. " +
+                "Deleted {DeletedCount} objects, migrated {MigratedCount} objects.",
+                eviction.EvictedMemberId, session.Name,
+                eviction.DeletedObjectIds.Count, eviction.MigratedObjects.Count);
+        }
 
         // Capture snapshot BEFORE adding to group so the joining client receives a consistent
         // point-in-time view. If the snapshot were taken after AddToGroupAsync, concurrent
