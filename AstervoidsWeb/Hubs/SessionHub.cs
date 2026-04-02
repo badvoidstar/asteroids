@@ -160,6 +160,37 @@ public class SessionHub : Hub
         var session = result.Session!;
         var member = result.Member!;
 
+        // ── Broadcast eviction to remaining members ────────────────────────────
+        // When a stale member was evicted during this join, notify the group
+        // BEFORE adding the new member. This ensures remaining members remove
+        // the ghost member's objects (ship, bullets) and process any migrations
+        // of session-scoped objects (asteroids). The joining member is not yet
+        // in the group, so they won't receive this — they get the full snapshot.
+        if (result.Eviction is { } eviction)
+        {
+            var evictTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            // Remove the evicted member's dead connection from the group so
+            // SignalR doesn't try to deliver to a stale transport.
+            await Groups.RemoveFromGroupAsync(eviction.EvictedConnectionId, session.Id.ToString());
+
+            await Clients.Group(session.Id.ToString()).SendAsync("OnMemberLeft",
+                new MemberLeftInfo(
+                    eviction.EvictedMemberId,
+                    eviction.PromotedMember?.Id,
+                    eviction.PromotedMember?.Role.ToString(),
+                    eviction.DeletedObjectIds,
+                    eviction.MigratedObjects
+                ),
+                eviction.EvictedMemberId, (long)0, evictTimestamp);
+
+            _logger.LogInformation(
+                "Broadcast eviction of stale member {EvictedMemberId} from session {SessionName}. " +
+                "Deleted {DeletedCount} objects, migrated {MigratedCount} objects.",
+                eviction.EvictedMemberId, session.Name,
+                eviction.DeletedObjectIds.Count, eviction.MigratedObjects.Count);
+        }
+
         // Capture snapshot BEFORE adding to group so the joining client receives a consistent
         // point-in-time view. If the snapshot were taken after AddToGroupAsync, concurrent
         // object creations or updates would already be broadcast to the new connection, and the

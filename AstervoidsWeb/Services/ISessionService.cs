@@ -163,7 +163,25 @@ public record JoinSessionResult(
     bool Success,
     Session? Session,
     Member? Member,
-    string? ErrorMessage
+    string? ErrorMessage,
+    /// <summary>
+    /// When non-null, a stale member was evicted during this join (reconnection path).
+    /// The hub must broadcast <c>OnMemberLeft</c> with this info so remaining members
+    /// can remove the ghost member's objects from their local state.
+    /// </summary>
+    EvictionInfo? Eviction = null
+);
+
+/// <summary>
+/// Information about a stale member that was evicted during <see cref="ISessionService.JoinSession"/>.
+/// Contains everything needed to broadcast an <c>OnMemberLeft</c> event to remaining members.
+/// </summary>
+public record EvictionInfo(
+    Guid EvictedMemberId,
+    string EvictedConnectionId,
+    Member? PromotedMember,
+    IReadOnlyList<Guid> DeletedObjectIds,
+    IReadOnlyList<ObjectMigration> MigratedObjects
 );
 
 /// <summary>

@@ -152,13 +152,14 @@ public class SessionService : ISessionService
                 // The client passes its old memberId so we can evict the stale entry
                 // before adding the new one, avoiding a window where objects are owned
                 // by a ghost member.
+                EvictionInfo? eviction = null;
                 if (evictMemberId.HasValue && session.Members.TryGetValue(evictMemberId.Value, out var staleMember))
                 {
                     // Only evict if the stale member's connection differs from the joining one
                     // (safety: never evict the caller's own active connection)
                     if (staleMember.ConnectionId != connectionId)
                     {
-                        EvictMemberInternal(session, evictMemberId.Value, staleMember);
+                        eviction = EvictMemberInternal(session, evictMemberId.Value, staleMember);
                     }
                 }
 
@@ -186,7 +187,7 @@ public class SessionService : ISessionService
                 _logger?.LogInformation("Member {MemberId} joined session {SessionName} ({SessionId}) as {Role}",
                     member.Id, session.Name, session.Id, role);
 
-                return new JoinSessionResult(true, session, member, null);
+                return new JoinSessionResult(true, session, member, null, eviction);
             }
         }
     }
@@ -399,35 +400,51 @@ public class SessionService : ISessionService
 
     /// <summary>
     /// Forcefully removes a stale member from a session during reconnection.
-    /// Removes global index entries, the member from <c>session.Members</c>, and
-    /// deletes all objects owned by the member (no migration — the caller will join
-    /// immediately after and adopt orphaned session-scoped objects).
+    /// Removes global index entries, the member from <c>session.Members</c>,
+    /// promotes a new server if the evicted member was the server, and handles
+    /// object cleanup via <see cref="HandleObjectDeparture"/> — deleting
+    /// member-scoped objects and migrating session-scoped objects to remaining
+    /// members so they are not orphaned.
     ///
     /// Must be called while holding both <c>_sessionLock</c> and <c>session.SyncRoot</c>.
     /// </summary>
-    private void EvictMemberInternal(Session session, Guid memberId, Member member)
+    private EvictionInfo EvictMemberInternal(Session session, Guid memberId, Member member)
     {
         // Remove from global indexes
         _connectionToMember.TryRemove(member.ConnectionId, out _);
         _memberToSession.TryRemove(memberId, out _);
         session.Members.TryRemove(memberId, out _);
 
-        // Clean up objects owned by the evicted member:
-        // - Member-scoped objects are deleted (ship, bullets — not useful after eviction).
-        // - Session-scoped objects are left in place for adoption by the new joiner
-        //   via AdoptOrphanedObjects (asteroids, GameState, etc.).
-        foreach (var obj in session.Objects.Values.ToList())
+        // ── Server promotion ───────────────────────────────────────────────────
+        // If the evicted member was the server, promote the oldest remaining
+        // member (same deterministic logic as LeaveSession).
+        Member? promotedMember = null;
+        if (member.Role == MemberRole.Server && session.Members.Count > 0)
         {
-            if (obj.OwnerMemberId != memberId)
-                continue;
-            if (obj.Scope == ObjectScope.Member)
-                session.Objects.TryRemove(obj.Id, out _);
-            // Session-scoped objects are left in place for adoption
+            var promoted = session.Members.Values
+                .OrderBy(m => m.JoinedAt)
+                .ThenBy(m => m.Id)
+                .First();
+            promoted.Role = MemberRole.Server;
+            promotedMember = promoted;
+            session.Version++;
         }
 
+        // ── Object cleanup ─────────────────────────────────────────────────────
+        // Use the same HandleObjectDeparture logic as LeaveSession so that
+        // member-scoped objects are deleted and session-scoped objects are
+        // properly migrated to remaining members (not left orphaned).
+        var remainingMemberIds = session.Members.Keys.ToList();
+        var (deletedIds, migratedObjects) = HandleObjectDeparture(
+            session, memberId, remainingMemberIds, _distributeOrphanedObjects);
+
         _logger?.LogInformation(
-            "Evicted stale member {MemberId} (connection {ConnectionId}) from session {SessionName} ({SessionId}) during rejoin",
-            memberId, member.ConnectionId, session.Name, session.Id);
+            "Evicted stale member {MemberId} (connection {ConnectionId}) from session {SessionName} ({SessionId}) during rejoin. " +
+            "Deleted {DeletedCount} objects, migrated {MigratedCount} objects.",
+            memberId, member.ConnectionId, session.Name, session.Id,
+            deletedIds.Count, migratedObjects.Count);
+
+        return new EvictionInfo(memberId, member.ConnectionId, promotedMember, deletedIds, migratedObjects);
     }
 
     /// <summary>
