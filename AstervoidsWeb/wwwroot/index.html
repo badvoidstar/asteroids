@@ -119,25 +119,25 @@
         }
 
         #reconnecting-overlay h1 {
-            font-size: 48px;
-            margin-bottom: 30px;
-            letter-spacing: 4px;
+            font-size: clamp(24px, 5vmin, 48px);
+            margin-bottom: clamp(15px, 3vmin, 30px);
+            letter-spacing: clamp(2px, 0.5vmin, 4px);
         }
 
         #reconnecting-overlay .status-text {
-            font-size: 20px;
+            font-size: clamp(14px, 2.5vmin, 20px);
             color: #888;
         }
 
         #pause-menu h1 {
-            font-size: 48px;
-            margin-bottom: 30px;
-            letter-spacing: 4px;
+            font-size: clamp(24px, 5vmin, 48px);
+            margin-bottom: clamp(15px, 3vmin, 30px);
+            letter-spacing: clamp(2px, 0.5vmin, 4px);
         }
 
         #pause-menu .menu-item {
-            font-size: 20px;
-            margin: 10px 0;
+            font-size: clamp(14px, 2.5vmin, 20px);
+            margin: clamp(5px, 1vmin, 10px) 0;
             color: #888;
         }
 
@@ -164,10 +164,10 @@
             border: 2px solid rgba(255, 255, 255, 0.6);
             color: #fff;
             font-family: 'Courier New', monospace;
-            font-size: 20px;
-            padding: 12px 30px;
+            font-size: clamp(14px, 2.5vmin, 20px);
+            padding: clamp(8px, 1.5vmin, 12px) clamp(18px, 3vmin, 30px);
             border-radius: 8px;
-            margin-top: 10px;
+            margin-top: clamp(5px, 1vmin, 10px);
             cursor: pointer;
             touch-action: manipulation;
         }
@@ -197,9 +197,9 @@
         }
 
         #start-screen h1 {
-            font-size: 38px;
-            margin-bottom: 30px;
-            letter-spacing: 6px;
+            font-size: clamp(24px, 5vmin, 38px);
+            margin-bottom: clamp(15px, 3vmin, 30px);
+            letter-spacing: clamp(3px, 0.7vmin, 6px);
         }
 
         #start-screen .start-prompt {
@@ -3980,11 +3980,14 @@
         
         if (isGameOver()) {
             const gh = getGameHeight();
-            drawCenteredText('GAME OVER', gh / 2 - 40, 48);
-            drawCenteredText(`Final Score: ${game.score}`, gh / 2 + 10, 24);
+            const scale = getReferenceDimension() / 600;
+            const lineGap = 20 * scale;
+            const blockTop = gh / 2 - (48 * scale) / 2 - lineGap;
+            drawCenteredText('GAME OVER', blockTop, 48);
+            drawCenteredText(`Final Score: ${game.score}`, blockTop + 48 * scale + lineGap, 24);
             // Don't show "Press ENTER for menu" for lobby spectators (they're already on the menu)
             if (!touchControlsEnabled && !isLobbySpectating()) {
-                drawCenteredText('Press ENTER for menu', gh / 2 + 50, 20);
+                drawCenteredText('Press ENTER for menu', blockTop + 48 * scale + 24 * scale + lineGap * 2, 20);
             }
         }
         
