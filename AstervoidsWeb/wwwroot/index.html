@@ -496,8 +496,10 @@
         /* Hide fullscreen buttons when already in fullscreen or standalone mode */
         .fullscreen-active #touch-fullscreen,
         .standalone-mode #touch-fullscreen,
+        .pseudo-fullscreen #touch-fullscreen,
         .fullscreen-active #btn-fullscreen,
-        .standalone-mode #btn-fullscreen {
+        .standalone-mode #btn-fullscreen,
+        .pseudo-fullscreen #btn-fullscreen {
             display: none;
         }
     </style>
@@ -4160,15 +4162,27 @@
         }, { passive: false });
     }
 
-    // Fullscreen toggle helper
+    // Fullscreen helpers
+    function isFullscreenActive() {
+        return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+
     function toggleFullscreen() {
         const container = document.getElementById('game-container');
-        if (document.fullscreenElement) {
-            document.exitFullscreen();
+        if (isFullscreenActive()) {
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+            } else if (document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+            }
         } else if (container.requestFullscreen) {
             container.requestFullscreen();
         } else if (container.webkitRequestFullscreen) {
             container.webkitRequestFullscreen(); // Safari
+        } else {
+            // iOS Safari: no Fullscreen API available, toggle pseudo-fullscreen
+            container.classList.toggle('pseudo-fullscreen');
+            resizeCanvas();
         }
     }
 
@@ -4188,10 +4202,12 @@
     }
 
     // Track fullscreen state
-    document.addEventListener('fullscreenchange', () => {
-        document.getElementById('game-container').classList.toggle('fullscreen-active', !!document.fullscreenElement);
+    function handleFullscreenChange() {
+        document.getElementById('game-container').classList.toggle('fullscreen-active', isFullscreenActive());
         resizeCanvas();
-    });
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
     // Detect standalone mode (Add to Home Screen)
     if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
