@@ -344,7 +344,9 @@
                 arguments: args,
                 streamIds: []
             };
-            return protocol.writeMessage(hubMsg);
+            // writeMessage returns ArrayBuffer for binary protocols;
+            // wrap in Uint8Array so we can iterate with bracket indexing.
+            return new Uint8Array(protocol.writeMessage(hubMsg));
         }
 
         /**
@@ -452,7 +454,7 @@
                 resultsEl.style.display = '';
             } catch (err) {
                 // Catches any error during encoding, including missing scripts or
-                // unexpected encoder behaviour
+                // unexpected encoder behavior
                 resultsEl.style.display = '';
                 resultsEl.innerHTML = `<p style="color:#ff4444;">Error: ${err.message}</p>`;
                 console.error('[encoding-check] Failed to run encoding test', err);
