@@ -128,7 +128,15 @@ const SessionClient = (function() {
         const thisConnection = connection;
 
         // Guard wrapper: skips handler if connection was replaced (stale handler from mobile background disconnect)
-        const guard = (fn) => (...args) => { if (connection === thisConnection) fn(...args); };
+        // Also transforms binary GUIDs (16-byte Uint8Array) to strings in all arguments
+        const guard = (fn) => (...args) => {
+            if (connection === thisConnection) {
+                for (let i = 0; i < args.length; i++) {
+                    args[i] = GuidUtils.transformBinaryGuids(args[i]);
+                }
+                fn(...args);
+            }
+        };
 
         connection.onreconnecting(guard(error => {
             // console.log('[SessionClient] Reconnecting...', error);
@@ -274,7 +282,8 @@ const SessionClient = (function() {
     async function invokeHub(method, ...args) {
         ensureInSession();
         try {
-            return await connection.invoke(method, ...args);
+            const result = await connection.invoke(method, ...args);
+            return GuidUtils.transformBinaryGuids(result);
         } catch (err) {
             console.error(`[SessionClient] ${method} failed:`, err);
             throw err;
@@ -289,7 +298,7 @@ const SessionClient = (function() {
         ensureConnected();
 
         try {
-            const response = await connection.invoke('CreateSession', aspectRatio);
+            const response = GuidUtils.transformBinaryGuids(await connection.invoke('CreateSession', aspectRatio));
             if (!response) {
                 // console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
@@ -332,7 +341,7 @@ const SessionClient = (function() {
         ensureConnected();
 
         try {
-            const response = await connection.invoke('JoinSession', sessionId, evictMemberId);
+            const response = GuidUtils.transformBinaryGuids(await connection.invoke('JoinSession', sessionId, evictMemberId));
             if (!response) {
                 // console.log('[SessionClient] JoinSession failed - session full or already in a session');
                 return null;
@@ -399,7 +408,7 @@ const SessionClient = (function() {
         ensureConnected();
 
         try {
-            const response = await connection.invoke('GetActiveSessions');
+            const response = GuidUtils.transformBinaryGuids(await connection.invoke('GetActiveSessions'));
             return {
                 sessions: response.sessions || [],
                 maxSessions: response.maxSessions,
