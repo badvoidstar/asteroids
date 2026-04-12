@@ -158,6 +158,44 @@
             display: block;
         }
 
+        /* Gameplay text overlays (wave announcement, game over) */
+        .gameplay-overlay {
+            position: absolute;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            pointer-events: none;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+        }
+
+        .gameplay-overlay.visible {
+            display: flex;
+        }
+
+        #wave-text {
+            font-size: calc(var(--vp-ref, 600) / 600 * 48 * 1px);
+        }
+
+        #gameover-title {
+            font-size: calc(var(--vp-ref, 600) / 600 * 48 * 1px);
+        }
+
+        #gameover-score {
+            font-size: calc(var(--vp-ref, 600) / 600 * 24 * 1px);
+            margin-top: calc(var(--vp-ref, 600) / 600 * 20 * 1px);
+        }
+
+        #gameover-prompt {
+            font-size: calc(var(--vp-ref, 600) / 600 * 20 * 1px);
+            margin-top: calc(var(--vp-ref, 600) / 600 * 20 * 1px);
+        }
+
+        .touch-enabled #gameover-overlay .desktop-only {
+            display: none;
+        }
+
         /* Pause menu restart button for touch */
         #pause-restart-btn {
             background: rgba(255, 255, 255, 0.15);
@@ -554,6 +592,18 @@
                     <button id="btn-fullscreen" class="picker-btn solo">⛶ Fullscreen</button>
                 </div>
             </div>
+        </div>
+
+        <!-- Wave announcement overlay (shown during wave transitions) -->
+        <div id="wave-overlay" class="gameplay-overlay">
+            <span id="wave-text">WAVE 1</span>
+        </div>
+
+        <!-- Game-over overlay -->
+        <div id="gameover-overlay" class="gameplay-overlay">
+            <div id="gameover-title">GAME OVER</div>
+            <div id="gameover-score">Final Score: 0</div>
+            <div id="gameover-prompt" class="desktop-only">Press ENTER for menu</div>
         </div>
 
         <!-- Mobile touch controls -->
@@ -1591,6 +1641,16 @@
             hud.style.fontSize = `${Math.round(Math.min(vp.width, vp.height) * 0.035)}px`;
         }
         
+        // Position gameplay overlays within viewport and set scaling variable
+        const vpRef = Math.min(game.viewport.width, game.viewport.height);
+        container.style.setProperty('--vp-ref', vpRef);
+        document.querySelectorAll('.gameplay-overlay').forEach(el => {
+            el.style.top = `${game.viewport.y}px`;
+            el.style.left = `${game.viewport.x}px`;
+            el.style.width = `${game.viewport.width}px`;
+            el.style.height = `${game.viewport.height}px`;
+        });
+
         // No need to scale entity positions - they use normalized coordinates (0-1)
         // The conversion functions (fromNormalizedX, etc.) handle the mapping to pixels
     }
@@ -2351,6 +2411,13 @@
     const scoreDisplay = document.getElementById('score');
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
+
+    // Gameplay overlay references (crisp HTML text instead of canvas-drawn text)
+    const waveOverlay = document.getElementById('wave-overlay');
+    const waveTextEl = document.getElementById('wave-text');
+    const gameoverOverlay = document.getElementById('gameover-overlay');
+    const gameoverScoreEl = document.getElementById('gameover-score');
+    const gameoverPromptEl = document.getElementById('gameover-prompt');
 
     // BroadcastChannel for sending debug metrics to /debug page.
     // Uses a heartbeat pattern: the debug page sends periodic pings, and we
@@ -3738,21 +3805,6 @@
         }
     }
 
-    /**
-     * Draw centered text message on screen
-     * Uses gameplay width for centering (works with viewport transform)
-     * @param {string} text - Message to display
-     * @param {number} y - Y position (in gameplay coordinates)
-     * @param {number} size - Font size
-     */
-    function drawCenteredText(text, y, size = 32) {
-        const scaledSize = Math.round(size * getReferenceDimension() / 600);
-        ctx.fillStyle = CONFIG.STROKE_COLOR;
-        ctx.font = `${scaledSize}px 'Courier New', monospace`;
-        ctx.textAlign = 'center';
-        ctx.fillText(text, getGameWidth() / 2, y);
-    }
-
     // ============================================
     // SECTION 6: GAME LOOP
     // Main update and render cycle
@@ -3975,22 +4027,20 @@
             }
         }
         
-        // Draw state-specific overlays (in gameplay coordinates)
+        // Show/hide gameplay text overlays (HTML for crisp rendering at all DPIs)
         if (game.state === 'waveDelay') {
-            drawCenteredText(`WAVE ${game.wave + 1}`, getGameHeight() / 2, 48);
+            waveTextEl.textContent = `WAVE ${game.wave + 1}`;
+            waveOverlay.classList.add('visible');
+        } else {
+            waveOverlay.classList.remove('visible');
         }
         
         if (isGameOver()) {
-            const gh = getGameHeight();
-            const scale = getReferenceDimension() / 600;
-            const lineGap = 20 * scale;
-            const blockTop = gh / 2 - (48 * scale) / 2 - lineGap;
-            drawCenteredText('GAME OVER', blockTop, 48);
-            drawCenteredText(`Final Score: ${game.score}`, blockTop + 48 * scale + lineGap, 24);
-            // Don't show "Press ENTER for menu" for lobby spectators (they're already on the menu)
-            if (!touchControlsEnabled && !isLobbySpectating()) {
-                drawCenteredText('Press ENTER for menu', blockTop + 48 * scale + 24 * scale + lineGap * 2, 20);
-            }
+            gameoverScoreEl.textContent = `Final Score: ${game.score}`;
+            gameoverPromptEl.style.display = isLobbySpectating() ? 'none' : '';
+            gameoverOverlay.classList.add('visible');
+        } else {
+            gameoverOverlay.classList.remove('visible');
         }
         
         // Restore context if we applied viewport transform
@@ -4742,6 +4792,8 @@
         spawningWave = false;
         pauseMenu.classList.remove('visible');
         reconnectingOverlay.classList.remove('visible');
+        waveOverlay.classList.remove('visible');
+        gameoverOverlay.classList.remove('visible');
         game.connectionLost = false;
         startScreen.classList.remove('hidden');
 
