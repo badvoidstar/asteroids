@@ -335,7 +335,7 @@
          */
         function encodeHubMessage(args) {
             const protocol = new signalR.protocols.msgpack.MessagePackHubProtocol();
-            // Type 1 = Invocation (MessageHubProtocol message type)
+            // Type 1 = Invocation (MessagePackHubProtocol message type)
             const hubMsg = {
                 type: 1,
                 headers: {},
@@ -451,7 +451,8 @@
 
                 resultsEl.style.display = '';
             } catch (err) {
-                // If SignalR scripts haven't loaded yet this can fail
+                // Catches any error during encoding, including missing scripts or
+                // unexpected encoder behaviour
                 resultsEl.style.display = '';
                 resultsEl.innerHTML = `<p style="color:#ff4444;">Error: ${err.message}</p>`;
                 console.error('[encoding-check] Failed to run encoding test', err);
