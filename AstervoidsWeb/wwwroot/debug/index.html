@@ -82,6 +82,83 @@
             font-style: italic;
             font-size: 0.9rem;
         }
+
+        /* Float encoding check section */
+        #encoding-check {
+            margin-top: 40px;
+            border-top: 1px solid #333;
+            padding-top: 24px;
+        }
+
+        #encoding-check h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 6px;
+        }
+
+        #encoding-check p {
+            color: #888;
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        #run-encoding-check {
+            background: #001a00;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95rem;
+            padding: 8px 20px;
+            cursor: pointer;
+        }
+
+        #run-encoding-check:hover {
+            background: #003300;
+        }
+
+        #encoding-results {
+            margin-top: 20px;
+            display: none;
+        }
+
+        .encoding-run {
+            margin-bottom: 20px;
+        }
+
+        .encoding-run h3 {
+            font-size: 1rem;
+            color: #ffff00;
+            margin-bottom: 8px;
+        }
+
+        .encoding-run ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        .encoding-run li {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1a1a;
+            font-size: 0.95rem;
+        }
+
+        .encoding-run li span:first-child {
+            color: #888;
+        }
+
+        .encoding-verdict {
+            margin-top: 8px;
+            font-size: 0.95rem;
+            font-weight: bold;
+        }
+
+        .verdict-float32 { color: #00ff00; }
+        .verdict-float64 { color: #ff8800; }
+        .verdict-mixed   { color: #ffff00; }
+        .verdict-none    { color: #888; }
     </style>
 </head>
 <body>
@@ -100,6 +177,34 @@
             <p class="placeholder-text">Editable values will appear here in a future update.</p>
         </div>
     </div>
+
+    <!-- Float32 vs Float64 encoding check (debug-only, no effect on game page) -->
+    <section id="encoding-check">
+        <h2>MessagePack Float Encoding Check</h2>
+        <p>
+            Encodes a representative <code>UpdateObjects</code>-like hub message through the
+            SignalR MessagePack protocol and scans the resulting bytes for float32 (0xCA) vs
+            float64 (0xCB) markers. Run twice: once with raw JS numbers, once with
+            <code>Math.fround</code>-canonicalized values.
+        </p>
+        <button id="run-encoding-check">Check float32 vs float64 encoding</button>
+        <div id="encoding-results">
+            <div class="encoding-run" id="result-raw">
+                <h3>Run 1 – Raw JS numbers</h3>
+                <ul id="metrics-raw"></ul>
+                <div class="encoding-verdict" id="verdict-raw"></div>
+            </div>
+            <div class="encoding-run" id="result-fround">
+                <h3>Run 2 – Math.fround-canonicalized numbers</h3>
+                <ul id="metrics-fround"></ul>
+                <div class="encoding-verdict" id="verdict-fround"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- SignalR + MessagePack protocol scripts (needed for encoding check) -->
+    <script src="/js/signalr.min.js"></script>
+    <script src="/js/signalr-protocol-msgpack.min.js"></script>
 
     <script>
         const channel = new BroadcastChannel('astervoids-debug');
@@ -164,6 +269,194 @@
             renderCoreMetrics(data);
             renderMemberMetrics(data.members || {}, data.myMemberId || '');
         };
+
+        // ─── Float32 vs Float64 encoding check ───────────────────────────────────
+        //
+        // Builds a representative UpdateObjects-like hub-invocation message and
+        // encodes it through the same SignalR MessagePack hub protocol that the
+        // game client uses.  We then scan the raw bytes for MessagePack float
+        // markers:
+        //   0xCA  →  float32  (4-byte single-precision float)
+        //   0xCB  →  float64  (8-byte double-precision float)
+        // The test is run twice so we can compare "raw JS numbers" vs numbers
+        // that have been passed through Math.fround first.
+
+        /**
+         * Build a sample UpdateObjects payload that mirrors what the game sends on
+         * every tick: a small array of objects, each with typical numeric fields
+         * (position, velocity, angle).
+         *
+         * @param {boolean} useFround - when true, all floats are canonicalized with
+         *   Math.fround before being placed in the payload.
+         */
+        function buildSamplePayload(useFround) {
+            const f = useFround ? Math.fround : (v) => v;
+            return [
+                {
+                    id: 'aaaaaaaa-0001-0001-0001-aaaaaaaaaaaa',
+                    type: 'ship',
+                    x:             f(0.512345678901234),
+                    y:             f(0.312345678901234),
+                    angle:         f(1.5707963267948966),
+                    vx:            f(0.012345678901234),
+                    vy:            f(-0.023456789012345),
+                    rotationSpeed: f(0.001234567890123),
+                    colorIndex:    2
+                },
+                {
+                    id: 'bbbbbbbb-0002-0002-0002-bbbbbbbbbbbb',
+                    type: 'asteroid',
+                    x:             f(0.823456789012345),
+                    y:             f(0.612345678901234),
+                    angle:         f(2.356194490192345),
+                    vx:            f(-0.015678901234567),
+                    vy:            f(0.005678901234567),
+                    rotationSpeed: f(0.002345678901234),
+                    size:          1
+                },
+                {
+                    id: 'cccccccc-0003-0003-0003-cccccccccccc',
+                    type: 'bullet',
+                    x:             f(0.234567890123456),
+                    y:             f(0.912345678901234),
+                    angle:         f(0.7853981633974483),
+                    vx:            f(0.056789012345678),
+                    vy:            f(0.045678901234567)
+                }
+            ];
+        }
+
+        /**
+         * Encode a hub-invocation message through the SignalR MessagePack protocol
+         * and return the raw bytes as a Uint8Array.
+         *
+         * @param {any[]} args - arguments array for the hub invocation
+         * @returns {Uint8Array}
+         */
+        function encodeHubMessage(args) {
+            const protocol = new signalR.protocols.msgpack.MessagePackHubProtocol();
+            // Type 1 = Invocation (MessageHubProtocol message type)
+            const hubMsg = {
+                type: 1,
+                headers: {},
+                invocationId: '0',
+                target: 'UpdateObjects',
+                arguments: args,
+                streamIds: []
+            };
+            return protocol.writeMessage(hubMsg);
+        }
+
+        /**
+         * Scan a Uint8Array for MessagePack float32 (0xCA) and float64 (0xCB)
+         * type-byte markers.
+         *
+         * Note: this is a byte-level scan so it counts every occurrence of these
+         * byte values in the stream, including inside string data.  In practice,
+         * for a payload that is dominated by numbers, the counts are reliable.
+         *
+         * @param {Uint8Array} bytes
+         * @returns {{ float32: number, float64: number }}
+         */
+        function countFloatMarkers(bytes) {
+            let float32 = 0;
+            let float64 = 0;
+            for (let i = 0; i < bytes.length; i++) {
+                if (bytes[i] === 0xCA) float32++;
+                else if (bytes[i] === 0xCB) float64++;
+            }
+            return { float32, float64 };
+        }
+
+        /**
+         * Run one encoding test, display the results in the given UI elements,
+         * and return a summary object for console logging.
+         *
+         * @param {boolean} useFround
+         * @param {HTMLElement} metricsEl
+         * @param {HTMLElement} verdictEl
+         * @param {string} label
+         */
+        function runEncodingTest(useFround, metricsEl, verdictEl, label) {
+            const payload = buildSamplePayload(useFround);
+            const bytes   = encodeHubMessage([payload]);
+            const counts  = countFloatMarkers(bytes);
+
+            const summary = {
+                label,
+                totalBytes:        bytes.length,
+                countFloat32Markers: counts.float32,
+                countFloat64Markers: counts.float64,
+                hasFloat32:          counts.float32 > 0
+            };
+
+            // Render metric rows
+            const rows = [
+                { k: 'Total encoded bytes',   v: summary.totalBytes },
+                { k: 'float32 markers (0xCA)', v: summary.countFloat32Markers },
+                { k: 'float64 markers (0xCB)', v: summary.countFloat64Markers }
+            ];
+            metricsEl.innerHTML = rows.map(r =>
+                `<li><span>${r.k}</span><span>${r.v}</span></li>`
+            ).join('');
+
+            // Render verdict
+            let verdictCls, verdictText;
+            if (counts.float32 > 0 && counts.float64 === 0) {
+                verdictCls  = 'verdict-float32';
+                verdictText = '✔ Numbers encoded as float32 (0xCA only)';
+            } else if (counts.float64 > 0 && counts.float32 === 0) {
+                verdictCls  = 'verdict-float64';
+                verdictText = '✘ Numbers encoded as float64 (0xCB only) — no bandwidth saving from float32 path';
+            } else if (counts.float32 > 0 && counts.float64 > 0) {
+                verdictCls  = 'verdict-mixed';
+                verdictText = `⚠ Mixed encoding: ${counts.float32} × float32 + ${counts.float64} × float64`;
+            } else {
+                verdictCls  = 'verdict-none';
+                verdictText = '? No float markers found (integers only?)';
+            }
+            verdictEl.className = `encoding-verdict ${verdictCls}`;
+            verdictEl.textContent = verdictText;
+
+            console.log(`[encoding-check] ${label}`, summary);
+            return summary;
+        }
+
+        document.getElementById('run-encoding-check').addEventListener('click', () => {
+            const resultsEl = document.getElementById('encoding-results');
+            try {
+                const raw    = runEncodingTest(
+                    false,
+                    document.getElementById('metrics-raw'),
+                    document.getElementById('verdict-raw'),
+                    'Raw JS numbers'
+                );
+                const fround = runEncodingTest(
+                    true,
+                    document.getElementById('metrics-fround'),
+                    document.getElementById('verdict-fround'),
+                    'Math.fround numbers'
+                );
+
+                // Side-by-side summary in the console
+                console.log('[encoding-check] Comparison', {
+                    rawBytes:    raw.totalBytes,
+                    froundBytes: fround.totalBytes,
+                    byteDelta:   fround.totalBytes - raw.totalBytes,
+                    rawFloat32:  raw.countFloat32Markers,
+                    rawFloat64:  raw.countFloat64Markers,
+                    froundFloat32: fround.countFloat32Markers,
+                    froundFloat64: fround.countFloat64Markers
+                });
+
+                resultsEl.style.display = '';
+            } catch (err) {
+                // If SignalR scripts haven't loaded yet this can fail
+                resultsEl.style.display = '';
+                resultsEl.innerHTML = `<p style="color:#ff4444;">Error: ${err.message}</p>`;
+                console.error('[encoding-check] Failed to run encoding test', err);
+            }
+        });
     </script>
 </body>
 </html>
