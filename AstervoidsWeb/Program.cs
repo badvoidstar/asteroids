@@ -1,4 +1,5 @@
 using AstervoidsWeb.Configuration;
+using AstervoidsWeb.Formatters;
 using AstervoidsWeb.Hubs;
 using AstervoidsWeb.Services;
 using MessagePack;
@@ -48,10 +49,18 @@ builder.Services.AddSignalR(options =>
     options.KeepAliveInterval = TimeSpan.FromSeconds(10);
 }).AddMessagePackProtocol(options =>
 {
-    // ContractlessStandardResolver includes AttributeFormatterResolver (picks up
-    // [MessagePackObject]/[Key] on hub DTOs) and BuiltinResolver (serializes Guid as
-    // string, which JS reads correctly). UntrustedData rejects malformed msgpack.
-    options.SerializerOptions = ContractlessStandardResolver.Options
+    // BinaryGuidResolver is composed first so typed Guid/Guid? properties are serialized
+    // as 16-byte binary instead of 36-char strings (~19 bytes saved per GUID on the wire).
+    // ContractlessStandardResolver handles everything else: [MessagePackObject]/[Key] DTOs,
+    // primitives, collections, Dictionary<K,V>. Collection formatters (e.g. IEnumerable<Guid>)
+    // resolve element formatters through the composite root, so Guid elements also get
+    // binary encoding. UntrustedData rejects malformed msgpack.
+    var compositeResolver = CompositeResolver.Create(
+        BinaryGuidResolver.Instance,
+        ContractlessStandardResolver.Instance
+    );
+    options.SerializerOptions = MessagePackSerializerOptions.Standard
+        .WithResolver(compositeResolver)
         .WithSecurity(MessagePackSecurity.UntrustedData);
 });
 
