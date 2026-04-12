@@ -451,11 +451,11 @@
                     froundFloat64: fround.countFloat64Markers
                 });
 
-                resultsEl.style.display = '';
+                resultsEl.style.display = 'block';
             } catch (err) {
                 // Catches any error during encoding, including missing scripts or
                 // unexpected encoder behavior
-                resultsEl.style.display = '';
+                resultsEl.style.display = 'block';
                 resultsEl.innerHTML = `<p style="color:#ff4444;">Error: ${err.message}</p>`;
                 console.error('[encoding-check] Failed to run encoding test', err);
             }
