@@ -24,7 +24,7 @@ public abstract class TestBase
     /// <returns>Tuple containing the session and its creator member.</returns>
     protected (Session session, Member creator) CreateTestSession(string connectionId = "connection-1")
     {
-        var result = SessionService.CreateSession(connectionId, 1.5);
+        var result = SessionService.CreateSession(connectionId);
         return (result.Session!, result.Creator!);
     }
 

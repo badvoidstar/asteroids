@@ -292,13 +292,13 @@ const SessionClient = (function() {
 
     /**
      * Create a new session.
-     * @param {number} aspectRatio - The aspect ratio (width/height) to lock for this session.
+     * @param {object} [metadata] - Optional key-value metadata for the session (e.g. { aspectRatio: 1.78 }).
      */
-    async function createSession(aspectRatio) {
+    async function createSession(metadata) {
         ensureConnected();
 
         try {
-            const response = GuidUtils.transformBinaryGuids(await connection.invoke('CreateSession', aspectRatio));
+            const response = GuidUtils.transformBinaryGuids(await connection.invoke('CreateSession', metadata || null));
             if (!response) {
                 // console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
@@ -314,10 +314,10 @@ const SessionClient = (function() {
                 name: response.sessionName,
                 members: [currentMember],
                 objects: [],
-                aspectRatio: response.aspectRatio
+                metadata: response.metadata || {}
             };
 
-            // console.log('[SessionClient] Session created:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            // console.log('[SessionClient] Session created:', currentSession.name);
             lastSessionId = currentSession.id;
 
             if (callbacks.onSessionCreated) {
@@ -352,14 +352,14 @@ const SessionClient = (function() {
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
-                aspectRatio: response.aspectRatio
+                metadata: response.metadata || {}
             };
             currentMember = {
                 id: response.memberId,
                 role: response.role
             };
 
-            // console.log('[SessionClient] Joined session:', currentSession.name, 'aspectRatio:', currentSession.aspectRatio);
+            // console.log('[SessionClient] Joined session:', currentSession.name);
             lastSessionId = currentSession.id;
 
             if (callbacks.onSessionJoined) {

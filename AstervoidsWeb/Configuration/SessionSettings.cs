@@ -34,4 +34,19 @@ public class SessionSettings
     /// Default is 20 minutes.
     /// </summary>
     public int AbsoluteTimeoutMinutes { get; set; } = 20;
+
+    /// <summary>
+    /// SignalR client timeout interval in seconds. If the server doesn't receive a message
+    /// (including keep-alive) within this interval, it considers the client disconnected.
+    /// Default is 20 seconds.
+    /// </summary>
+    public int ClientTimeoutSeconds { get; set; } = 20;
+
+    /// <summary>
+    /// SignalR keep-alive ping interval in seconds. The server sends a ping to the client
+    /// at this interval to keep the connection alive. Should be roughly half of
+    /// <see cref="ClientTimeoutSeconds"/> so a single missed ping doesn't kill the connection.
+    /// Default is 10 seconds.
+    /// </summary>
+    public int KeepAliveSeconds { get; set; } = 10;
 }

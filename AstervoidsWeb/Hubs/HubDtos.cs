@@ -10,7 +10,7 @@ public record CreateSessionResponse(
     [property: Key("sessionName")] string SessionName,
     [property: Key("memberId")] Guid MemberId,
     [property: Key("role")] string Role,
-    [property: Key("aspectRatio")] double AspectRatio);
+    [property: Key("metadata")] Dictionary<string, object?> Metadata);
 
 [MessagePackObject]
 public record JoinSessionResponse(
@@ -20,7 +20,7 @@ public record JoinSessionResponse(
     [property: Key("role")] string Role,
     [property: Key("members")] IEnumerable<MemberInfo> Members,
     [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
-    [property: Key("aspectRatio")] double AspectRatio
+    [property: Key("metadata")] Dictionary<string, object?> Metadata
 );
 
 [MessagePackObject]

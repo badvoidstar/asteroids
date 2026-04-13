@@ -33,9 +33,9 @@ public class SessionService : ISessionService
     private readonly ConcurrentDictionary<Guid, Session> _sessions = new();
     private readonly ConcurrentDictionary<string, Guid> _connectionToMember = new();
     private readonly ConcurrentDictionary<Guid, Guid> _memberToSession = new();
-    private readonly Random _random = new();
     private readonly object _sessionLock = new();
     private readonly ILogger<SessionService>? _logger;
+    private readonly ISessionNameGenerator _nameGenerator;
     private readonly int _maxSessions;
     private readonly int _maxMembersPerSession;
     private readonly bool _distributeOrphanedObjects;
@@ -43,29 +43,21 @@ public class SessionService : ISessionService
     public int MaxSessions => _maxSessions;
     public int MaxMembersPerSession => _maxMembersPerSession;
 
-    private static readonly string[] FruitNames = 
-    [
-        "Apple", "Banana", "Cherry", "Date", "Elderberry",
-        "Fig", "Grape", "Honeydew", "Kiwi", "Lemon",
-        "Mango", "Nectarine", "Orange", "Papaya", "Quince",
-        "Raspberry", "Strawberry", "Tangerine", "Watermelon", "Blueberry",
-        "Coconut", "Dragonfruit", "Guava", "Jackfruit", "Lychee",
-        "Mulberry", "Olive", "Peach", "Pear", "Plum",
-        "Pomegranate", "Apricot", "Avocado", "Blackberry", "Cantaloupe",
-        "Clementine", "Cranberry", "Currant", "Durian", "Grapefruit",
-        "Lime", "Mandarin", "Passion", "Persimmon", "Pineapple",
-        "Plantain", "Starfruit", "Tamarind", "Yuzu", "Kumquat"
-    ];
-
-    public SessionService() 
+    public SessionService() : this(new FruitNameGenerator())
     {
+    }
+
+    public SessionService(ISessionNameGenerator nameGenerator)
+    {
+        _nameGenerator = nameGenerator;
         _maxSessions = 6;
         _maxMembersPerSession = 4;
         _distributeOrphanedObjects = true;
     }
 
-    public SessionService(IOptions<SessionSettings> settings, ILogger<SessionService> logger)
+    public SessionService(IOptions<SessionSettings> settings, ILogger<SessionService> logger, ISessionNameGenerator nameGenerator)
     {
+        _nameGenerator = nameGenerator;
         _maxSessions = settings.Value.MaxSessions;
         _maxMembersPerSession = settings.Value.MaxMembersPerSession;
         _distributeOrphanedObjects = settings.Value.DistributeOrphanedObjects;
@@ -80,7 +72,7 @@ public class SessionService : ISessionService
     private static JoinSessionResult JoinSessionFailure(string errorMessage)
         => new(false, null, null, errorMessage);
 
-    public CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio)
+    public CreateSessionResult CreateSession(string creatorConnectionId, Dictionary<string, object?>? metadata = null)
     {
         lock (_sessionLock)
         {
@@ -99,13 +91,11 @@ public class SessionService : ISessionService
                 return CreateSessionFailure($"Maximum number of sessions ({_maxSessions}) has been reached");
             }
 
-            // Validate aspect ratio (reasonable bounds: 0.25 to 4.0)
-            var clampedAspectRatio = Math.Clamp(aspectRatio, 0.25, 4.0);
-
             var session = new Session
             {
-                Name = GenerateUniqueFruitName(),
-                AspectRatio = clampedAspectRatio
+                Name = _nameGenerator.GenerateUniqueName(
+                    _sessions.Values.Select(s => s.Name).ToHashSet()),
+                Metadata = metadata ?? new Dictionary<string, object?>()
             };
 
             _sessions.TryAdd(session.Id, session);
@@ -559,25 +549,4 @@ public class SessionService : ISessionService
         }
     }
 
-    private string GenerateUniqueFruitName()
-    {
-        // Called within _sessionLock, no additional lock needed
-        var usedNames = _sessions.Values.Select(s => s.Name).ToHashSet();
-        var availableNames = FruitNames.Where(n => !usedNames.Contains(n)).ToList();
-
-        if (availableNames.Count == 0)
-        {
-            // All fruit names used, append a number
-            var counter = 2;
-            while (true)
-            {
-                var candidateName = $"{FruitNames[_random.Next(FruitNames.Length)]}{counter}";
-                if (!usedNames.Contains(candidateName))
-                    return candidateName;
-                counter++;
-            }
-        }
-
-        return availableNames[_random.Next(availableNames.Count)];
-    }
 }

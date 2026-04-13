@@ -477,7 +477,7 @@
             }
             try {
                 log('Creating new session...');
-                const result = await SessionClient.createSession(16 / 9);
+                const result = await SessionClient.createSession({ aspectRatio: 16 / 9 });
                 if (!result) {
                     log('Failed to create session - server may be at capacity or you are already in a session', 'error');
                     await refreshSessions();
