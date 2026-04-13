@@ -21,7 +21,7 @@ public class SessionHubTests
     public async Task JoinSession_ShouldReturnMaterializedSessionSnapshot()
     {
         // Arrange
-        var createResult = _sessionService.CreateSession("connection-1", 1.5);
+        var createResult = _sessionService.CreateSession("connection-1");
         var session = createResult.Session!;
         var creator = createResult.Creator!;
         var createdObject = _objectService.CreateObject(
@@ -47,7 +47,7 @@ public class SessionHubTests
     public void GetSessionState_ShouldReturnMaterializedSnapshot()
     {
         // Arrange
-        var createResult = _sessionService.CreateSession("connection-1", 1.5);
+        var createResult = _sessionService.CreateSession("connection-1");
         var session = createResult.Session!;
         var creator = createResult.Creator!;
         var client = _sessionService.JoinSession(session.Id, "connection-2").Member!;
@@ -84,7 +84,7 @@ public class SessionHubTests
     public async Task JoinSession_SnapshotCapturedBeforeGroupAdd_ConcurrentObjectExcludedFromSnapshot()
     {
         // Arrange
-        var createResult = _sessionService.CreateSession("connection-1", 1.5);
+        var createResult = _sessionService.CreateSession("connection-1");
         var session = createResult.Session!;
         var creator = createResult.Creator!;
 
@@ -133,7 +133,7 @@ public class SessionHubTests
     public async Task JoinSession_SnapshotIncludesJoiningMember()
     {
         // Arrange
-        var createResult = _sessionService.CreateSession("connection-1", 1.5);
+        var createResult = _sessionService.CreateSession("connection-1");
         var session = createResult.Session!;
         var hub = CreateHub("connection-2");
 

@@ -106,7 +106,8 @@ public class BinaryGuidFormatterTests
     public void CreateSessionResponse_RoundTrip()
     {
         var dto = new CreateSessionResponse(
-            Guid.NewGuid(), "TestSession", Guid.NewGuid(), "Server", 1.5);
+            Guid.NewGuid(), "TestSession", Guid.NewGuid(), "Server",
+            new Dictionary<string, object?> { ["aspectRatio"] = 1.5 });
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
         var result = MessagePackSerializer.Deserialize<CreateSessionResponse>(bytes, Options);
@@ -115,7 +116,7 @@ public class BinaryGuidFormatterTests
         result.SessionName.Should().Be(dto.SessionName);
         result.MemberId.Should().Be(dto.MemberId);
         result.Role.Should().Be(dto.Role);
-        result.AspectRatio.Should().Be(dto.AspectRatio);
+        result.Metadata.Should().ContainKey("aspectRatio");
     }
 
     [Fact]
@@ -215,7 +216,8 @@ public class BinaryGuidFormatterTests
 
         var dto = new JoinSessionResponse(
             Guid.NewGuid(), "Banana", Guid.NewGuid(), "Client",
-            new[] { member }, new[] { obj }, 1.78);
+            new[] { member }, new[] { obj },
+            new Dictionary<string, object?> { ["aspectRatio"] = 1.78 });
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
         var result = MessagePackSerializer.Deserialize<JoinSessionResponse>(bytes, Options);

@@ -67,28 +67,18 @@ const ObjectSync = (function() {
     // Maps readable field names to short wire names. Applied at the sync
     // boundary (compress before send, expand after receive) so all game
     // logic uses the full readable names internally.
-    const FIELD_MAP = {
-        type: 't', x: 'x', y: 'y', angle: 'a',
-        velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',
-        thrusting: 'th', invulnerable: 'iv', colorIndex: 'ci',
-        memberId: 'mi', score: 'sc', hitCount: 'hc',
-        radius: 'r', seed: 'sd',
-        lifetime: 'lt', ownerMemberId: 'om',
-        pendingHit: 'ph', hitTargetId: 'ht', hitImpactTorque: 'hi',
-        gameStarted: 'gs', wave: 'w', state: 'st', lives: 'lv',
-        speedMultiplier: 'sm', waveDelayTimer: 'wd',
-        processedHits: 'pi', processedScores: 'ps',
-        groupScore: 'gr', peakShipCount: 'pk'
-    };
-    const REVERSE_MAP = Object.fromEntries(
-        Object.entries(FIELD_MAP).map(([k, v]) => [v, k])
-    );
+    //
+    // The map is empty by default (no compression). Games supply their own
+    // field map via configure({ fieldMap: { ... } }) at startup. Unmapped
+    // keys pass through unchanged, so compression is purely opt-in.
+    let fieldMap = {};
+    let reverseMap = {};
 
     function compressData(data) {
         if (!data) return data;
         const out = {};
         for (const key in data) {
-            out[FIELD_MAP[key] || key] = data[key];
+            out[fieldMap[key] || key] = data[key];
         }
         return out;
     }
@@ -97,7 +87,7 @@ const ObjectSync = (function() {
         if (!data) return data;
         const out = {};
         for (const key in data) {
-            out[REVERSE_MAP[key] || key] = data[key];
+            out[reverseMap[key] || key] = data[key];
         }
         return out;
     }
@@ -147,8 +137,8 @@ const ObjectSync = (function() {
     };
     
     /**
-     * Configure sync timing parameters.
-     * @param {object} config - { nominalFrameTime, minFrameTime }
+     * Configure sync timing and field compression parameters.
+     * @param {object} config - { nominalFrameTime, minFrameTime, deltaEncoding, adaptiveSendRate, fieldMap }
      */
     function configure(config) {
         if (config.nominalFrameTime !== undefined) {
@@ -163,6 +153,12 @@ const ObjectSync = (function() {
         }
         if (config.adaptiveSendRate !== undefined) {
             adaptiveSendRate = config.adaptiveSendRate;
+        }
+        if (config.fieldMap !== undefined) {
+            fieldMap = config.fieldMap;
+            reverseMap = Object.fromEntries(
+                Object.entries(fieldMap).map(([k, v]) => [v, k])
+            );
         }
     }
     

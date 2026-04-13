@@ -153,7 +153,7 @@ public class ObjectServiceTests : TestBase
     public void DeleteObject_NonExistent_ShouldReturnNull()
     {
         // Arrange
-        var session = SessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = SessionService.CreateSession("connection-1").Session!;
         var creator = SessionService.GetMemberByConnectionId("connection-1")!;
 
         // Act

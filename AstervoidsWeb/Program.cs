@@ -12,6 +12,7 @@ builder.Services.Configure<SessionSettings>(
     builder.Configuration.GetSection(SessionSettings.SectionName));
 
 // Register services
+builder.Services.AddSingleton<ISessionNameGenerator, FruitNameGenerator>();
 builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IObjectService, ObjectService>();
 builder.Services.AddHostedService<SessionCleanupService>();
@@ -24,6 +25,9 @@ builder.Services.AddResponseCompression(options =>
 {
     options.EnableForHttps = true;
 });
+
+// Read session settings for SignalR timeout configuration
+var sessionSettings = builder.Configuration.GetSection(SessionSettings.SectionName).Get<SessionSettings>() ?? new SessionSettings();
 
 // Add SignalR with MessagePack protocol (camelCase names to preserve JS client contract)
 //
@@ -41,12 +45,10 @@ builder.Services.AddResponseCompression(options =>
 //   UntrustedData security guard is enabled as recommended by the MessagePack docs.
 builder.Services.AddSignalR(options =>
 {
-    // This is a fast-paced game that doesn't benefit from protracted reconnection windows.
-    // The 2× relationship (20 = 2 × 10) is preserved so a single missed keep-alive ping
-    // doesn't kill the connection. Mobile recovery works well via the auto-rejoin fallback.
-    // Defaults: ClientTimeoutInterval=30s, KeepAliveInterval=15s
-    options.ClientTimeoutInterval = TimeSpan.FromSeconds(20);
-    options.KeepAliveInterval = TimeSpan.FromSeconds(10);
+    // The 2× relationship (ClientTimeout = 2 × KeepAlive) is preserved so a single
+    // missed keep-alive ping doesn't kill the connection.
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(sessionSettings.ClientTimeoutSeconds);
+    options.KeepAliveInterval = TimeSpan.FromSeconds(sessionSettings.KeepAliveSeconds);
 }).AddMessagePackProtocol(options =>
 {
     // BinaryGuidResolver is composed first so typed Guid/Guid? properties are serialized

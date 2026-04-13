@@ -105,10 +105,10 @@ public class SessionHub : Hub
     /// <summary>
     /// Creates a new session and joins as the server.
     /// </summary>
-    /// <param name="aspectRatio">The aspect ratio (width/height) to lock for this session.</param>
-    public async Task<CreateSessionResponse?> CreateSession(double aspectRatio)
+    /// <param name="metadata">Optional key-value metadata for the session (e.g. aspect ratio, game mode).</param>
+    public async Task<CreateSessionResponse?> CreateSession(Dictionary<string, object?>? metadata = null)
     {
-        var result = _sessionService.CreateSession(Context.ConnectionId, aspectRatio);
+        var result = _sessionService.CreateSession(Context.ConnectionId, metadata);
 
         if (!result.Success)
         {
@@ -133,7 +133,7 @@ public class SessionHub : Hub
             session.Name,
             creator.Id,
             creator.Role.ToString(),
-            session.AspectRatio
+            session.Metadata
         );
     }
 
@@ -223,7 +223,7 @@ public class SessionHub : Hub
             member.Role.ToString(),
             members,
             objects,
-            session.AspectRatio
+            session.Metadata
         );
     }
 

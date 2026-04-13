@@ -17,7 +17,7 @@ public class SessionServiceTests
     public void CreateSession_ShouldCreateSessionWithFruitName()
     {
         // Act
-        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var result = _sessionService.CreateSession("connection-1");
         var session = result.Session!;
 
         // Assert
@@ -33,7 +33,7 @@ public class SessionServiceTests
     public void CreateSession_CreatorShouldBeServer()
     {
         // Act
-        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var result = _sessionService.CreateSession("connection-1");
         var session = result.Session!;
         var creator = result.Creator!;
 
@@ -48,7 +48,7 @@ public class SessionServiceTests
     public void JoinSession_ShouldAddMemberAsClient()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
 
         // Act
         var result = _sessionService.JoinSession(session.Id, "connection-2");
@@ -79,7 +79,7 @@ public class SessionServiceTests
     public void LeaveSession_ServerLeaves_ShouldPromoteClient()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.JoinSession(session.Id, "connection-2");
 
         // Act
@@ -96,7 +96,7 @@ public class SessionServiceTests
     public void LeaveSession_LastMemberLeaves_ShouldKeepSessionForTimeout()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
 
         // Act
         var result = _sessionService.LeaveSession("connection-1");
@@ -114,7 +114,7 @@ public class SessionServiceTests
     public void LeaveSession_ClientLeaves_ShouldNotPromote()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.JoinSession(session.Id, "connection-2");
 
         // Act
@@ -130,9 +130,9 @@ public class SessionServiceTests
     public void GetActiveSessions_ShouldReturnAllSessions()
     {
         // Arrange
-        _sessionService.CreateSession("connection-1", 1.5);
-        _sessionService.CreateSession("connection-2", 1.5);
-        _sessionService.CreateSession("connection-3", 1.5);
+        _sessionService.CreateSession("connection-1");
+        _sessionService.CreateSession("connection-2");
+        _sessionService.CreateSession("connection-3");
 
         // Act
         var sessions = _sessionService.GetActiveSessions().Sessions.ToList();
@@ -145,7 +145,7 @@ public class SessionServiceTests
     public void GetMemberByConnectionId_ShouldReturnMember()
     {
         // Arrange
-        var creator = _sessionService.CreateSession("connection-1", 1.5).Creator!;
+        var creator = _sessionService.CreateSession("connection-1").Creator!;
 
         // Act
         var member = _sessionService.GetMemberByConnectionId("connection-1");
@@ -159,7 +159,7 @@ public class SessionServiceTests
     public void GetSessionByConnectionId_ShouldReturnSession()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
 
         // Act
         var foundSession = _sessionService.GetSessionByConnectionId("connection-1");
@@ -176,7 +176,7 @@ public class SessionServiceTests
         var names = new HashSet<string>();
         for (int i = 0; i < 6; i++)
         {
-            var result = _sessionService.CreateSession($"connection-{i}", 1.5);
+            var result = _sessionService.CreateSession($"connection-{i}");
             names.Add(result.Session!.Name);
         }
 
@@ -190,12 +190,12 @@ public class SessionServiceTests
         // Arrange - create max sessions (6)
         for (int i = 0; i < 6; i++)
         {
-            var result = _sessionService.CreateSession($"connection-{i}", 1.5);
+            var result = _sessionService.CreateSession($"connection-{i}");
             result.Success.Should().BeTrue($"session {i} should be created successfully");
         }
 
         // Act - try to create one more
-        var failedResult = _sessionService.CreateSession("connection-overflow", 1.5);
+        var failedResult = _sessionService.CreateSession("connection-overflow");
 
         // Assert
         failedResult.Success.Should().BeFalse();
@@ -208,11 +208,11 @@ public class SessionServiceTests
     public void CreateSession_WhileAlreadyInSession_ShouldFail()
     {
         // Arrange - create a session first
-        var result = _sessionService.CreateSession("connection-1", 1.5);
+        var result = _sessionService.CreateSession("connection-1");
         result.Success.Should().BeTrue();
 
         // Act - try to create another session with the same connection
-        var failedResult = _sessionService.CreateSession("connection-1", 1.5);
+        var failedResult = _sessionService.CreateSession("connection-1");
 
         // Assert
         failedResult.Success.Should().BeFalse();
@@ -225,8 +225,8 @@ public class SessionServiceTests
     public void JoinSession_WhileAlreadyInSession_ShouldFail()
     {
         // Arrange - create two sessions
-        var session1 = _sessionService.CreateSession("connection-1", 1.5).Session!;
-        var session2 = _sessionService.CreateSession("connection-2", 1.5).Session!;
+        var session1 = _sessionService.CreateSession("connection-1").Session!;
+        var session2 = _sessionService.CreateSession("connection-2").Session!;
 
         // Join session1 with connection-3
         var joinResult = _sessionService.JoinSession(session1.Id, "connection-3");
@@ -246,7 +246,7 @@ public class SessionServiceTests
     public void JoinSession_SessionFull_ShouldFail()
     {
         // Arrange - create a session and fill it with 4 members (max)
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.JoinSession(session.Id, "connection-2");
         _sessionService.JoinSession(session.Id, "connection-3");
         _sessionService.JoinSession(session.Id, "connection-4");
@@ -266,33 +266,35 @@ public class SessionServiceTests
     }
 
     [Fact]
-    public void CreateSession_ShouldStoreAspectRatio()
+    public void CreateSession_ShouldStoreMetadata()
     {
         // Act
-        var result = _sessionService.CreateSession("connection-1", 1.7777);
+        var metadata = new Dictionary<string, object?> { ["aspectRatio"] = 1.7777, ["gameMode"] = "classic" };
+        var result = _sessionService.CreateSession("connection-1", metadata);
         var session = result.Session!;
 
         // Assert
-        session.AspectRatio.Should().BeApproximately(1.7777, 0.001);
+        session.Metadata.Should().ContainKey("aspectRatio").WhoseValue.Should().Be(1.7777);
+        session.Metadata.Should().ContainKey("gameMode").WhoseValue.Should().Be("classic");
     }
 
     [Fact]
-    public void CreateSession_ShouldClampAspectRatioToValidRange()
+    public void CreateSession_NullMetadata_ShouldDefaultToEmptyDictionary()
     {
-        // Act - try to create with extreme aspect ratios
-        var tooWide = _sessionService.CreateSession("connection-1", 10.0);
-        var tooTall = _sessionService.CreateSession("connection-2", 0.1);
+        // Act
+        var result = _sessionService.CreateSession("connection-1");
+        var session = result.Session!;
 
-        // Assert - should be clamped to 0.25-4.0 range
-        tooWide.Session!.AspectRatio.Should().Be(4.0);
-        tooTall.Session!.AspectRatio.Should().Be(0.25);
+        // Assert
+        session.Metadata.Should().NotBeNull().And.BeEmpty();
     }
 
     [Fact]
-    public void JoinSession_ShouldReturnSessionWithAspectRatio()
+    public void JoinSession_ShouldReturnSessionWithMetadata()
     {
         // Arrange
-        var createResult = _sessionService.CreateSession("connection-1", 1.333);
+        var metadata = new Dictionary<string, object?> { ["aspectRatio"] = 1.333 };
+        var createResult = _sessionService.CreateSession("connection-1", metadata);
         var session = createResult.Session!;
 
         // Act
@@ -300,14 +302,14 @@ public class SessionServiceTests
 
         // Assert
         joinResult.Success.Should().BeTrue();
-        joinResult.Session!.AspectRatio.Should().BeApproximately(1.333, 0.001);
+        joinResult.Session!.Metadata.Should().ContainKey("aspectRatio").WhoseValue.Should().Be(1.333);
     }
 
     [Fact]
     public void JoinSession_EmptySession_ShouldBecomeServer()
     {
         // Arrange - create session, then all members leave
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.LeaveSession("connection-1");
 
         // Act - join the empty session
@@ -322,7 +324,7 @@ public class SessionServiceTests
     public void JoinSession_EmptySession_ShouldClearLastMemberLeftAt()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.LeaveSession("connection-1");
         session.LastMemberLeftAt.Should().NotBeNull();
 
@@ -337,8 +339,8 @@ public class SessionServiceTests
     public void GetAllSessions_ShouldIncludeEmptySessions()
     {
         // Arrange - create sessions, leave one empty
-        _sessionService.CreateSession("connection-1", 1.5);
-        var session2 = _sessionService.CreateSession("connection-2", 1.5).Session!;
+        _sessionService.CreateSession("connection-1");
+        var session2 = _sessionService.CreateSession("connection-2").Session!;
         _sessionService.LeaveSession("connection-2");
 
         // Act
@@ -354,7 +356,7 @@ public class SessionServiceTests
     public void ForceDestroySession_ShouldRemoveSessionAndMembers()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.JoinSession(session.Id, "connection-2");
 
         // Act
@@ -375,7 +377,7 @@ public class SessionServiceTests
     public void ForceDestroySession_EmptySession_ShouldReturnEmptyConnectionIds()
     {
         // Arrange
-        var session = _sessionService.CreateSession("connection-1", 1.5).Session!;
+        var session = _sessionService.CreateSession("connection-1").Session!;
         _sessionService.LeaveSession("connection-1");
 
         // Act

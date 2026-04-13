@@ -495,7 +495,7 @@ public class ConcurrencyTests : TestBase
         for (int trial = 0; trial < 10; trial++)
         {
             var svc = new SessionService();
-            svc.CreateSession("server", 1.5);
+            svc.CreateSession("server");
             var session = svc.GetAllSessions().First();
 
             // Join three clients sequentially — JoinedAt is assigned to DateTime.UtcNow
@@ -530,7 +530,7 @@ public class ConcurrencyTests : TestBase
         for (int trial = 0; trial < 20; trial++)
         {
             var svc = new SessionService();
-            svc.CreateSession("server", 1.5);
+            svc.CreateSession("server");
             var session = svc.GetAllSessions().First();
             svc.JoinSession(session.Id, "c1");
             svc.JoinSession(session.Id, "c2");

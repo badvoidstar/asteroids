@@ -8,12 +8,12 @@ namespace AstervoidsWeb.Services;
 public interface ISessionService
 {
     /// <summary>
-    /// Creates a new session with a randomly generated fruit name.
+    /// Creates a new session with a name provided by the configured <see cref="ISessionNameGenerator"/>.
     /// </summary>
     /// <param name="creatorConnectionId">SignalR connection ID of the creator.</param>
-    /// <param name="aspectRatio">The aspect ratio (width/height) to lock for this session.</param>
+    /// <param name="metadata">Optional key-value metadata for the session (e.g. aspect ratio, game mode).</param>
     /// <returns>Result indicating success/failure with session and member if successful.</returns>
-    CreateSessionResult CreateSession(string creatorConnectionId, double aspectRatio);
+    CreateSessionResult CreateSession(string creatorConnectionId, Dictionary<string, object?>? metadata = null);
 
     /// <summary>
     /// Joins an existing session as a client.

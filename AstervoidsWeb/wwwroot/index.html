@@ -1604,9 +1604,9 @@
         canvas.height = newHeight;
         
         // Calculate viewport (gameplay area) based on mode
-        if (isSessionMode() && game.sessionInfo && game.sessionInfo.aspectRatio) {
+        if (isSessionMode() && game.sessionInfo && game.sessionInfo.metadata && game.sessionInfo.metadata.aspectRatio) {
             // Session mode: constrain to locked aspect ratio
-            const lockedAspectRatio = game.sessionInfo.aspectRatio;
+            const lockedAspectRatio = game.sessionInfo.metadata.aspectRatio;
             const windowAspectRatio = newWidth / newHeight;
             
             let viewportWidth, viewportHeight;
@@ -4547,12 +4547,25 @@
                         returnToStartScreen('Session lost during reconnection');
                     }
                 });
-                // Apply configured sync timing
+                // Apply configured sync timing and field compression map
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
                     minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME,
                     deltaEncoding: CONFIG.DELTA_ENCODING_ENABLED,
-                    adaptiveSendRate: CONFIG.ADAPTIVE_SEND_RATE
+                    adaptiveSendRate: CONFIG.ADAPTIVE_SEND_RATE,
+                    fieldMap: {
+                        type: 't', x: 'x', y: 'y', angle: 'a',
+                        velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',
+                        thrusting: 'th', invulnerable: 'iv', colorIndex: 'ci',
+                        memberId: 'mi', score: 'sc', hitCount: 'hc',
+                        radius: 'r', seed: 'sd',
+                        lifetime: 'lt', ownerMemberId: 'om',
+                        pendingHit: 'ph', hitTargetId: 'ht', hitImpactTorque: 'hi',
+                        gameStarted: 'gs', wave: 'w', state: 'st', lives: 'lv',
+                        speedMultiplier: 'sm', waveDelayTimer: 'wd',
+                        processedHits: 'pi', processedScores: 'ps',
+                        groupScore: 'gr', peakShipCount: 'pk'
+                    }
                 });
                 
                 sessionPicker.connected = true;
@@ -4595,7 +4608,7 @@
                     name: result.session.name,
                     memberId: result.member.id,
                     role: result.member.role,
-                    aspectRatio: result.session.aspectRatio
+                    metadata: result.session.metadata
                 };
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = result.member.role === 'Server';
@@ -4633,7 +4646,7 @@
 
             // Capture the current aspect ratio at the moment of session creation
             const currentAspectRatio = canvas.width / canvas.height;
-            const result = await SessionClient.createSession(currentAspectRatio);
+            const result = await SessionClient.createSession({ aspectRatio: currentAspectRatio });
             if (result) {
                 // Enter lobby state as server
                 game.state = 'lobby';
@@ -4643,7 +4656,7 @@
                     name: result.session.name,
                     memberId: result.member.id,
                     role: result.member.role,
-                    aspectRatio: result.session.aspectRatio
+                    metadata: result.session.metadata
                 };
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = true; // Creator is always server
@@ -4916,7 +4929,7 @@
                             name: result.session.name,
                             memberId: result.member.id,
                             role: result.member.role,
-                            aspectRatio: result.session.aspectRatio
+                            metadata: result.session.metadata
                         };
                         sessionPicker.currentSessionId = result.session.id;
                         sessionPicker.isServer = result.member.role === 'Server';
