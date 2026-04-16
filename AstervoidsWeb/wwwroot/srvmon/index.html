@@ -247,8 +247,8 @@
                         let txRate = null, rxRate = null;
                         const prev = prevMemberBytes[m.memberId];
                         if (prev && elapsedMs > 0) {
-                            txRate = (m.txBytes - prev.txBytes) / elapsedMs * 1000;
-                            rxRate = (m.rxBytes - prev.rxBytes) / elapsedMs * 1000;
+                            txRate = Math.max(0, (m.txBytes - prev.txBytes) / elapsedMs * 1000);
+                            rxRate = Math.max(0, (m.rxBytes - prev.rxBytes) / elapsedMs * 1000);
                         }
                         nextMemberBytes[m.memberId] = { txBytes: m.txBytes, rxBytes: m.rxBytes };
 
