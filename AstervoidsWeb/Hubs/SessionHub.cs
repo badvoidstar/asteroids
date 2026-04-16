@@ -14,6 +14,7 @@ public class SessionHub : Hub
     private readonly ISessionService _sessionService;
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
+    private readonly ServerMetricsService _metrics;
 
     // Group name for all connected clients to receive session list updates
     internal const string AllClientsGroup = "AllClients";
@@ -21,11 +22,13 @@ public class SessionHub : Hub
     public SessionHub(
         ISessionService sessionService,
         IObjectService objectService,
-        ILogger<SessionHub> logger)
+        ILogger<SessionHub> logger,
+        ServerMetricsService metrics)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
+        _metrics = metrics;
     }
 
     // ── Helper methods ──────────────────────────────────────────────────
@@ -98,6 +101,7 @@ public class SessionHub : Hub
     /// </summary>
     public override async Task OnConnectedAsync()
     {
+        _metrics.OnConnected();
         await Groups.AddToGroupAsync(Context.ConnectionId, AllClientsGroup);
         await base.OnConnectedAsync();
     }
@@ -118,6 +122,8 @@ public class SessionHub : Hub
 
         var session = result.Session!;
         var creator = result.Creator!;
+
+        _metrics.OnHubInvocation(creator.Id);
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
@@ -160,6 +166,11 @@ public class SessionHub : Hub
         var session = result.Session!;
         var member = result.Member!;
 
+        _metrics.OnHubInvocation(member.Id);
+
+        if (evictMemberId.HasValue)
+            _metrics.OnReconnect(member.Id);
+
         // ── Broadcast eviction to remaining members ────────────────────────────
         // When a stale member was evicted during this join, notify the group
         // BEFORE adding the new member. This ensures remaining members remove
@@ -174,6 +185,11 @@ public class SessionHub : Hub
             // SignalR doesn't try to deliver to a stale transport.
             await Groups.RemoveFromGroupAsync(eviction.EvictedConnectionId, session.Id.ToString());
 
+            // Track RX for all current session members except the new joiner
+            // (new joiner is not yet in the SignalR group and won't receive this)
+            var evictionRecipients = session.Members.Keys.Where(id => id != member.Id);
+            _metrics.OnBroadcastToMembers(evictionRecipients);
+
             await Clients.Group(session.Id.ToString()).SendAsync("OnMemberLeft",
                 new MemberLeftInfo(
                     eviction.EvictedMemberId,
@@ -183,6 +199,8 @@ public class SessionHub : Hub
                     eviction.MigratedObjects
                 ),
                 eviction.EvictedMemberId, (long)0, evictTimestamp);
+
+            _metrics.RemoveMember(eviction.EvictedMemberId);
 
             _logger.LogInformation(
                 "Broadcast eviction of stale member {EvictedMemberId} from session {SessionName}. " +
@@ -203,6 +221,10 @@ public class SessionHub : Hub
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Track RX for all existing session members (they receive the OnMemberJoined broadcast)
+        var joinedRecipients = session.Members.Keys.Where(id => id != member.Id);
+        _metrics.OnBroadcastToMembers(joinedRecipients);
 
         // Notify other members
         await Clients.OthersInGroup(session.Id.ToString()).SendAsync("OnMemberJoined",
@@ -251,6 +273,9 @@ public class SessionHub : Hub
         {
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+            // Track RX for all remaining members (they receive the OnMemberLeft broadcast)
+            _metrics.OnBroadcastToMembers(result.RemainingMemberIds);
+
             // Notify remaining members with enriched departure info.
             // Promotion info and object disposal are all in the single LeaveSessionResult,
             // captured atomically by the service.
@@ -281,6 +306,8 @@ public class SessionHub : Hub
         }
 
         _logger.LogInformation("Member {MemberId} left session {SessionName}", result.MemberId, result.SessionName);
+
+        _metrics.RemoveMember(result.MemberId);
 
         // Broadcast session list update to all connected clients
         await BroadcastSessionsChanged();
@@ -328,6 +355,8 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
+        _metrics.OnHubInvocation(member.Id);
+
         var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId));
         if (obj == null)
         {
@@ -339,6 +368,10 @@ public class SessionHub : Hub
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Track RX for all session members except the sender (OthersInGroup)
+        var recipients = session.Members.Keys.Where(id => id != member.Id);
+        _metrics.OnBroadcastToMembers(recipients);
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -363,7 +396,9 @@ public class SessionHub : Hub
             _logger.LogWarning("UpdateObjects failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-        var (member, _) = ctx.Value;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id);
 
         // Map hub request type to service type; ownership enforcement is inside the service.
         var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data));
@@ -386,6 +421,11 @@ public class SessionHub : Hub
                 .Where(o => requestDataByObjectId.ContainsKey(o.Id))
                 .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version))
                 .ToList();
+
+            // Track RX for all session members except the sender (OthersInGroup)
+            var recipients = session.Members.Keys.Where(id => id != member.Id);
+            _metrics.OnBroadcastToMembers(recipients);
+
             // Broadcast to other members only — sender gets versions/RTT from the response
             await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
                 updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs);
@@ -415,7 +455,9 @@ public class SessionHub : Hub
             _logger.LogWarning("DeleteObject failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-        var (member, _) = ctx.Value;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id);
 
         // Ownership is enforced atomically inside the service.
         var deletedObj = _objectService.DeleteObject(member.SessionId, objectId, member.Id);
@@ -428,6 +470,10 @@ public class SessionHub : Hub
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Track RX for all session members except the sender (OthersInGroup)
+        var recipients = session.Members.Keys.Where(id => id != member.Id);
+        _metrics.OnBroadcastToMembers(recipients);
 
         // Broadcast to other members only — sender deleted locally before invoking (local-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -452,7 +498,9 @@ public class SessionHub : Hub
             _logger.LogWarning("ReplaceObject failed - member not found");
             return null;
         }
-        var (member, _) = ctx.Value;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id);
 
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
@@ -474,6 +522,9 @@ public class SessionHub : Hub
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Track RX for ALL session members (Group broadcast, including sender)
+        _metrics.OnBroadcastToMembers(session.Members.Keys);
 
         // Single atomic broadcast
         // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
@@ -501,7 +552,10 @@ public class SessionHub : Hub
             _logger.LogWarning("GetSessionState failed - member not found for connection {ConnectionId}", Context.ConnectionId);
             return null;
         }
-        var (_, session) = ctx.Value;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnReconciliation(member.Id);
 
         var (members, objects) = ToSessionSnapshot(session);
 
@@ -520,6 +574,8 @@ public class SessionHub : Hub
         {
             _logger.LogWarning(exception, "Client disconnected with exception: {ConnectionId}", Context.ConnectionId);
         }
+
+        _metrics.OnDisconnected();
 
         // Clean up session membership - must not throw to prevent orphaned entries
         try

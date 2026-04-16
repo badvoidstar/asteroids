@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Astervoids – Server Monitor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: #0a0a0a;
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+            padding: 24px;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 8px;
+            color: #00ff00;
+        }
+
+        #status-label {
+            font-size: 0.85rem;
+            color: #888;
+            margin-bottom: 20px;
+        }
+
+        .columns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            margin-bottom: 32px;
+        }
+
+        .column h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 6px;
+        }
+
+        .metric-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .metric-list li {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1a1a;
+            font-size: 0.95rem;
+        }
+
+        .metric-label {
+            color: #888;
+        }
+
+        .metric-value {
+            text-align: right;
+            min-width: 80px;
+        }
+
+        .section-heading {
+            font-size: 0.95rem;
+            color: #ffff00;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+
+        .rtt-good { color: #00ff00; }
+        .rtt-ok   { color: #ffff00; }
+        .rtt-bad  { color: #ff0000; }
+
+        #sessions-section {
+            margin-top: 8px;
+        }
+
+        .session-block {
+            margin-bottom: 28px;
+        }
+
+        .session-title {
+            font-size: 1.0rem;
+            color: #ffff00;
+            margin-bottom: 6px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 4px;
+        }
+
+        .member-block {
+            margin-top: 10px;
+        }
+
+        .member-title {
+            font-size: 0.85rem;
+            color: #aaaaaa;
+            margin-bottom: 4px;
+        }
+
+        .no-sessions {
+            color: #555;
+            font-style: italic;
+            font-size: 0.9rem;
+        }
+
+        #error-label {
+            color: #ff4444;
+            font-size: 0.9rem;
+            margin-bottom: 12px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Astervoids Server Monitor</h1>
+    <div id="status-label">Connecting…</div>
+    <div id="error-label"></div>
+
+    <div class="columns">
+        <div class="column">
+            <h2>System</h2>
+            <ul class="metric-list" id="system-metrics"></ul>
+        </div>
+        <div class="column">
+            <h2>Connections &amp; Hub</h2>
+            <ul class="metric-list" id="conn-metrics"></ul>
+        </div>
+    </div>
+
+    <div id="sessions-section">
+        <h2 style="font-size:1.1rem; margin-bottom:12px; border-bottom:1px solid #333; padding-bottom:6px;">Sessions</h2>
+        <div id="sessions-list"></div>
+    </div>
+
+    <script>
+        const POLL_INTERVAL_MS = 2000;
+
+        const systemEl    = document.getElementById('system-metrics');
+        const connEl      = document.getElementById('conn-metrics');
+        const sessionsEl  = document.getElementById('sessions-list');
+        const statusEl    = document.getElementById('status-label');
+        const errorEl     = document.getElementById('error-label');
+
+        // Rate tracking
+        let prevInvocations = null;
+        let prevTimestamp    = null;
+
+        // ── Formatters ─────────────────────────────────────────────────────────
+
+        function fmtUptime(seconds) {
+            const s = Math.floor(seconds);
+            const d = Math.floor(s / 86400);
+            const h = Math.floor((s % 86400) / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            if (d > 0) return `${d}d ${h}h ${m}m`;
+            if (h > 0) return `${h}h ${m}m ${sec}s`;
+            if (m > 0) return `${m}m ${sec}s`;
+            return `${sec}s`;
+        }
+
+        function fmtBytes(bytes) {
+            if (bytes === 0) return '—';
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+            return `${(bytes / 1048576).toFixed(1)} MB`;
+        }
+
+        function cpuClass(pct) {
+            if (pct <= 50) return 'rtt-good';
+            if (pct <= 80) return 'rtt-ok';
+            return 'rtt-bad';
+        }
+
+        function memClass(pct) {
+            if (pct <= 60) return 'rtt-good';
+            if (pct <= 85) return 'rtt-ok';
+            return 'rtt-bad';
+        }
+
+        // ── Render helpers ─────────────────────────────────────────────────────
+
+        function li(label, value, cls) {
+            const vCls = cls ? ` class="${cls}"` : '';
+            return `<li><span class="metric-label">${label}</span><span class="metric-value"${vCls}>${value}</span></li>`;
+        }
+
+        function renderSystem(sys) {
+            const uptime = fmtUptime(sys.uptimeSeconds);
+            systemEl.innerHTML = [
+                li('CPU Usage',   `${sys.cpuUsagePercent.toFixed(1)} %`, cpuClass(sys.cpuUsagePercent)),
+                li('Memory Usage', `${sys.memoryUsagePercent.toFixed(1)} %`, memClass(sys.memoryUsagePercent)),
+                li('Working Set', fmtBytes(sys.memoryWorkingSetBytes)),
+                li('Total RAM',   fmtBytes(sys.memoryTotalBytes)),
+                li('Uptime',      uptime),
+                li('GC Gen 0',    sys.gcGen0),
+                li('GC Gen 1',    sys.gcGen1),
+                li('GC Gen 2',    sys.gcGen2),
+                li('TP Workers',  `${sys.threadPoolWorkerAvailable} / ${sys.threadPoolWorkerMax} avail`),
+                li('TP I/O',      `${sys.threadPoolIoAvailable} / ${sys.threadPoolIoMax} avail`),
+            ].join('');
+        }
+
+        function renderConnections(conn, invocationsPerSec) {
+            const rateStr = invocationsPerSec !== null ? `${invocationsPerSec}/s` : '—';
+            connEl.innerHTML = [
+                li('Current',        conn.currentConnections),
+                li('Peak',           conn.peakConnections),
+                li('Hub Invocations', conn.totalHubInvocations),
+                li('Invocations/sec', rateStr),
+            ].join('');
+        }
+
+        function shortId(uuid) {
+            return uuid ? uuid.substring(0, 8) + '…' : '?';
+        }
+
+        function renderSessions(sessions) {
+            if (!sessions || sessions.length === 0) {
+                sessionsEl.innerHTML = '<div class="no-sessions">No active sessions.</div>';
+                return;
+            }
+
+            let html = '';
+            for (const s of sessions) {
+                const ageSeconds = (Date.now() - new Date(s.createdAt).getTime()) / 1000;
+                html += `<div class="session-block">`;
+                html += `<div class="session-title">Session: ${escHtml(s.sessionName)} &mdash; ${s.memberCount} member(s), ${s.objectCount} object(s), age ${fmtUptime(ageSeconds)}</div>`;
+
+                if (!s.members || s.members.length === 0) {
+                    html += `<div class="no-sessions">No members.</div>`;
+                } else {
+                    for (const m of s.members) {
+                        const roleLabel = m.role === 'Server' ? ' (Server)' : '';
+                        html += `<div class="member-block">`;
+                        html += `<div class="member-title">${shortId(m.memberId)}${roleLabel}</div>`;
+                        html += `<ul class="metric-list">`;
+                        html += li('Objects Owned', m.objectsOwned);
+                        html += li('Event Seq',     m.eventSequence);
+                        html += li('TX Messages',   m.txCount);
+                        html += li('RX Messages',   m.rxCount);
+                        html += li('TX Bytes',      fmtBytes(m.txBytes));
+                        html += li('RX Bytes',      fmtBytes(m.rxBytes));
+                        html += li('Reconciliations', m.reconciliations);
+                        html += li('Reconnects',    m.reconnects);
+                        html += `</ul></div>`;
+                    }
+                }
+
+                html += `</div>`;
+            }
+            sessionsEl.innerHTML = html;
+        }
+
+        function escHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // ── Polling ────────────────────────────────────────────────────────────
+
+        async function poll() {
+            try {
+                const res = await fetch('/api/srvmon');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                const now = Date.now();
+                let invocationsPerSec = null;
+                if (prevInvocations !== null && prevTimestamp !== null) {
+                    const elapsed = now - prevTimestamp;
+                    if (elapsed > 0) {
+                        invocationsPerSec = ((data.connections.totalHubInvocations - prevInvocations) / elapsed * 1000).toFixed(1);
+                    }
+                }
+                prevInvocations = data.connections.totalHubInvocations;
+                prevTimestamp   = now;
+
+                renderSystem(data.system);
+                renderConnections(data.connections, invocationsPerSec);
+                renderSessions(data.sessions);
+
+                statusEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+                errorEl.style.display = 'none';
+            } catch (err) {
+                errorEl.textContent = `Poll error: ${err.message}`;
+                errorEl.style.display = '';
+                statusEl.textContent = 'Error — retrying…';
+            }
+        }
+
+        poll();
+        setInterval(poll, POLL_INTERVAL_MS);
+    </script>
+</body>
+</html>

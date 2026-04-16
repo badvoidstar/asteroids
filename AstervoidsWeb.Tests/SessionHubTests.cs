@@ -154,7 +154,8 @@ public class SessionHubTests
         var hub = new SessionHub(
             _sessionService,
             _objectService,
-            Mock.Of<ILogger<SessionHub>>());
+            Mock.Of<ILogger<SessionHub>>(),
+            new ServerMetricsService());
 
         var context = new Mock<HubCallerContext>();
         context.SetupGet(c => c.ConnectionId).Returns(connectionId);
