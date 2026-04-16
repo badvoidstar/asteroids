@@ -1,5 +1,8 @@
+using AstervoidsWeb.Formatters;
 using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
+using MessagePack;
+using MessagePack.Resolvers;
 using Microsoft.AspNetCore.SignalR;
 
 namespace AstervoidsWeb.Hubs;
@@ -29,6 +32,42 @@ public class SessionHub : Hub
         _objectService = objectService;
         _logger = logger;
         _metrics = metrics;
+    }
+
+    // ── Payload byte estimation ────────────────────────────────────────
+
+    /// <summary>
+    /// MessagePack options matching Program.cs configuration, used to estimate
+    /// serialized payload sizes for bandwidth tracking.
+    /// </summary>
+    private static readonly MessagePackSerializerOptions _estimatorOptions =
+        MessagePackSerializerOptions.Standard
+            .WithResolver(CompositeResolver.Create(
+                BinaryGuidResolver.Instance,
+                ContractlessStandardResolver.Instance))
+            .WithSecurity(MessagePackSecurity.UntrustedData);
+
+    /// <summary>
+    /// Estimates the serialized byte size of hub method arguments using MessagePack.
+    /// Used for per-member bandwidth tracking in <see cref="ServerMetricsService"/>.
+    /// Best-effort: returns 0 on any serialization error so monitoring never breaks hub functionality.
+    /// </summary>
+    private static long EstimatePayloadBytes(params object?[] args)
+    {
+        long total = 0;
+        foreach (var arg in args)
+        {
+            if (arg == null) { total += 1; continue; } // MessagePack nil = 1 byte
+            try
+            {
+                total += MessagePackSerializer.Serialize(arg, _estimatorOptions).Length;
+            }
+            catch
+            {
+                // Best-effort — monitoring must not break hub functionality
+            }
+        }
+        return total;
     }
 
     // ── Helper methods ──────────────────────────────────────────────────
@@ -123,7 +162,7 @@ public class SessionHub : Hub
         var session = result.Session!;
         var creator = result.Creator!;
 
-        _metrics.OnHubInvocation(creator.Id);
+        _metrics.OnHubInvocation(creator.Id, EstimatePayloadBytes(metadata));
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
@@ -166,7 +205,7 @@ public class SessionHub : Hub
         var session = result.Session!;
         var member = result.Member!;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(sessionId, evictMemberId));
 
         if (evictMemberId.HasValue)
             _metrics.OnReconnect(member.Id);
@@ -188,16 +227,18 @@ public class SessionHub : Hub
             // Track RX for all current session members except the new joiner
             // (new joiner is not yet in the SignalR group and won't receive this)
             var evictionRecipients = session.Members.Keys.Where(id => id != member.Id);
-            _metrics.OnBroadcastToMembers(evictionRecipients);
+            var evictionInfo = new MemberLeftInfo(
+                eviction.EvictedMemberId,
+                eviction.PromotedMember?.Id,
+                eviction.PromotedMember?.Role.ToString(),
+                eviction.DeletedObjectIds,
+                eviction.MigratedObjects
+            );
+            _metrics.OnBroadcastToMembers(evictionRecipients,
+                EstimatePayloadBytes(evictionInfo, eviction.EvictedMemberId, (long)0, evictTimestamp));
 
             await Clients.Group(session.Id.ToString()).SendAsync("OnMemberLeft",
-                new MemberLeftInfo(
-                    eviction.EvictedMemberId,
-                    eviction.PromotedMember?.Id,
-                    eviction.PromotedMember?.Role.ToString(),
-                    eviction.DeletedObjectIds,
-                    eviction.MigratedObjects
-                ),
+                evictionInfo,
                 eviction.EvictedMemberId, (long)0, evictTimestamp);
 
             _metrics.RemoveMember(eviction.EvictedMemberId);
@@ -224,11 +265,13 @@ public class SessionHub : Hub
 
         // Track RX for all existing session members (they receive the OnMemberJoined broadcast)
         var joinedRecipients = session.Members.Keys.Where(id => id != member.Id);
-        _metrics.OnBroadcastToMembers(joinedRecipients);
+        var joinedMemberInfo = ToMemberInfo(member);
+        _metrics.OnBroadcastToMembers(joinedRecipients,
+            EstimatePayloadBytes(joinedMemberInfo, member.Id, memberSequence, serverTimestamp));
 
         // Notify other members
         await Clients.OthersInGroup(session.Id.ToString()).SendAsync("OnMemberJoined",
-            ToMemberInfo(member),
+            joinedMemberInfo,
             member.Id, memberSequence, serverTimestamp);
 
         _logger.LogInformation(
@@ -274,19 +317,21 @@ public class SessionHub : Hub
             var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             // Track RX for all remaining members (they receive the OnMemberLeft broadcast)
-            _metrics.OnBroadcastToMembers(result.RemainingMemberIds);
+            var departureInfo = new MemberLeftInfo(
+                result.MemberId,
+                result.PromotedMember?.Id,
+                result.PromotedMember?.Role.ToString(),
+                result.DeletedObjectIds,
+                result.MigratedObjects
+            );
+            _metrics.OnBroadcastToMembers(result.RemainingMemberIds,
+                EstimatePayloadBytes(departureInfo, result.MemberId, (long)0, serverTimestamp));
 
             // Notify remaining members with enriched departure info.
             // Promotion info and object disposal are all in the single LeaveSessionResult,
             // captured atomically by the service.
             await Clients.Group(result.SessionId.ToString()).SendAsync("OnMemberLeft",
-                new MemberLeftInfo(
-                    result.MemberId,
-                    result.PromotedMember?.Id,
-                    result.PromotedMember?.Role.ToString(),
-                    result.DeletedObjectIds,
-                    result.MigratedObjects
-                ),
+                departureInfo,
                 result.MemberId, (long)0, serverTimestamp);
 
             if (result.PromotedMember != null)
@@ -355,7 +400,7 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId));
 
         var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId));
         if (obj == null)
@@ -371,7 +416,8 @@ public class SessionHub : Hub
 
         // Track RX for all session members except the sender (OthersInGroup)
         var recipients = session.Members.Keys.Where(id => id != member.Id);
-        _metrics.OnBroadcastToMembers(recipients);
+        _metrics.OnBroadcastToMembers(recipients,
+            EstimatePayloadBytes(objectInfo, member.Id, memberSequence, serverTimestamp));
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -398,7 +444,7 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, clientTimestamp, senderSendIntervalMs));
 
         // Map hub request type to service type; ownership enforcement is inside the service.
         var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data));
@@ -424,7 +470,8 @@ public class SessionHub : Hub
 
             // Track RX for all session members except the sender (OthersInGroup)
             var recipients = session.Members.Keys.Where(id => id != member.Id);
-            _metrics.OnBroadcastToMembers(recipients);
+            _metrics.OnBroadcastToMembers(recipients,
+                EstimatePayloadBytes(updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs));
 
             // Broadcast to other members only — sender gets versions/RTT from the response
             await Clients.OthersInGroup(member.SessionId.ToString()).SendAsync("OnObjectsUpdated",
@@ -457,7 +504,7 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(objectId));
 
         // Ownership is enforced atomically inside the service.
         var deletedObj = _objectService.DeleteObject(member.SessionId, objectId, member.Id);
@@ -473,7 +520,8 @@ public class SessionHub : Hub
 
         // Track RX for all session members except the sender (OthersInGroup)
         var recipients = session.Members.Keys.Where(id => id != member.Id);
-        _metrics.OnBroadcastToMembers(recipients);
+        _metrics.OnBroadcastToMembers(recipients,
+            EstimatePayloadBytes(objectId, member.Id, memberSequence, serverTimestamp));
 
         // Broadcast to other members only — sender deleted locally before invoking (local-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -500,7 +548,7 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(deleteObjectId, replacements, scope, ownerMemberId));
 
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
@@ -524,14 +572,16 @@ public class SessionHub : Hub
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Track RX for ALL session members (Group broadcast, including sender)
-        _metrics.OnBroadcastToMembers(session.Members.Keys);
+        var replaceEvent = new ObjectReplacedEvent(deleteObjectId, createdInfos);
+        _metrics.OnBroadcastToMembers(session.Members.Keys,
+            EstimatePayloadBytes(replaceEvent, member.Id, memberSequence, serverTimestamp));
 
         // Single atomic broadcast
         // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
         // update its local object map (replaceObject is not local-first). Would need
         // to refactor replaceObject to process the invoke response locally first.
         await Clients.Group(member.SessionId.ToString()).SendAsync("OnObjectReplaced",
-            new ObjectReplacedEvent(deleteObjectId, createdInfos),
+            replaceEvent,
             member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
@@ -554,7 +604,7 @@ public class SessionHub : Hub
         }
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id);
+        _metrics.OnHubInvocation(member.Id, 1); // GetSessionState has no payload arguments
         _metrics.OnReconciliation(member.Id);
 
         var (members, objects) = ToSessionSnapshot(session);

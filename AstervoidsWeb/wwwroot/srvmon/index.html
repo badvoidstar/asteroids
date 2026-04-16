@@ -146,6 +146,7 @@
         // Rate tracking
         let prevInvocations = null;
         let prevTimestamp    = null;
+        let prevMemberBytes  = {};   // { memberId: { txBytes, rxBytes } }
 
         // ── Formatters ─────────────────────────────────────────────────────────
 
@@ -166,6 +167,13 @@
             if (bytes < 1024) return `${bytes} B`;
             if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
             return `${(bytes / 1048576).toFixed(1)} MB`;
+        }
+
+        function fmtBytesPerSec(bytesPerSec) {
+            if (bytesPerSec === null || bytesPerSec === undefined) return '—';
+            if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`;
+            if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+            return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`;
         }
 
         function cpuClass(pct) {
@@ -217,12 +225,14 @@
             return uuid ? uuid.substring(0, 8) + '…' : '?';
         }
 
-        function renderSessions(sessions) {
+        function renderSessions(sessions, elapsedMs) {
             if (!sessions || sessions.length === 0) {
                 sessionsEl.innerHTML = '<div class="no-sessions">No active sessions.</div>';
+                prevMemberBytes = {};
                 return;
             }
 
+            const nextMemberBytes = {};
             let html = '';
             for (const s of sessions) {
                 const ageSeconds = (Date.now() - new Date(s.createdAt).getTime()) / 1000;
@@ -233,6 +243,15 @@
                     html += `<div class="no-sessions">No members.</div>`;
                 } else {
                     for (const m of s.members) {
+                        // Compute per-member byte rates from successive polls
+                        let txRate = null, rxRate = null;
+                        const prev = prevMemberBytes[m.memberId];
+                        if (prev && elapsedMs > 0) {
+                            txRate = (m.txBytes - prev.txBytes) / elapsedMs * 1000;
+                            rxRate = (m.rxBytes - prev.rxBytes) / elapsedMs * 1000;
+                        }
+                        nextMemberBytes[m.memberId] = { txBytes: m.txBytes, rxBytes: m.rxBytes };
+
                         const roleLabel = m.role === 'Server' ? ' (Server)' : '';
                         html += `<div class="member-block">`;
                         html += `<div class="member-title">${shortId(m.memberId)}${roleLabel}</div>`;
@@ -242,7 +261,9 @@
                         html += li('TX Messages',   m.txCount);
                         html += li('RX Messages',   m.rxCount);
                         html += li('TX Bytes',      fmtBytes(m.txBytes));
+                        html += li('TX Rate',       fmtBytesPerSec(txRate));
                         html += li('RX Bytes',      fmtBytes(m.rxBytes));
+                        html += li('RX Rate',       fmtBytesPerSec(rxRate));
                         html += li('Reconciliations', m.reconciliations);
                         html += li('Reconnects',    m.reconnects);
                         html += `</ul></div>`;
@@ -252,6 +273,7 @@
                 html += `</div>`;
             }
             sessionsEl.innerHTML = html;
+            prevMemberBytes = nextMemberBytes;
         }
 
         function escHtml(str) {
@@ -272,10 +294,11 @@
 
                 const now = Date.now();
                 let invocationsPerSec = null;
+                let elapsedMs = 0;
                 if (prevInvocations !== null && prevTimestamp !== null) {
-                    const elapsed = now - prevTimestamp;
-                    if (elapsed > 0) {
-                        invocationsPerSec = ((data.connections.totalHubInvocations - prevInvocations) / elapsed * 1000).toFixed(1);
+                    elapsedMs = now - prevTimestamp;
+                    if (elapsedMs > 0) {
+                        invocationsPerSec = ((data.connections.totalHubInvocations - prevInvocations) / elapsedMs * 1000).toFixed(1);
                     }
                 }
                 prevInvocations = data.connections.totalHubInvocations;
@@ -283,7 +306,7 @@
 
                 renderSystem(data.system);
                 renderConnections(data.connections, invocationsPerSec);
-                renderSessions(data.sessions);
+                renderSessions(data.sessions, elapsedMs);
 
                 statusEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
                 errorEl.style.display = 'none';
