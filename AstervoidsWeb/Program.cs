@@ -15,7 +15,14 @@ builder.Services.Configure<SessionSettings>(
 builder.Services.AddSingleton<ISessionNameGenerator, FruitNameGenerator>();
 builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IObjectService, ObjectService>();
+builder.Services.AddSingleton<ServerMetricsService>();
 builder.Services.AddHostedService<SessionCleanupService>();
+
+// Use camelCase JSON property names for REST API endpoints
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+});
 
 // Add response compression (Brotli + Gzip for all HTTP responses).
 // Compresses static files (HTML/JS/CSS), SignalR negotiation, and fallback transports.
@@ -74,5 +81,9 @@ app.UseStaticFiles();
 
 // Map SignalR hub
 app.MapHub<SessionHub>("/sessionHub");
+
+// Server monitoring metrics API endpoint
+app.MapGet("/api/srvmon", (ServerMetricsService metrics, ISessionService sessionService) =>
+    Results.Ok(metrics.GetSnapshot(sessionService)));
 
 app.Run();
