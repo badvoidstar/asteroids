@@ -308,17 +308,23 @@ jobs:
           # never delete the most recent image even if it's old.
           REPOS=$(az acr repository list --name "$ACR_NAME" -o tsv 2>/dev/null || echo "")
 
-          PURGE_CMD=""
+          # Build a single acr purge invocation with one --filter per repo.
+          # Chaining multiple `acr purge` calls with `;` breaks because `acr`
+          # is only available as a built-in for the first command in the
+          # ACR Tasks runtime; subsequent invocations fall back to /bin/sh
+          # where `acr` is not on PATH and the run exits 127.
+          PURGE_FILTERS=""
           for REPO in $REPOS; do
-            PURGE_CMD="$PURGE_CMD acr purge --filter '${REPO}:.*' --ago 14d --untagged --keep 1;"
+            PURGE_FILTERS="$PURGE_FILTERS --filter '${REPO}:.*'"
           done
 
-          if [ -z "$PURGE_CMD" ]; then
+          if [ -z "$PURGE_FILTERS" ]; then
             echo "No repositories found in $ACR_NAME"
             echo "- ℹ️ No repositories to purge" >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
 
+          PURGE_CMD="acr purge $PURGE_FILTERS --ago 14d --untagged --keep 1"
           echo "Running purge: $PURGE_CMD"
           az acr run \
             --registry "$ACR_NAME" \
