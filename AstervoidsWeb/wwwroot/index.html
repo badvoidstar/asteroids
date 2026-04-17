@@ -1005,8 +1005,10 @@
         ASTEROID_BASE_COUNT: 1,     // Starting astervoids in wave 1
         ASTEROID_BASE_SPEED: 0.15,  // Base asteroid speed per second (normalized)
         ASTEROID_SPEED_VARIANCE: 0.1, // Random speed variation (normalized)
-        ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
-        ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
+        ASTEROID_VERTICES: 16,         // Number of vertices per asteroid (must be even for alternating spike/valley pattern)
+        ASTEROID_SPIKE_LENGTH: 0.00,   // How far "spike" vertices push outward beyond base radius (0 = flush)
+        ASTEROID_SPIKE_DEPTH: 0.45,    // How far "valley" vertices pull inward from base radius
+        ASTEROID_SPIKE_JITTER: 0.50,   // Random per-vertex distance jitter (preserves seeded determinism)
         MIN_ASTEROID_RADIUS: 0.025, // Min radius before no split (normalized)
         INITIAL_ASTEROID_RADIUS: 0.083, // Starting asteroid size (normalized)
         
@@ -2152,33 +2154,37 @@
         }
 
         /**
-         * Generate an irregular polygon shape
-         * Creates the classic jagged asteroid look
-         * Uses seed for deterministic generation across clients
+         * Generate an alternating spike/valley polygon shape
+         * Even-indexed vertices are "spikes" (pushed outward); odd-indexed are "valleys" (pulled inward).
+         * ASTEROID_VERTICES must be even for a clean alternating pattern.
+         * Uses seed for deterministic shape across clients.
          * @returns {array} Array of vertices with angle and distance (normalized)
          */
         generateShape() {
             const vertices = [];
-            const vertexCount = CONFIG.ASTEROID_VERTICES;
-            
+            const vertexCount = CONFIG.ASTEROID_VERTICES; // expected to be even
+
             // Use seeded random for deterministic shape across clients
             let seedValue = this.seed;
             const seededRandom = () => {
                 seedValue = (seedValue * 9301 + 49297) % 233280;
                 return seedValue / 233280;
             };
-            
+
             for (let i = 0; i < vertexCount; i++) {
                 const angle = (i / vertexCount) * Math.PI * 2;
-                // Vary radius for jagged appearance
-                const variance = 1 - CONFIG.ASTEROID_JAGGEDNESS + 
-                                 seededRandom() * CONFIG.ASTEROID_JAGGEDNESS * 2;
+                const isSpike = i % 2 === 0;
+                const base = isSpike
+                    ? 1 + CONFIG.ASTEROID_SPIKE_LENGTH
+                    : 1 - CONFIG.ASTEROID_SPIKE_DEPTH;
+                const noise = (seededRandom() - 0.5) * CONFIG.ASTEROID_SPIKE_JITTER;
+                const multiplier = Math.max(0.05, base + noise); // 0.05 floor prevents vertex collapsing to radius ~0
                 vertices.push({
                     angle: angle,
-                    distance: this.radius * variance  // Normalized distance
+                    distance: this.radius * multiplier
                 });
             }
-            
+
             return vertices;
         }
 
