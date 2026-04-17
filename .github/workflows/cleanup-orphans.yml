@@ -284,3 +284,45 @@ jobs:
           echo ""
           echo "DNS/Cert cleanup complete"
           echo "**DNS/Cert cleanup:** Complete" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup old ACR container images (> 14 days)
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🗑️ Purging ACR images older than 14 days" >> $GITHUB_STEP_SUMMARY
+
+          # Discover the ACR in the production resource group
+          ACR_NAME=$(az acr list \
+            --resource-group "${{ env.PRODUCTION_RG }}" \
+            --query "[0].name" -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$ACR_NAME" ]; then
+            echo "No ACR found in ${{ env.PRODUCTION_RG }}, skipping image purge"
+            echo "- ⚠️ No ACR found, skipped" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "Using ACR: $ACR_NAME"
+
+          # List repositories and purge anything older than 14 days.
+          # --untagged also removes dangling manifests. --keep 1 ensures we
+          # never delete the most recent image even if it's old.
+          REPOS=$(az acr repository list --name "$ACR_NAME" -o tsv 2>/dev/null || echo "")
+
+          PURGE_CMD=""
+          for REPO in $REPOS; do
+            PURGE_CMD="$PURGE_CMD acr purge --filter '${REPO}:.*' --ago 14d --untagged --keep 1;"
+          done
+
+          if [ -z "$PURGE_CMD" ]; then
+            echo "No repositories found in $ACR_NAME"
+            echo "- ℹ️ No repositories to purge" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "Running purge: $PURGE_CMD"
+          az acr run \
+            --registry "$ACR_NAME" \
+            --cmd "$PURGE_CMD" \
+            /dev/null
+
+          echo "- ✅ Purged images older than 14 days from \`$ACR_NAME\`" >> $GITHUB_STEP_SUMMARY
