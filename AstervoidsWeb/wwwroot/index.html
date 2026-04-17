@@ -1005,8 +1005,11 @@
         ASTEROID_BASE_COUNT: 1,     // Starting astervoids in wave 1
         ASTEROID_BASE_SPEED: 0.15,  // Base asteroid speed per second (normalized)
         ASTEROID_SPEED_VARIANCE: 0.1, // Random speed variation (normalized)
-        ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
-        ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
+        ASTEROID_VERTICES: 12,      // Number of vertices per asteroid
+        ASTEROID_JAGGEDNESS: 0.35,  // Shape irregularity (0-1)
+        ASTEROID_SPIKE_PROBABILITY: 0.25, // Chance per hull edge to grow a spike (0-1)
+        ASTEROID_SPIKE_LENGTH: 0.50,      // Tip distance beyond hull, as fraction of asteroid radius
+        ASTEROID_SPIKE_WIDTH: 0.60,       // Spike base width as fraction of edge length (0=needle, 1=full edge)
         MIN_ASTEROID_RADIUS: 0.025, // Min radius before no split (normalized)
         INITIAL_ASTEROID_RADIUS: 0.083, // Starting asteroid size (normalized)
         
@@ -2152,31 +2155,76 @@
         }
 
         /**
-         * Generate an irregular polygon shape
-         * Creates the classic jagged asteroid look
-         * Uses seed for deterministic generation across clients
-         * @returns {array} Array of vertices with angle and distance (normalized)
+         * Generate an irregular polygon shape with optional triangular spikes
+         * Creates the classic jagged asteroid look, then inserts spikes on a fraction of hull edges
+         * Uses seed for deterministic shape generation across clients
+         * @returns {array} Array of unit-radius local cartesian vertices {x, y}
          */
         generateShape() {
-            const vertices = [];
             const vertexCount = CONFIG.ASTEROID_VERTICES;
             
-            // Use seeded random for deterministic shape across clients
+            // Hull RNG stream — same algorithm as before, preserves existing hull shapes
             let seedValue = this.seed;
             const seededRandom = () => {
                 seedValue = (seedValue * 9301 + 49297) % 233280;
                 return seedValue / 233280;
             };
             
+            // Build hull in unit-radius local cartesian
+            const hull = [];
             for (let i = 0; i < vertexCount; i++) {
                 const angle = (i / vertexCount) * Math.PI * 2;
                 // Vary radius for jagged appearance
                 const variance = 1 - CONFIG.ASTEROID_JAGGEDNESS + 
                                  seededRandom() * CONFIG.ASTEROID_JAGGEDNESS * 2;
-                vertices.push({
-                    angle: angle,
-                    distance: this.radius * variance  // Normalized distance
+                hull.push({
+                    x: Math.cos(angle) * variance,
+                    y: Math.sin(angle) * variance
                 });
+            }
+            
+            // Spike RNG stream — independent seed so spike config changes don't shift the hull
+            let spikeValue = this.seed ^ 0x5a5a;
+            const spikeRandom = () => {
+                spikeValue = (spikeValue * 9301 + 49297) % 233280;
+                return spikeValue / 233280;
+            };
+            
+            // Walk hull edges and optionally insert triangular spikes
+            const vertices = [];
+            const n = hull.length;
+            for (let i = 0; i < n; i++) {
+                const ax = hull[i].x, ay = hull[i].y;
+                const bx = hull[(i + 1) % n].x, by = hull[(i + 1) % n].y;
+                
+                vertices.push({ x: ax, y: ay });
+                
+                if (spikeRandom() < CONFIG.ASTEROID_SPIKE_PROBABILITY) {
+                    const mx = (ax + bx) * 0.5;
+                    const my = (ay + by) * 0.5;
+                    const ex = bx - ax, ey = by - ay;
+                    
+                    // Outward normal, sign-corrected to point away from the origin
+                    let nx = -(by - ay);
+                    let ny =  (bx - ax);
+                    const nlen = Math.hypot(nx, ny) || 1;
+                    nx /= nlen; ny /= nlen;
+                    if (nx * mx + ny * my < 0) { nx = -nx; ny = -ny; }
+                    
+                    // Spike base points along the edge
+                    const half = CONFIG.ASTEROID_SPIKE_WIDTH * 0.5;
+                    const baseAx = mx - ex * half, baseAy = my - ey * half;
+                    const baseBx = mx + ex * half, baseBy = my + ey * half;
+                    
+                    // Spike tip with slight per-spike length jitter for organic feel
+                    const tipLen = CONFIG.ASTEROID_SPIKE_LENGTH * (0.6 + spikeRandom() * 0.8);
+                    const tx = mx + nx * tipLen;
+                    const ty = my + ny * tipLen;
+                    
+                    vertices.push({ x: baseAx, y: baseAy });
+                    vertices.push({ x: tx,     y: ty     });
+                    vertices.push({ x: baseBx, y: baseBy });
+                }
             }
             
             return vertices;
@@ -2184,6 +2232,7 @@
 
         /**
          * Get vertices in pixel coordinates for rendering and collision
+         * Converts unit-radius local cartesian vertices to world pixels with rotation
          * @returns {array} Array of {x, y} pixel coordinates
          */
         getWorldVertices() {
@@ -2200,11 +2249,17 @@
                 return this._cachedVerts;
             }
             
-            // Calculate and cache - convert normalized distances to pixels
-            this._cachedVerts = this.vertices.map(v => ({
-                x: pixelX + Math.cos(v.angle + this.angle) * v.distance * ref,
-                y: pixelY + Math.sin(v.angle + this.angle) * v.distance * ref
-            }));
+            // Rotate local cartesian vertices by angle, then scale and translate to world pixels
+            const cos = Math.cos(this.angle);
+            const sin = Math.sin(this.angle);
+            this._cachedVerts = this.vertices.map(v => {
+                const rx = v.x * cos - v.y * sin;
+                const ry = v.x * sin + v.y * cos;
+                return {
+                    x: pixelX + rx * this.radius * ref,
+                    y: pixelY + ry * this.radius * ref
+                };
+            });
             this._cacheX = pixelX;
             this._cacheY = pixelY;
             this._cacheAngle = this.angle;
