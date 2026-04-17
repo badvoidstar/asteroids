@@ -89,6 +89,12 @@
             padding-bottom: 4px;
         }
 
+        .members-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px 40px;
+        }
+
         .member-block {
             margin-top: 10px;
         }
@@ -242,6 +248,7 @@
                 if (!s.members || s.members.length === 0) {
                     html += `<div class="no-sessions">No members.</div>`;
                 } else {
+                    html += `<div class="members-grid">`;
                     for (const m of s.members) {
                         // Compute per-member byte rates from successive polls
                         let txRate = null, rxRate = null;
@@ -268,6 +275,7 @@
                         html += li('Reconnects',    m.reconnects);
                         html += `</ul></div>`;
                     }
+                    html += `</div>`; // close members-grid
                 }
 
                 html += `</div>`;
