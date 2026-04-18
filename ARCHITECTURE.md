@@ -35,8 +35,8 @@ graph TB
 classDiagram
     class Session {
         +Guid Id
-        +string Name (fruit name)
-        +double AspectRatio [0.25, 4.0]
+        +string Name (from ISessionNameGenerator)
+        +Dictionary~string,object?~ Metadata (immutable after create)
         +long Version (incremented on promotion)
         +DateTime CreatedAt
         +DateTime? LastMemberLeftAt
@@ -87,19 +87,29 @@ graph TB
     subgraph "SessionService"
         direction TB
         SS_DICT["State:<br/>_sessions: ConcurrentDictionary&lt;Guid, Session&gt;<br/>_connectionToMember: ConcurrentDictionary&lt;string, Guid&gt;<br/>_memberToSession: ConcurrentDictionary&lt;Guid, Guid&gt;"]
-        SS_CFG["Config:<br/>MaxSessions: 6<br/>MaxMembersPerSession: 4<br/>50 fruit names pool"]
+        SS_CFG["Config:<br/>MaxSessions: 6<br/>MaxMembersPerSession: 4<br/>Names from ISessionNameGenerator<br/>(default: FruitNameGenerator, 50 names)"]
+        SS_DEP["Member departure (atomic in LeaveSession):<br/>• Remove from indexes<br/>• Promote oldest remaining if Server left<br/>• HandleObjectDeparture: delete Member-scoped,<br/>  migrate Session-scoped (round-robin)<br/>• Mark LastMemberLeftAt for deferred cleanup"]
     end
 
     subgraph "ObjectService"
         direction TB
-        OS_OPS["Operations:<br/>CreateObject → Id, Version=1, Owner<br/>UpdateObject → Version check, merge, Version++<br/>UpdateObjects → Batch (skip failures, partial success)<br/>DeleteObject → TryRemove (no ownership check)<br/>HandleMemberDeparture → Delete/Migrate"]
-        OS_CFG["Config:<br/>DistributeOrphanedObjects: true<br/>(round-robin vs first-member)"]
+        OS_OPS["Operations (all enforce ownership + lifecycle<br/>under session.SyncRoot):<br/>CreateObject → Id, Version=1, Owner<br/>UpdateObject → merge, Version++ (no ownership check)<br/>UpdateObjects → Batch, owner-filtered atomically<br/>DeleteObject → ownership-checked TryRemove<br/>ReplaceObject → atomic delete + create children"]
+    end
+
+    subgraph "FruitNameGenerator (ISessionNameGenerator)"
+        direction TB
+        FNG["50-fruit pool (Apple, Banana, ...)<br/>Pick random unused name<br/>If all used → append counter (Apple2)"]
+    end
+
+    subgraph "ServerMetricsService (singleton)"
+        direction TB
+        SMS["Tracks: CPU/memory/GC/thread pool,<br/>connection counts, hub invocations,<br/>per-member TX/RX bytes, reconciliations,<br/>reconnects.<br/>Exposed via GET /api/srvmon (camelCase JSON)."]
     end
 
     subgraph "SessionCleanupService (BackgroundService)"
         direction TB
-        SCS_OPS["Runs every 10 seconds<br/>Empty timeout: destroy sessions with no members for N seconds<br/>Absolute timeout: destroy sessions exceeding max lifetime<br/>Notifies connected members via SignalR OnSessionExpired<br/>Broadcasts OnSessionsChanged on any cleanup"]
-        SCS_CFG["Config (SessionSettings):<br/>EmptyTimeoutSeconds: 30<br/>AbsoluteTimeoutMinutes: 20"]
+        SCS_OPS["Runs every 10 seconds<br/>Empty timeout: destroy sessions with no members<br/>Absolute timeout: destroy sessions exceeding max lifetime<br/>Notifies connected members via SignalR OnSessionExpired<br/>Broadcasts OnSessionsChanged on any cleanup"]
+        SCS_CFG["Config (SessionSettings):<br/>EmptyTimeoutSeconds: 30<br/>AbsoluteTimeoutMinutes: 20<br/>ClientTimeoutSeconds: 20<br/>KeepAliveSeconds: 10"]
     end
 ```
 
@@ -123,12 +133,11 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    subgraph "CreateSession(aspectRatio)"
+    subgraph "CreateSession(metadata?)"
         CS1{"Connection already<br/>in a session?"}
         CS2{"Active sessions<br/>>= maxSessions (6)?"}
-        CS3["Clamp aspectRatio to [0.25, 4.0]"]
-        CS4["Pick fruit name:<br/>Random unused from 50-item pool<br/>If all used → append counter (Apple2)"]
-        CS5["Create Session with Name, AspectRatio"]
+        CS4["Pick session name via ISessionNameGenerator<br/>(default FruitNameGenerator: random unused fruit;<br/>append counter if pool exhausted)"]
+        CS5["Create Session with Name + Metadata"]
         CS6["Create Member with Role=Server"]
         CS7["Add to _sessions, _connectionToMember,<br/>_memberToSession, session.Members"]
         CS8["Return CreateSessionResult<br/>{Success, Session, Creator}"]
@@ -137,62 +146,80 @@ flowchart TB
         CS1 -->|Yes| CSE
         CS1 -->|No| CS2
         CS2 -->|Yes| CSE
-        CS2 -->|No| CS3 --> CS4 --> CS5 --> CS6 --> CS7 --> CS8
+        CS2 -->|No| CS4 --> CS5 --> CS6 --> CS7 --> CS8
     end
 
-    subgraph "JoinSession(sessionId)"
+    subgraph "JoinSession(sessionId, evictMemberId?)"
         JS1{"Connection already<br/>in a session?"}
-        JS2{"Session exists?"}
+        JS2{"Session exists<br/>AND Active?"}
+        JSE_EVICT{"evictMemberId given<br/>AND stale member found<br/>(different connection)?"}
+        EVI["EvictMemberInternal:<br/>remove from indexes, promote if was Server,<br/>HandleObjectDeparture (delete + migrate)"]
         JS3{"Members.Count<br/>>= maxMembers (4)?"}
-        JS4["Create Member with Role=Client"]
-        JS5["Add to all dictionaries"]
-        JS6["Return JoinSessionResult<br/>{Success, Session, Member}"]
+        WAS{"Session was empty<br/>(rejoining)?"}
+        JS4S["Create Member with Role=Server"]
+        JS4C["Create Member with Role=Client"]
+        ADOPT["AdoptOrphanedObjects:<br/>reassign session-scoped objects<br/>without a current owner"]
+        JS5["Clear session.LastMemberLeftAt"]
+        JS6["Return JoinSessionResult<br/>{Success, Session, Member, Eviction?}"]
         JSE["Return error"]
 
         JS1 -->|Yes| JSE
         JS1 -->|No| JS2
         JS2 -->|No| JSE
-        JS2 -->|Yes| JS3
+        JS2 -->|Yes| JSE_EVICT
+        JSE_EVICT -->|Yes| EVI --> JS3
+        JSE_EVICT -->|No| JS3
         JS3 -->|Yes| JSE
-        JS3 -->|No| JS4 --> JS5 --> JS6
+        JS3 -->|No| WAS
+        WAS -->|Yes| JS4S --> ADOPT --> JS5
+        WAS -->|No| JS4C --> JS5
+        JS5 --> JS6
     end
 ```
 
 ## SessionService: Leave & Server Promotion
 
+`LeaveSession` is **atomic** under `session.SyncRoot` — membership change, server
+promotion, and object cleanup happen in one critical section and a single
+`LeaveSessionResult` is returned to the hub. There is no separate
+`HandleMemberDeparture` call (that responsibility moved out of `ObjectService`).
+
 ```mermaid
 flowchart TB
-    L1["LeaveSession(connectionId)"]
-    L2["TryRemove from _connectionToMember<br/>TryRemove from _memberToSession<br/>TryRemove from session.Members"]
-    L3{"Leaving member<br/>was Server?"}
-    L4{"Any members<br/>remaining?"}
-    L5["lock(session.PromotionLock)"]
-    L6{"Double-check:<br/>still no Server?"}
-    L7["Select random Client"]
-    L8["Set Role = Server<br/>session.Version++"]
-    L9{"session.Members<br/>empty?"}
-    L10["Destroy session:<br/>TryRemove from _sessions"]
-    L11["Return LeaveSessionResult<br/>{SessionId, SessionName, MemberId,<br/>SessionDestroyed, PromotedMember?}"]
+    L1["LeaveSession(connectionId, distributeOrphanedObjects=true)"]
+    L1A{"connectionId in<br/>_connectionToMember?"}
+    L1B["Return null (idempotent no-op)"]
+    L2["lock(session.SyncRoot)<br/>Re-check connection still registered<br/>Bail if session already Destroyed"]
+    L3["TryRemove from _connectionToMember,<br/>_memberToSession, session.Members"]
+    L4{"Departing member<br/>was Server AND<br/>any members remain?"}
+    L5["Promote oldest remaining member<br/>(min JoinedAt, then min Id — deterministic)<br/>Set Role = Server, session.Version++"]
+    L6["HandleObjectDeparture (under same lock):<br/>• Member-scoped → delete<br/>• Session-scoped → migrate round-robin<br/>  (or to first remaining if !distribute)"]
+    L7{"session.Members<br/>now empty?"}
+    L8["Set session.LastMemberLeftAt = now<br/>(deferred destruction by SessionCleanupService;<br/>orphaned session-scoped objects retained for<br/>AdoptOrphanedObjects on rejoin)"]
+    L9["Return LeaveSessionResult {<br/>  SessionId, SessionName, MemberId,<br/>  SessionDestroyed=false, PromotedMember?,<br/>  RemainingMemberIds, DeletedObjectIds,<br/>  MigratedObjects }"]
 
-    L1 --> L2 --> L3
-    L3 -->|No| L9
-    L3 -->|Yes| L4
-    L4 -->|No| L9
+    L1 --> L1A
+    L1A -->|No| L1B
+    L1A -->|Yes| L2 --> L3 --> L4
     L4 -->|Yes| L5 --> L6
-    L6 -->|"No — race: already promoted"| L9
-    L6 -->|Yes| L7 --> L8 --> L9
-    L9 -->|Yes| L10 --> L11
-    L9 -->|No| L11
+    L4 -->|No| L6
+    L6 --> L7
+    L7 -->|Yes| L8 --> L9
+    L7 -->|No| L9
 ```
 
 ## ObjectService: Update Flow
+
+All mutations run under `Session.SyncRoot`. Ownership and session lifecycle are
+validated atomically inside `ObjectService` itself (the hub still pre-checks for
+fast early-return / logging, but correctness does not rely on it).
 
 ```mermaid
 flowchart TB
     subgraph "UpdateObject (single, no ownership check)"
         U1["UpdateObject(sessionId, objectId, data)"]
-        U2{"Session exists?<br/>Object exists?"}
-        U4["Merge data into obj.Data<br/>obj.Version++<br/>obj.UpdatedAt = now"]
+        U2{"Session active?<br/>Object exists?"}
+        U4["Replace obj.Data with merged copy<br/>obj.Version++<br/>obj.UpdatedAt = now"]
         U5["Return updated SessionObject"]
         UF["Return null (failure)"]
 
@@ -201,44 +228,73 @@ flowchart TB
         U2 -->|Yes| U4 --> U5
     end
 
-    subgraph "UpdateObjects (batch, ownership enforced)"
-        B1["For each update in batch:"]
-        B2{"Object exists AND<br/>owned by caller?"}
-        B3["Merge, Version++"]
+    subgraph "UpdateObjects (batch, ownership enforced in service)"
+        B1["UpdateObjects(sessionId, ownerMemberId, updates)"]
+        B2{"For each update:<br/>object exists AND<br/>OwnerMemberId == ownerMemberId?"}
+        B3["Merge data, Version++,<br/>UpdatedAt = now"]
         B4["Skip (continue)"]
-        B5["Return list of ONLY<br/>successfully updated objects"]
+        B5["Return ONLY successfully<br/>updated objects"]
 
         B1 --> B2
         B2 -->|Yes| B3 --> B5
         B2 -->|No| B4 --> B5
     end
+
+    subgraph "DeleteObject (ownership enforced in service)"
+        D1["DeleteObject(sessionId, objectId, ownerMemberId)"]
+        D2{"Object exists AND<br/>owned by ownerMemberId?"}
+        D3["TryRemove from session.Objects<br/>Return deleted SessionObject"]
+        D4["Return null (no-op)"]
+
+        D1 --> D2
+        D2 -->|Yes| D3
+        D2 -->|No| D4
+    end
+
+    subgraph "ReplaceObject (atomic delete + create)"
+        R1["ReplaceObject(sessionId, deleteObjectId,<br/>ownerMemberId, replacements[])"]
+        R2{"Session active AND<br/>delete target owned<br/>by ownerMemberId?"}
+        R3["Delete target,<br/>create each replacement<br/>(Version=1, owner = caller or override)"]
+        R4["Return created list"]
+        R5["Return null (no changes applied)"]
+
+        R1 --> R2
+        R2 -->|Yes| R3 --> R4
+        R2 -->|No| R5
+    end
 ```
 
-## ObjectService: Member Departure & Ownership Redistribution
+## SessionService: Member Departure & Ownership Redistribution
+
+`HandleObjectDeparture` is a private helper of `SessionService`, called inside
+`LeaveSession` and `EvictMemberInternal` while `session.SyncRoot` is held. The
+results (`DeletedObjectIds`, `MigratedObjects`) are bundled into
+`LeaveSessionResult` / `EvictionInfo` so the hub can broadcast a single
+`OnMemberLeft` event.
 
 ```mermaid
 flowchart TB
-    HD["HandleMemberDeparture<br/>(sessionId, departingMemberId,<br/>remainingMemberIds[])"]
-    ITER["Iterate all session objects<br/>where OwnerMemberId == departingMemberId"]
+    HD["HandleObjectDeparture<br/>(session, departingMemberId,<br/>remainingMemberIds[], distribute)"]
+    ITER["Iterate session.Objects<br/>where OwnerMemberId == departingMemberId"]
 
     subgraph "Per Object Decision"
         CHK{"Object Scope?"}
 
         subgraph "Member-Scoped (Ship, Bullet)"
-            DEL["TryRemove from session.Objects<br/>Add Id to deletedIds<br/>Track type in affectedTypes"]
+            DEL["TryRemove from session.Objects<br/>Add Id to deletedIds"]
         end
 
         subgraph "Session-Scoped (Asteroid, GameState)"
             REM{"remainingMembers > 0?"}
-            DIST{"distributeOrphanedObjects<br/>AND members > 1?"}
+            DIST{"distribute<br/>AND members > 1?"}
             RR["Round-robin:<br/>newOwner = remaining[index % count]<br/>index++"]
             FIRST["First member:<br/>newOwner = remaining[0]"]
-            ASSIGN["obj.OwnerMemberId = newOwner<br/>obj.Version++<br/>obj.UpdatedAt = now<br/>Add ObjectMigration(id, newOwner)"]
-            ORPHAN["Object remains but<br/>has no owner"]
+            ASSIGN["obj.OwnerMemberId = newOwner<br/>Replace obj.Data (copy-on-write)<br/>obj.Version++; obj.UpdatedAt = now<br/>Add ObjectMigration(id, newOwner, newVersion)"]
+            ORPHAN["Object stays with departing owner-id<br/>Adopted on next JoinSession via<br/>AdoptOrphanedObjects"]
         end
     end
 
-    RES["Return MemberDepartureResult<br/>{deletedIds[], migratedObjects[]}"]
+    RES["Return (deletedIds[], migratedObjects[])"]
 
     HD --> ITER --> CHK
     CHK -->|Member| DEL
@@ -249,6 +305,7 @@ flowchart TB
     DIST -->|No| FIRST --> ASSIGN
     DEL --> RES
     ASSIGN --> RES
+    ORPHAN --> RES
 ```
 
 ### Round-Robin Example (3 players, Player B leaves)
@@ -284,14 +341,15 @@ flowchart LR
 flowchart TB
     subgraph "Hub Methods → Broadcast Targets"
         direction TB
-        CREATE["CreateSession(aspectRatio)<br/>→ Add to AllClients + SessionGroup<br/>→ Broadcast: OnSessionsChanged to AllClients"]
-        JOIN["JoinSession(sessionId)<br/>→ Add to SessionGroup<br/>→ Broadcast: OnMemberJoined to OthersInGroup<br/>→ Response: memberId, objects[], members[]"]
-        LEAVE["LeaveSession()<br/>→ Remove from SessionGroup<br/>→ Broadcast: OnMemberLeft to Group (all remaining)<br/>→ Broadcast: OnSessionsChanged to AllClients"]
+        CREATE["CreateSession(metadata?)<br/>→ Add to AllClients (in OnConnectedAsync) + SessionGroup<br/>→ Broadcast: OnSessionsChanged to AllClients<br/>→ Response: sessionId, name, memberId, role, metadata"]
+        JOIN["JoinSession(sessionId, evictMemberId?)<br/>→ If evictMemberId: EvictMemberInternal + broadcast OnMemberLeft<br/>  to existing group BEFORE adding new member<br/>→ Snapshot members + objects (before AddToGroup to avoid dup events)<br/>→ Add to SessionGroup<br/>→ Broadcast: OnMemberJoined to OthersInGroup<br/>→ Response: memberId, role, members[], objects[], metadata"]
+        LEAVE["LeaveSession()<br/>→ Atomic SessionService.LeaveSession (promotion + object cleanup)<br/>→ Remove from SessionGroup<br/>→ Broadcast: OnMemberLeft to Group (all remaining)<br/>→ Broadcast: OnSessionsChanged to AllClients"]
+        GAS["GetActiveSessions()<br/>→ No broadcast (read-only)<br/>→ Response: ActiveSessionsResponse"]
         CO["CreateObject(data, scope, ownerMemberId?)<br/>→ Broadcast: OnObjectCreated to OthersInGroup<br/>→ Response: objectInfo + memberSequence"]
-        UO["UpdateObjects(updates[], senderSeq,<br/>clientTimestamp, senderSendIntervalMs)<br/>→ Ownership filter: only owned objects processed<br/>→ Broadcast: OnObjectsUpdated to OthersInGroup<br/>→ Response: versions{} + memberSequence + serverTimestamp"]
-        DO["DeleteObject(objectId)<br/>→ Broadcast: OnObjectDeleted to OthersInGroup<br/>→ Response: success + memberSequence"]
-        RO["ReplaceObject(deleteId, replacements[],<br/>scope, ownerMemberId?)<br/>→ Broadcast: OnObjectReplaced to Group (ALL)<br/>→ Response: createdInfos[]"]
-        GS["GetSessionState()<br/>→ No broadcast (read-only)<br/>→ Response: full snapshot"]
+        UO["UpdateObjects(updates[], senderSeq,<br/>clientTimestamp, senderSendIntervalMs)<br/>→ ObjectService filters to caller-owned objects atomically<br/>→ Broadcast: OnObjectsUpdated to OthersInGroup<br/>→ Response: versions{} + memberSequence + serverTimestamp"]
+        DO["DeleteObject(objectId)<br/>→ ObjectService enforces ownership atomically<br/>→ Broadcast: OnObjectDeleted to OthersInGroup<br/>→ Response: success + memberSequence"]
+        RO["ReplaceObject(deleteId, replacements[],<br/>scope, ownerMemberId?)<br/>→ ObjectService atomic delete + create (ownership enforced)<br/>→ Broadcast: OnObjectReplaced to Group (ALL)<br/>→ Response: createdInfos[]"]
+        GS["GetSessionState()<br/>→ No broadcast (read-only)<br/>→ Response: full snapshot (members, objects, sequences)"]
     end
 ```
 
@@ -328,23 +386,17 @@ sequenceDiagram
     participant C as Leaving Member
     participant HUB as SessionHub
     participant SS as SessionService
-    participant OS as ObjectService
     participant REM as Remaining Members
     participant ALL as AllClients
 
     C->>HUB: LeaveSession() or OnDisconnectedAsync()
     HUB->>SS: LeaveSession(connectionId)
-    Note over SS: Remove from 3 dictionaries<br/>Promote random Client if Server left<br/>Destroy session if empty
-    SS-->>HUB: LeaveSessionResult {sessionId, memberId,<br/>sessionDestroyed, promotedMember?}
-
-    HUB->>HUB: Gather remainingMemberIds from session
-    HUB->>OS: HandleMemberDeparture(sessionId,<br/>departingMemberId, remainingMemberIds)
-    Note over OS: Delete Member-scoped objects<br/>Round-robin migrate Session-scoped objects
-    OS-->>HUB: MemberDepartureResult {deletedIds[],<br/>migratedObjects[], affectedTypes[]}
+    Note over SS: Atomic under session.SyncRoot:<br/>• Remove from 3 dictionaries<br/>• Promote oldest remaining if Server left<br/>• HandleObjectDeparture: delete Member-scoped,<br/>  migrate Session-scoped (round-robin)<br/>• If now empty: set LastMemberLeftAt<br/>  (deferred destroy by SessionCleanupService)
+    SS-->>HUB: LeaveSessionResult { sessionId, sessionName,<br/>memberId, sessionDestroyed=false, promotedMember?,<br/>remainingMemberIds, deletedObjectIds, migratedObjects }
 
     HUB->>HUB: RemoveFromGroupAsync(sessionGroup)
 
-    HUB->>REM: OnMemberLeft(MemberLeftInfo {<br/>  memberId,<br/>  promotedMemberId?,<br/>  promotedRole?,<br/>  deletedObjectIds[],<br/>  migratedObjects[{objectId, newOwnerId}]<br/>})
+    HUB->>REM: OnMemberLeft(MemberLeftInfo {<br/>  memberId,<br/>  promotedMemberId?,<br/>  promotedRole?,<br/>  deletedObjectIds[],<br/>  migratedObjects[{objectId, newOwnerId, newVersion}]<br/>})
     HUB->>ALL: OnSessionsChanged
 ```
 
@@ -384,13 +436,10 @@ sequenceDiagram
     Note over C: Asteroid split — need atomic delete + create children
     C->>HUB: ReplaceObject(deleteId, [{child1Data}, {child2Data}],<br/>scope="Session", ownerMemberId=null)
 
-    HUB->>OS: DeleteObject(sessionId, deleteId)
-    Note over OS: TryRemove (no ownership check)
+    HUB->>OS: ReplaceObject(sessionId, deleteId, callerId, replacements)
+    Note over OS: Single critical section under session.SyncRoot:<br/>• Verify session active + caller owns delete target<br/>• Remove delete target<br/>• Create each replacement (Version=1, owner=caller or override)<br/>• Either fully committed or no changes applied
 
-    loop For each replacement
-        HUB->>OS: CreateObject(sessionId, memberId,<br/>scope, data, ownerMemberId)
-        Note over OS: New Id, Version=0, Owner=caller
-    end
+    OS-->>HUB: createdObjects[] (or null on failure)
 
     HUB->>HUB: memberSequence = Interlocked.Increment
 
@@ -406,12 +455,12 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Lobby: Page load
-    Lobby --> Creating: CreateSession(aspectRatio)
-    Lobby --> Joining: JoinSession(sessionId)
-    Creating --> InSession: Response (memberId, sessionId, role=Server)
-    Joining --> InSession: Response (memberId, sessionId, role=Client, objects[], members[])
+    Lobby --> Creating: CreateSession(metadata?)
+    Lobby --> Joining: JoinSession(sessionId, evictMemberId?)
+    Creating --> InSession: Response (memberId, sessionId, role=Server, metadata)
+    Joining --> InSession: Response (memberId, sessionId, role, members[], objects[], metadata)
     InSession --> Lobby: LeaveSession()
-    InSession --> InSession: Server leaves → random Client promoted
+    InSession --> InSession: Server leaves → oldest remaining member promoted (deterministic)
 
     state InSession {
         [*] --> Playing
@@ -423,7 +472,7 @@ stateDiagram-v2
 graph LR
     subgraph "Session (max 6 concurrent)"
         direction TB
-        S["Session<br/>Id: Guid<br/>Name: fruit name (Apple, Banana...)<br/>AspectRatio: double<br/>Version: long<br/>Max members: 4"]
+        S["Session<br/>Id: Guid<br/>Name: string (from ISessionNameGenerator)<br/>Metadata: Dictionary&lt;string, object?&gt;<br/>Version: long<br/>Max members: 4"]
         M1["Member (Server)<br/>Id: Guid<br/>Role: Server<br/>ConnectionId: string<br/>EventSequence: long<br/>JoinedAt: DateTime"]
         M2["Member (Client)<br/>Id: Guid<br/>Role: Client<br/>ConnectionId: string<br/>EventSequence: long<br/>JoinedAt: DateTime"]
         M3["Member (Client)<br/>...up to 4 total"]
@@ -764,20 +813,27 @@ sequenceDiagram
 
     SR->>SR: withAutomaticReconnect<br/>Linear 1s interval<br/>Max 10 attempts (10s window)
 
-    SR->>C: onreconnecting(error)
+    SR->>C: onreconnecting(error) → freeze gameplay,<br/>show #reconnecting-overlay
 
-    alt Reconnection succeeds
+    alt Reconnection succeeds (transport restored)
         SR->>C: onreconnected(connectionId)
         C->>C: ObjectSync.triggerReconciliation()
         C->>HUB: GetSessionState()
-        HUB-->>C: Full snapshot + memberSequences
-        C->>C: Sync local objects:<br/>• Add missing<br/>• Update stale<br/>• Remove ghosts<br/>• Reset sequences
+
+        alt Server still has the member
+            HUB-->>C: Full snapshot + memberSequences
+            C->>C: Sync local objects:<br/>• Add missing<br/>• Update stale<br/>• Remove ghosts<br/>• Reset sequences<br/>onConnected fires → unfreeze gameplay
+        else Server already processed disconnect
+            HUB-->>C: null
+            C->>C: onReconciliationFailed → re-freeze<br/>and call attemptAutoRejoin (full path below)
+        end
     else Max retries exceeded (or mobile auto-rejoin)
         SR->>C: onclose(error)
         C->>C: attemptAutoRejoin(sessionId)
-        C->>C: connect() stops old connection,<br/>creates new one
-        C->>HUB: JoinSession(sessionId)
-        HUB-->>C: Rejoin response (new memberId, objects)
+        C->>C: connect() stops old connection,<br/>creates new one (sessionClient.clearSessionState)
+        C->>HUB: JoinSession(sessionId, evictMemberId=oldMemberId)
+        Note over HUB: If old member still present (server hadn't<br/>processed disconnect yet — up to ClientTimeoutSeconds),<br/>it is evicted atomically and OnMemberLeft is broadcast<br/>to remaining members BEFORE the new member is added.
+        HUB-->>C: Rejoin response (new memberId, members[], objects[])<br/>game.connectionLost cleared on success
     end
 
     Note over C: Stale connection guard: setupEventHandlers()<br/>captures thisConnection reference.<br/>Old connection's onclose/on* events<br/>are silently ignored if connection<br/>has been replaced by connect().
@@ -789,38 +845,69 @@ sequenceDiagram
 flowchart TB
     subgraph "Serialization Strategy"
         direction TB
-        LOCK["_sessionLock (object)<br/>Serializes CreateSession & JoinSession<br/>Prevents TOCTOU races on:<br/>• connection-already-in-session check<br/>• max sessions count check<br/>• concurrent join + full check"]
-        PROMO["session.PromotionLock (object)<br/>Per-session lock for server promotion<br/>Double-check pattern: verify no server<br/>exists before promoting"]
+        LOCK["_sessionLock (object)<br/>Serializes CreateSession & JoinSession<br/>Prevents TOCTOU races on:<br/>• connection-already-in-session check<br/>• max sessions count check<br/>• concurrent join + capacity check"]
+        SYNC["session.SyncRoot (object, per-session)<br/>Serializes ALL session-local mutations:<br/>• member add/remove<br/>• server promotion (deterministic — no race)<br/>• object create/update/delete/replace<br/>• ownership migration<br/>• lifecycle transitions<br/>• LastMemberLeftAt updates"]
         CONC["ConcurrentDictionary (4 instances)<br/>_sessions, _connectionToMember,<br/>_memberToSession, session.Members<br/>Thread-safe individual operations"]
     end
 
-    subgraph "Why _sessionLock is needed"
-        direction TB
-        RACE["Without _sessionLock, concurrent CreateSession calls<br/>could both pass the maxSessions check<br/>before either adds to _sessions"]
+    subgraph "Lock ordering"
+        ORDER["Acquisition order is always:<br/>_sessionLock → session.SyncRoot<br/>(prevents deadlocks across cross-session ops)"]
     end
 
     LOCK --> CONC
-    PROMO --> CONC
+    SYNC --> CONC
 ```
 
 ## Hub: Ownership Enforcement
 
+Ownership and session lifecycle are validated **inside the service layer** under
+`Session.SyncRoot`, atomically with the mutation. Hub-layer pre-checks remain
+only as fast early-return / logging — they are not relied on for correctness.
+
 ```mermaid
 flowchart TB
-    subgraph "ObjectService (no ownership check)"
-        OS_DEL["DeleteObject: TryRemove by id<br/>(trusts caller)"]
-        OS_UPD["UpdateObject: version check only<br/>(trusts caller)"]
+    subgraph "ObjectService (authoritative — under SyncRoot)"
+        OS_UPD["UpdateObjects: filters batch to objects<br/>where OwnerMemberId == ownerMemberId"]
+        OS_DEL["DeleteObject(sessionId, objectId, ownerMemberId):<br/>verifies ownership before TryRemove"]
+        OS_REP["ReplaceObject(sessionId, deleteId,<br/>ownerMemberId, replacements[]):<br/>verifies ownership of delete target<br/>before atomic delete + create"]
     end
 
-    subgraph "SessionHub (enforces ownership)"
-        HUB_UPD["UpdateObjects:<br/>Filter to obj.OwnerMemberId == caller.Id<br/>Only authorized updates reach ObjectService"]
-        HUB_DEL["DeleteObject:<br/>Verify obj.OwnerMemberId == caller.Id<br/>Reject with warning if not owner"]
-        HUB_REP["ReplaceObject:<br/>Verify obj.OwnerMemberId == caller.Id<br/>Reject + rollback if not owner"]
+    subgraph "SessionHub (early-return + logging)"
+        HUB_UPD["UpdateObjects: passes caller.Id as ownerMemberId<br/>to ObjectService"]
+        HUB_DEL["DeleteObject: optional pre-check + warning if not owner;<br/>passes caller.Id to ObjectService"]
+        HUB_REP["ReplaceObject: optional pre-check;<br/>passes caller.Id to ObjectService"]
     end
 
     HUB_UPD --> OS_UPD
     HUB_DEL --> OS_DEL
-    HUB_REP --> OS_DEL
+    HUB_REP --> OS_REP
+```
+
+## Wire Format & Server Monitoring
+
+```mermaid
+flowchart TB
+    subgraph "SignalR transport (binary MessagePack)"
+        direction TB
+        MP["AddMessagePackProtocol with CompositeResolver:<br/>• BinaryGuidResolver (16-byte binary GUIDs<br/>  via BinaryGuidFormatter / NullableGuidFormatter)<br/>• ContractlessStandardResolver (DTOs + collections)<br/>• MessagePackSecurity.UntrustedData<br/>~25-30% smaller payloads vs JSON;<br/>~19 bytes saved per GUID over the wire."]
+        DTO["Hub DTOs (HubDtos.cs) annotated with<br/>[MessagePackObject] + [Key('camelCaseName')]<br/>so the JS contract is preserved (camelCase names)."]
+        JSGUID["JS client transforms binary GUIDs to strings<br/>at the boundary via GuidUtils.transformBinaryGuids<br/>(applied to handler args + invokeHub responses)."]
+    end
+
+    subgraph "REST API (camelCase JSON)"
+        REST["ConfigureHttpJsonOptions →<br/>JsonNamingPolicy.CamelCase.<br/>Used by GET /api/srvmon."]
+    end
+
+    subgraph "ServerMetricsService (singleton, IDisposable)"
+        SMS_SAMPLE["Background CPU sampling every 2s.<br/>Tracks: connectedCount, peakConnections,<br/>totalHubInvocations, per-member TX/RX bytes,<br/>reconciliations, reconnects."]
+        SMS_EST["SessionHub.EstimatePayloadBytes() uses<br/>a static MessagePackSerializerOptions<br/>matching Program.cs to compute byte counts<br/>per OnHubInvocation / OnBroadcastToMembers call."]
+        SMS_API["GET /api/srvmon → snapshot record (camelCase JSON).<br/>/srvmon/index.html polls every 2s and renders<br/>TX Rate / RX Rate / CPU / connection counts."]
+    end
+
+    MP --> DTO --> JSGUID
+    SMS_SAMPLE --> SMS_API
+    SMS_EST --> SMS_API
+    REST --> SMS_API
 ```
 
 ## Project Structure
@@ -837,17 +924,27 @@ astervoids/
 │
 ├── AstervoidsWeb/              # Main web application
 │   ├── AstervoidsWeb.csproj    # .NET 10.0 Web SDK project
-│   ├── Program.cs              # App startup, DI, middleware, SignalR mapping
+│   ├── Program.cs              # App startup, DI, middleware, SignalR mapping,
+│   │                           # MessagePack protocol, /api/srvmon endpoint
 │   ├── Dockerfile              # Multi-stage Docker build (SDK → aspnet runtime)
 │   ├── docker-compose.yml      # Local Docker orchestration
 │   ├── appsettings.json        # Configuration (Session section)
 │   ├── manifest.json           # PWA manifest
 │   │
 │   ├── Configuration/
-│   │   └── SessionSettings.cs  # MaxSessions, MaxMembersPerSession, DistributeOrphanedObjects
+│   │   └── SessionSettings.cs  # MaxSessions, MaxMembersPerSession,
+│   │                           # DistributeOrphanedObjects, EmptyTimeoutSeconds,
+│   │                           # AbsoluteTimeoutMinutes, ClientTimeoutSeconds,
+│   │                           # KeepAliveSeconds
+│   │
+│   ├── Formatters/
+│   │   └── BinaryGuidFormatter.cs      # MessagePack binary GUID encoding:
+│   │                                   # BinaryGuidFormatter, NullableGuidFormatter,
+│   │                                   # BinaryGuidResolver
 │   │
 │   ├── Models/
-│   │   ├── Session.cs                  # Session entity (Members, Objects, SyncRoot, LifecycleState)
+│   │   ├── Session.cs                  # Session entity (Members, Objects, SyncRoot,
+│   │   │                               # LifecycleState, Metadata, LastMemberLeftAt)
 │   │   ├── Member.cs                   # Member entity (Role, EventSequence)
 │   │   ├── SessionObject.cs            # Synced object (Scope, Version, Data dictionary)
 │   │   ├── MemberRole.cs               # Enum: Server, Client
@@ -855,35 +952,53 @@ astervoids/
 │   │   └── SessionLifecycleState.cs    # Enum: Active, Destroying, Destroyed
 │   │
 │   ├── Services/
-│   │   ├── ISessionService.cs          # Interface + result records (Create/Join/Leave/ActiveSessions)
-│   │   ├── SessionService.cs           # In-memory session management (ConcurrentDictionary)
-│   │   ├── IObjectService.cs           # Interface + ObjectUpdate/ObjectMigration/MemberDepartureResult
-│   │   ├── ObjectService.cs            # Object CRUD, version control, member departure handling
-│   │   └── SessionCleanupService.cs    # Background service: expires empty and long-lived sessions
+│   │   ├── ISessionService.cs          # Interface + result records (Create/Join/Leave/
+│   │   │                               # ActiveSessions/EvictionInfo/ForceDestroy)
+│   │   ├── SessionService.cs           # In-memory session management. Atomic LeaveSession,
+│   │   │                               # EvictMemberInternal, AdoptOrphanedObjects,
+│   │   │                               # HandleObjectDeparture (private helper).
+│   │   ├── ISessionNameGenerator.cs    # Pluggable session naming
+│   │   ├── FruitNameGenerator.cs       # Default 50-fruit naming with collision counter
+│   │   ├── IObjectService.cs           # Interface + ObjectUpdate / ObjectMigration /
+│   │   │                               # ReplacementObjectSpec / MemberDepartureResult
+│   │   ├── ObjectService.cs            # Object CRUD + ReplaceObject; ownership and
+│   │   │                               # lifecycle enforced atomically under Session.SyncRoot
+│   │   ├── SessionCleanupService.cs    # Background service: expires empty / long-lived sessions
+│   │   └── ServerMetricsService.cs     # Singleton; CPU/memory/GC/connections/per-member
+│   │                                   # TX/RX/reconciliation/reconnect; powers /api/srvmon
 │   │
 │   ├── Hubs/
-│   │   ├── SessionHub.cs       # SignalR hub: game-agnostic session/object API
-│   │   └── HubDtos.cs          # Request/response DTOs for hub methods
+│   │   ├── SessionHub.cs       # SignalR hub: game-agnostic session/object API.
+│   │   │                       # Includes MessagePack payload-size estimation for metrics.
+│   │   └── HubDtos.cs          # [MessagePackObject] request/response DTOs (camelCase keys)
 │   │
 │   └── wwwroot/
-│       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~4800 lines)
+│       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~5200 lines)
 │       ├── session-test.html   # Session management test harness
 │       ├── manifest.json       # PWA web app manifest
 │       ├── debug/
-│       │   └── index.html      # Real-time network metrics debug page
+│       │   └── index.html      # Real-time client network metrics (BroadcastChannel)
+│       ├── srvmon/
+│       │   └── index.html      # Server monitoring page; polls /api/srvmon every 2s
 │       └── js/
-│           ├── session-client.js  # SignalR connection & session API wrapper
-│           ├── object-sync.js     # Object registry, delta encoding, sync timing
-│           └── signalr.min.js     # SignalR client library (local copy)
+│           ├── session-client.js                  # SignalR connection & session API wrapper
+│           │                                      # (joinSession supports evictMemberId; reconciliation-
+│           │                                      # failure callback drives auto-rejoin)
+│           ├── object-sync.js                     # Object registry, delta encoding, sync timing
+│           ├── guid-utils.js                      # bytesToGuid + transformBinaryGuids helpers
+│           ├── signalr.min.js                     # SignalR client library (local copy)
+│           └── signalr-protocol-msgpack.min.js    # MessagePack protocol for SignalR client
 │
-├── AstervoidsWeb.Tests/        # xUnit test project (79 tests)
-│   ├── AstervoidsWeb.Tests.csproj  # Test dependencies: xUnit, FluentAssertions, Moq
-│   ├── TestBase.cs                 # Shared test base: CreateTestSession / CreateTestSessionWithClient helpers
-│   ├── SessionServiceTests.cs      # Session create/join/leave/naming (24 tests)
-│   ├── ObjectServiceTests.cs       # Object CRUD/versioning/departure (21 tests)
-│   ├── ServerPromotionTests.cs     # Server role promotion scenarios (13 tests)
-│   ├── ConcurrencyTests.cs         # Concurrency / thread-safety tests (17 tests)
-│   └── SessionHubTests.cs          # SessionHub unit tests (4 tests)
+├── AstervoidsWeb.Tests/        # xUnit test project (~112 tests)
+│   ├── AstervoidsWeb.Tests.csproj   # Test dependencies: xUnit, FluentAssertions, Moq
+│   ├── TestBase.cs                  # Shared helpers: CreateTestSession / CreateTestSessionWithClient
+│   ├── SessionServiceTests.cs       # Session create/join/leave/naming
+│   ├── ObjectServiceTests.cs        # Object CRUD/versioning/replace
+│   ├── ServerPromotionTests.cs      # Server promotion, eviction, orphan adoption
+│   ├── ConcurrencyTests.cs          # Concurrency / thread-safety tests
+│   ├── BinaryGuidFormatterTests.cs  # MessagePack binary GUID round-trip tests
+│   ├── ReplaceAfterEvictTest.cs     # Regression: replace right after eviction
+│   └── SessionHubTests.cs           # SessionHub unit tests
 │
 ├── infra/                      # Azure infrastructure (Bicep IaC)
 │   ├── main.bicep              # Three deployment paths: production, branch, standalone
@@ -962,5 +1077,6 @@ Object types: `ship`, `asteroid`, `bullet`, `gameState`. Ship colors: Green, Cya
 
 | Page | Path | Purpose |
 |------|------|---------|
-| **Debug** | `/debug/index.html` | Real-time network metrics display using BroadcastChannel. Shows per-member BUF, RTT, jitter, send rate, reconciliation count. Auto-connects to the game page's metrics broadcast. |
-| **Session Test** | `/session-test.html` | Interactive test harness for session management. Tests create/join/leave sessions, object CRUD, and SignalR events. Uses local `signalr.min.js`. |
+| **Debug** | `/debug/index.html` | Real-time client network metrics display using BroadcastChannel. Shows per-member BUF, RTT, jitter, send rate, reconciliation count. Auto-connects to the game page's metrics broadcast. |
+| **Server Monitor** | `/srvmon/index.html` | Server-side monitoring page. Polls `GET /api/srvmon` every 2 seconds and renders CPU / memory / GC / connection counts and per-member TX/RX byte rates derived from poll deltas. |
+| **Session Test** | `/session-test.html` | Interactive test harness for session management. Tests create/join/leave sessions, object CRUD, and SignalR events. Uses local `signalr.min.js` and `signalr-protocol-msgpack.min.js`. |
