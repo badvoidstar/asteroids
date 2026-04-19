@@ -113,8 +113,25 @@ public class SessionService : ISessionService
         lock (_sessionLock)
         {
             // Check if connection is already in a session
-            if (_connectionToMember.ContainsKey(connectionId))
+            if (_connectionToMember.TryGetValue(connectionId, out var existingMemberId))
             {
+                // Idempotent re-join: if this connection is already a member of the SAME
+                // session being requested, return success with the existing membership
+                // instead of failing. This handles the response-loss race where a previous
+                // JoinSession invoke succeeded server-side but the client never received
+                // the response (transport drop) and retried.
+                if (_memberToSession.TryGetValue(existingMemberId, out var existingSessionId)
+                    && existingSessionId == sessionId
+                    && _sessions.TryGetValue(sessionId, out var existingSession)
+                    && existingSession.Members.TryGetValue(existingMemberId, out var existingMember))
+                {
+                    _logger?.LogInformation(
+                        "JoinSession: connection {ConnectionId} already member {MemberId} of session {SessionId}; " +
+                        "returning existing membership (idempotent re-join)",
+                        connectionId, existingMemberId, sessionId);
+                    return new JoinSessionResult(true, existingSession, existingMember, null, null, AlreadyMember: true);
+                }
+
                 _logger?.LogWarning("JoinSession failed: connection {ConnectionId} is already in a session", connectionId);
                 return JoinSessionFailure("Already in a session. Leave current session before joining another.");
             }

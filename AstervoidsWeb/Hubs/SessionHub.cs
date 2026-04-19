@@ -207,6 +207,31 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(sessionId, evictMemberId));
 
+        // Idempotent re-join (response-loss recovery): the connection was already a member
+        // of this session — service performed no state change. Return the snapshot so the
+        // caller can reconcile, but skip ALL broadcasts (other members already know about
+        // this member; eviction was already handled on the original join; sessions list is
+        // unchanged). Skipping AddToGroupAsync is safe — the connection is already in the
+        // group from the original join.
+        if (result.AlreadyMember)
+        {
+            _logger.LogInformation(
+                "JoinSession: idempotent re-join for member {MemberId} in session {SessionName} ({SessionId}); " +
+                "returning snapshot without broadcasts",
+                member.Id, session.Name, session.Id);
+
+            var (idempotentMembers, idempotentObjects) = ToSessionSnapshot(session);
+            return new JoinSessionResponse(
+                session.Id,
+                session.Name,
+                member.Id,
+                member.Role.ToString(),
+                idempotentMembers,
+                idempotentObjects,
+                session.Metadata
+            );
+        }
+
         if (evictMemberId.HasValue)
             _metrics.OnReconnect(member.Id);
 

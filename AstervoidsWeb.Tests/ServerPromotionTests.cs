@@ -529,12 +529,17 @@ public class ServerPromotionTests : TestBase
         // Arrange — solo player
         var (session, server) = CreateTestSession("server-conn");
 
-        // Act — try to join with same connectionId and evict self
-        // (This should fail because the connection is already in a session)
+        // Act — same connection invokes JoinSession again with self as evict target.
+        // This pattern occurs naturally during response-loss recovery: the client
+        // doesn't yet know the previous join succeeded, retries with its own old
+        // memberId as the evict candidate. The server must NOT self-evict.
         var joinResult = SessionService.JoinSession(session.Id, "server-conn", server.Id);
 
-        // Assert — join fails (already in a session), no eviction
-        joinResult.Success.Should().BeFalse();
+        // Assert — succeeds idempotently with the existing membership; no eviction.
+        joinResult.Success.Should().BeTrue("re-join from the same connection is idempotent (response-loss recovery)");
+        joinResult.AlreadyMember.Should().BeTrue();
+        joinResult.Eviction.Should().BeNull("idempotent path returns before eviction logic");
+        joinResult.Member!.Id.Should().Be(server.Id, "the existing member is returned, not a new one");
         session.Members.Should().HaveCount(1);
         session.Members.Should().ContainKey(server.Id);
     }

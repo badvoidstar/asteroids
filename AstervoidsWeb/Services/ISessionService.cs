@@ -169,7 +169,17 @@ public record JoinSessionResult(
     /// The hub must broadcast <c>OnMemberLeft</c> with this info so remaining members
     /// can remove the ghost member's objects from their local state.
     /// </summary>
-    EvictionInfo? Eviction = null
+    EvictionInfo? Eviction = null,
+    /// <summary>
+    /// When true, this connection was already a member of the requested session and the
+    /// service performed no state mutation — the existing <see cref="Member"/> is being
+    /// returned as-is. This happens when a previous <c>JoinSession</c> succeeded server-side
+    /// but its response was lost in transit, and the client retried. The hub must skip all
+    /// broadcasts (<c>OnMemberJoined</c>, sessions-changed) on this path because the
+    /// member is already known to other clients; only the snapshot is returned to the
+    /// caller so they can reconcile their local state.
+    /// </summary>
+    bool AlreadyMember = false
 );
 
 /// <summary>

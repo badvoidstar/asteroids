@@ -4957,8 +4957,15 @@
                         await refreshSessionList();
                         return;
                     } else {
-                        // Session no longer exists or is full
-                        break;
+                        // Server returned null. Without a structured error code we can't
+                        // distinguish transient failures (e.g. server briefly unavailable)
+                        // from permanent ones (session full). Retry up to maxAttempts so a
+                        // transient null doesn't immediately drop the player back to the
+                        // start screen. The "already in a session" race is now handled
+                        // server-side by an idempotent JoinSession (returns success when
+                        // the same connection re-joins the same session).
+                        console.warn('[Rejoin] Attempt', attempt + 1, 'returned null; will retry');
+                        continue;
                     }
                 } catch (err) {
                     console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);

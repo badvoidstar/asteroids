@@ -145,12 +145,20 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.onreconnected(guard(connectionId => {
+        connection.onreconnected(guard(async connectionId => {
             // console.log('[SessionClient] Reconnected:', connectionId);
             reconnectAttempts = 0;
-            // Reconcile state — invoke responses for Create/Delete/Update may have been
-            // lost during the reconnection window (OthersInGroup means no broadcast fallback)
-            ObjectSync.triggerReconciliation();
+            // Reconcile state BEFORE notifying onConnected. Invoke responses for
+            // Create/Delete/Update may have been lost during the reconnection window
+            // (OthersInGroup means no broadcast fallback). Awaiting reconciliation here
+            // ensures that if the server already processed our disconnect (member removed),
+            // onReconciliationFailed fires and clears the session state BEFORE onConnected
+            // runs — preventing a brief "unfrozen" flash of the game with broken networking.
+            try {
+                await ObjectSync.triggerReconciliation();
+            } catch (err) {
+                console.error('[SessionClient] Reconciliation threw during reconnect:', err);
+            }
             if (callbacks.onConnected) {
                 callbacks.onConnected();
             }
