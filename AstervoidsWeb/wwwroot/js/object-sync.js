@@ -176,14 +176,6 @@ const ObjectSync = (function() {
     }
     
     /**
-     * Get the current send threshold (for diagnostics).
-     * @returns {number} Current frame-count threshold
-     */
-    function getSendThreshold() {
-        return sendThreshold;
-    }
-
-    /**
      * Adapt send rate based on measured RTT.
      * Linearly scales send interval: low RTT → 20Hz, high RTT → 2Hz.
      * @param {number} rttMs - Current round-trip time in milliseconds
@@ -985,15 +977,6 @@ const ObjectSync = (function() {
     }
 
     /**
-     * Get objects created by the local member.
-     */
-    function getLocalObjects() {
-        const memberId = SessionClient.getCurrentMember()?.id;
-        if (!memberId) return [];
-        return getAllObjects().filter(obj => obj.creatorMemberId === memberId);
-    }
-
-    /**
      * Get objects by type (from data.type field).
      * Uses type index for O(n) lookup where n = objects of that type, instead of all objects.
      * @param {string} type - The object type to filter by
@@ -1098,13 +1081,11 @@ const ObjectSync = (function() {
         getObject,
         getAllObjects,
         getObjectsByOwner,
-        getLocalObjects,
         getObjectsByType,
         getObjectByType,
         getObjectCount,
         getReconciliationCount,
         configure,
-        getSendThreshold,
         getSendRate,
         updateSendRate,
         triggerReconciliation,
