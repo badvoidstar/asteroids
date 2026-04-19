@@ -4527,6 +4527,18 @@
                         updatePickerButtons();
                     }
                 });
+                // Defensive cleanup: if our own ship's sync object is removed by ObjectSync
+                // (e.g. reconciliation's ghost-removal trims it because the server already
+                // deleted it during a disconnect race), clear the local ship reference too.
+                // Without this, `game.ship` is left dangling and `syncLocalShip()` silently
+                // no-ops, producing the "still simulating, no ship" stuck state.
+                ObjectSync.on('onObjectDeleted', (obj) => {
+                    if (obj?.id && obj.id === game.multiplayer.myShipObjectId) {
+                        console.warn('[Game] Local ship sync object deleted externally; clearing local ship.');
+                        game.multiplayer.myShipObjectId = null;
+                        game.ship = null;
+                    }
+                });
                 // Handle reconciliation failure after auto-reconnect: the transport
                 // reconnected but the server already processed our disconnect (member
                 // removed). Trigger full rejoin to restore session membership.
@@ -4972,8 +4984,13 @@
                 }
             }
 
-            // All attempts failed — return to start screen
-            returnToStartScreen('Session ended');
+            // All attempts failed — return to start screen.
+            // Awaited so rejoinInProgress (cleared in `finally`) doesn't go false
+            // until cleanup is fully done. Without the await, a concurrent rejoin
+            // (e.g. visibility-change, onDisconnected) could slip in mid-cleanup,
+            // half-restore session state, and leave the player in a stuck
+            // "spectating shell" (session mode, no ship, gameplay running).
+            await returnToStartScreen('Session ended');
         } finally {
             rejoinInProgress = false;
         }
@@ -5004,7 +5021,7 @@
         sessionPicker.connected = true;
     });
 
-    SessionClient.on('onDisconnected', (error) => {
+    SessionClient.on('onDisconnected', async (error) => {
         sessionPicker.connected = false;
         const lostSessionId = sessionPicker.currentSessionId;
         sessionPicker.currentSessionId = null;
@@ -5024,7 +5041,7 @@
             // Lost connection while in a session — attempt auto-rejoin
             attemptAutoRejoin(lostSessionId);
         } else if (game.state !== 'start') {
-            returnToStartScreen('Disconnected from server');
+            await returnToStartScreen('Disconnected from server');
         } else {
             game.state = 'start';
             game.mode = 'solo';
@@ -5036,9 +5053,9 @@
     });
 
     // Handle session expiration (server-side timeout)
-    SessionClient.on('onSessionExpired', (reason) => {
+    SessionClient.on('onSessionExpired', async (reason) => {
         console.warn('[Game] Session expired:', reason);
-        returnToStartScreen(reason);
+        await returnToStartScreen(reason);
     });
 
     // Handle role changes (e.g., promoted to server when server leaves)
