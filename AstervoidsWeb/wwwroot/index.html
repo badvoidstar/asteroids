@@ -4927,9 +4927,9 @@
         if (rejoinInProgress || leavingSession) return;
         rejoinInProgress = true;
         // Suspend reconciliation during the rejoin window. Any visibilitychange or
-        // SignalR onreconnected reconciliation triggered while currentMember is
-        // briefly null would evaluate isLocal incorrectly and (more importantly)
-        // race with the snapshot apply path inside joinSession.
+        // SignalR onreconnected reconciliation triggered concurrently would race
+        // with the snapshot apply path inside joinSession and could mis-classify
+        // freshly applied objects as ghosts.
         ObjectSync.suspendReconciliation();
         const wasPlaying = game.state === 'playing' || game.state === 'waveDelay';
         // Fall back to game.sessionInfo only if caller didn't supply oldMemberId

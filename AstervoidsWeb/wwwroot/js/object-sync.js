@@ -307,23 +307,22 @@ const ObjectSync = (function() {
     /**
      * Build a local object representation from server ObjectInfo.
      */
-    function toLocalObject(objectInfo, isLocal) {
+    function toLocalObject(objectInfo) {
         return {
             id: objectInfo.id,
             creatorMemberId: objectInfo.creatorMemberId,
             ownerMemberId: objectInfo.ownerMemberId,
             scope: objectInfo.scope,
             data: objectInfo.data || {},
-            version: objectInfo.version,
-            isLocal: isLocal ?? false
+            version: objectInfo.version
         };
     }
 
     /**
      * Register an object from server ObjectInfo into the local object map and type index.
      */
-    function registerObject(objectInfo, isLocal) {
-        const obj = toLocalObject(objectInfo, isLocal);
+    function registerObject(objectInfo) {
+        const obj = toLocalObject(objectInfo);
         objects.set(obj.id, obj);
         addToTypeIndex(obj);
         return obj;
@@ -403,7 +402,6 @@ const ObjectSync = (function() {
             existing.creatorMemberId = objectInfo.creatorMemberId;
             existing.ownerMemberId = objectInfo.ownerMemberId;
             existing.scope = objectInfo.scope;
-            existing.isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
             // Keep existing data/version if already ahead from updates
             if (objectInfo.version > existing.version) {
                 existing.data = objectInfo.data || {};
@@ -412,8 +410,7 @@ const ObjectSync = (function() {
             return;
         }
 
-        const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
-        const obj = registerObject(objectInfo, isLocal);
+        const obj = registerObject(objectInfo);
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -459,8 +456,7 @@ const ObjectSync = (function() {
                     ownerMemberId: null,
                     scope: null,
                     data: update.data || {},
-                    version: update.version,
-                    isLocal: false
+                    version: update.version
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -597,7 +593,7 @@ const ObjectSync = (function() {
                     continue;
                 } else {
                     // Add missing object
-                    const localObj = registerObject(obj, false);
+                    const localObj = registerObject(obj);
                     if (callbacks.onObjectCreated) {
                         callbacks.onObjectCreated(localObj);
                     }
@@ -665,8 +661,7 @@ const ObjectSync = (function() {
             // Response-first: register the object from the invoke response (no broadcast echo)
             const existing = objects.get(objectInfo.id);
             if (!existing) {
-                const isLocal = objectInfo.creatorMemberId === SessionClient.getCurrentMember()?.id;
-                const obj = registerObject(objectInfo, isLocal);
+                const obj = registerObject(objectInfo);
 
                 if (callbacks.onObjectCreated) {
                     callbacks.onObjectCreated(obj);
