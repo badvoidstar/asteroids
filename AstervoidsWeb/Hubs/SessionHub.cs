@@ -250,15 +250,22 @@ public class SessionHub : Hub
                 eviction.DeletedObjectIds.Count, eviction.MigratedObjects.Count);
         }
 
-        // Capture snapshot BEFORE adding to group so the joining client receives a consistent
-        // point-in-time view. If the snapshot were taken after AddToGroupAsync, concurrent
-        // object creations or updates would already be broadcast to the new connection, and the
-        // same objects would then appear again in the snapshot response — producing duplicate
-        // application on the joining client. Taking the snapshot first means any object changes
-        // that happen between the snapshot and group add will only arrive once, via live events.
-        var (members, objects) = ToSessionSnapshot(session);
-
+        // Order: AddToGroupAsync FIRST, then take the snapshot.
+        //
+        // The reverse order (snapshot before AddToGroupAsync) creates a window where
+        // a concurrent broadcast (e.g. OnObjectsUpdated) is sent to the SignalR group
+        // BEFORE the new connection is in the group, so the joiner never receives it.
+        // The snapshot then carries an older view of that object and the joiner has
+        // no way to recover the missed event content (e.g. a pendingHit bit that
+        // doesn't appear in subsequent updates).
+        //
+        // With this order, the joiner may briefly receive a broadcast for an object
+        // that also appears in the snapshot. The client's handleSessionJoined and
+        // handleRemoteObjectsUpdated both compare versions and apply whichever is
+        // newer, so duplicates are dedup'd.
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
+
+        var (members, objects) = ToSessionSnapshot(session);
 
         var memberSequence = NextMemberSequence(member);
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
