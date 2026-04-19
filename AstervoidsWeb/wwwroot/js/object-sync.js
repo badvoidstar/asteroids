@@ -63,6 +63,10 @@
  */
 
 const ObjectSync = (function() {
+    const _log = (...a) => window.ASTERVOIDS_DEBUG && console.log(...a);
+    const _warn = (...a) => window.ASTERVOIDS_DEBUG && console.warn(...a);
+    const _error = (...a) => window.ASTERVOIDS_DEBUG && console.error(...a);
+
     // ── Field name compression for network traffic ─────────────────────────
     // Maps readable field names to short wire names. Applied at the sync
     // boundary (compress before send, expand after receive) so all game
@@ -521,7 +525,7 @@ const ObjectSync = (function() {
         // Only detect gaps for other members' streams
         const myId = SessionClient.getCurrentMember()?.id;
         if (myId !== memberId && lastSeq !== undefined && memberSequence > lastSeq + 1) {
-            console.warn('[ObjectSync] Per-member sequence gap:', memberId, 'expected', lastSeq + 1, 'got', memberSequence);
+            _warn('[ObjectSync] Per-member sequence gap:', memberId, 'expected', lastSeq + 1, 'got', memberSequence);
             triggerReconciliation();
         }
         if (lastSeq === undefined || memberSequence > lastSeq) {
@@ -611,7 +615,7 @@ const ObjectSync = (function() {
                 callbacks.onReconciliationComplete();
             }
         } catch (err) {
-            console.error('[ObjectSync] Reconciliation failed:', err);
+            _error('[ObjectSync] Reconciliation failed:', err);
             // Treat invoke errors the same as a null snapshot: the connection
             // is broken (e.g. stale WebSocket after mobile background) and the
             // server no longer recognizes us. Fire the failure callback so the
@@ -676,7 +680,7 @@ const ObjectSync = (function() {
 
             return objectInfo;
         } catch (err) {
-            console.error('[ObjectSync] Create object failed:', err);
+            _error('[ObjectSync] Create object failed:', err);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('create', err);
             }
@@ -698,7 +702,7 @@ const ObjectSync = (function() {
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {
-            console.error('[ObjectSync] Replace object failed:', err);
+            _error('[ObjectSync] Replace object failed:', err);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('replace', err);
             }
@@ -712,7 +716,7 @@ const ObjectSync = (function() {
     function updateObject(objectId, data, immediate = false) {
         const obj = objects.get(objectId);
         if (!obj) {
-            console.warn('[ObjectSync] Object not found:', objectId);
+            _warn('[ObjectSync] Object not found:', objectId);
             return false;
         }
 
@@ -905,7 +909,7 @@ const ObjectSync = (function() {
             // If response is null/undefined (server returned null), sentDeltas are
             // NOT confirmed — all fields will be re-sent on next flush.
         } catch (err) {
-            console.error('[ObjectSync] Batch update failed:', err);
+            _error('[ObjectSync] Batch update failed:', err);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('update', err);
             }
@@ -953,7 +957,7 @@ const ObjectSync = (function() {
 
             return response?.success ?? false;
         } catch (err) {
-            console.warn('[ObjectSync] Server delete failed (local deletion already applied):', objectId, err.message);
+            _warn('[ObjectSync] Server delete failed (local deletion already applied):', objectId, err.message);
             if (callbacks.onSyncError) {
                 callbacks.onSyncError('delete', err);
             }
@@ -1027,7 +1031,7 @@ const ObjectSync = (function() {
         if (callbacks.hasOwnProperty(event)) {
             callbacks[event] = callback;
         } else {
-            console.warn('[ObjectSync] Unknown event:', event);
+            _warn('[ObjectSync] Unknown event:', event);
         }
     }
 

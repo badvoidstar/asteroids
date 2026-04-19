@@ -4,6 +4,10 @@
  */
 
 const SessionClient = (function() {
+    const _log = (...a) => window.ASTERVOIDS_DEBUG && console.log(...a);
+    const _warn = (...a) => window.ASTERVOIDS_DEBUG && console.warn(...a);
+    const _error = (...a) => window.ASTERVOIDS_DEBUG && console.error(...a);
+
     let connection = null;
     let currentSession = null;
     let currentMember = null;
@@ -98,7 +102,7 @@ const SessionClient = (function() {
             connection.keepAliveIntervalInMilliseconds = 10000;
 
             await connection.start();
-            console.log('[SessionClient] Connected to session hub');
+            _log('[SessionClient] Connected to session hub');
             reconnectAttempts = 0;
 
             if (callbacks.onConnected) {
@@ -107,7 +111,7 @@ const SessionClient = (function() {
 
             return true;
         } catch (err) {
-            console.error('[SessionClient] Connection failed:', err);
+            _error('[SessionClient] Connection failed:', err);
             if (callbacks.onError) {
                 callbacks.onError('Connection failed: ' + err.message);
             }
@@ -124,7 +128,7 @@ const SessionClient = (function() {
                 await connection.stop();
                 // console.log('[SessionClient] Disconnected');
             } catch (err) {
-                console.error('[SessionClient] Disconnect error:', err);
+                _error('[SessionClient] Disconnect error:', err);
             }
             connection = null;
             currentSession = null;
@@ -301,7 +305,7 @@ const SessionClient = (function() {
             const result = await connection.invoke(method, ...args);
             return GuidUtils.transformBinaryGuids(result);
         } catch (err) {
-            console.error(`[SessionClient] ${method} failed:`, err);
+            _error(`[SessionClient] ${method} failed:`, err);
             throw err;
         }
     }
@@ -342,7 +346,7 @@ const SessionClient = (function() {
 
             return { session: currentSession, member: currentMember };
         } catch (err) {
-            console.error('[SessionClient] Create session failed:', err);
+            _error('[SessionClient] Create session failed:', err);
             if (callbacks.onError) {
                 callbacks.onError('Failed to create session: ' + err.message);
             }
@@ -357,10 +361,10 @@ const SessionClient = (function() {
         ensureConnected();
 
         try {
-            console.log('[SessionClient] JoinSession invoking:', sessionId, 'evict:', evictMemberId);
+            _log('[SessionClient] JoinSession invoking:', sessionId, 'evict:', evictMemberId);
             const response = GuidUtils.transformBinaryGuids(await connection.invoke('JoinSession', sessionId, evictMemberId));
             if (!response) {
-                console.warn('[SessionClient] JoinSession returned null — session not found, full, or rejected');
+                _warn('[SessionClient] JoinSession returned null — session not found, full, or rejected');
                 return null;
             }
 
@@ -376,7 +380,7 @@ const SessionClient = (function() {
                 role: response.role
             };
 
-            console.log('[SessionClient] Joined session:', currentSession.name, 'as', currentMember.role);
+            _log('[SessionClient] Joined session:', currentSession.name, 'as', currentMember.role);
             lastSessionId = currentSession.id;
 
             if (callbacks.onSessionJoined) {
@@ -385,7 +389,7 @@ const SessionClient = (function() {
 
             return { session: currentSession, member: currentMember };
         } catch (err) {
-            console.error('[SessionClient] Join session failed:', err);
+            _error('[SessionClient] Join session failed:', err);
             if (callbacks.onError) {
                 callbacks.onError('Failed to join session: ' + err.message);
             }
@@ -414,7 +418,7 @@ const SessionClient = (function() {
                 callbacks.onSessionLeft(leftSession);
             }
         } catch (err) {
-            console.error('[SessionClient] Leave session failed:', err);
+            _error('[SessionClient] Leave session failed:', err);
         }
     }
 
@@ -432,7 +436,7 @@ const SessionClient = (function() {
                 canCreateSession: response.canCreateSession
             };
         } catch (err) {
-            console.error('[SessionClient] Get sessions failed:', err);
+            _error('[SessionClient] Get sessions failed:', err);
             throw err;
         }
     }
@@ -478,7 +482,7 @@ const SessionClient = (function() {
         if (callbacks.hasOwnProperty(event)) {
             callbacks[event] = callback;
         } else {
-            console.warn('[SessionClient] Unknown event:', event);
+            _warn('[SessionClient] Unknown event:', event);
         }
     }
 

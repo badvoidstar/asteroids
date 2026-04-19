@@ -626,6 +626,8 @@
     <script src="/js/signalr-protocol-msgpack.min.js"></script>
     <!-- Binary GUID conversion (server sends 16-byte binary GUIDs; this converts to strings) -->
     <script src="/js/guid-utils.js"></script>
+    <!-- Debug toggle — set to true in browser console: window.ASTERVOIDS_DEBUG = true -->
+    <script>window.ASTERVOIDS_DEBUG = false;</script>
     <!-- Session client module -->
     <script src="/js/session-client.js"></script>
     <!-- Object sync module -->
@@ -636,6 +638,10 @@
        ASTERVOIDS GAME
        A single-file HTML5 Canvas implementation following best practices
        ================================================================ */
+
+    const _log = (...a) => window.ASTERVOIDS_DEBUG && console.log(...a);
+    const _warn = (...a) => window.ASTERVOIDS_DEBUG && console.warn(...a);
+    const _error = (...a) => window.ASTERVOIDS_DEBUG && console.error(...a);
 
     // ============================================
     // SECTION 0: AUDIO SYSTEM
@@ -2551,7 +2557,7 @@
         try {
             await ObjectSync.deleteObject(syncObjectId);
         } catch (err) {
-            console.error(`[Multiplayer] Failed to delete ${label}:`, err);
+            _error(`[Multiplayer] Failed to delete ${label}:`, err);
         }
         return true;
     }
@@ -2581,7 +2587,7 @@
             game.ship.syncObjectId = objectInfo.id;
             game.multiplayer.myShipObjectId = objectInfo.id;
         } catch (err) {
-            console.error('[Multiplayer] Failed to create ship:', err);
+            _error('[Multiplayer] Failed to create ship:', err);
         }
     }
 
@@ -2731,7 +2737,7 @@
             if (!objectInfo) return;
             asteroid.syncObjectId = objectInfo.id;
         } catch (err) {
-            console.error('[Multiplayer] Failed to create asteroid:', err);
+            _error('[Multiplayer] Failed to create asteroid:', err);
         }
     }
 
@@ -2845,7 +2851,7 @@
             if (!objectInfo) return;
             bullet.syncObjectId = objectInfo.id;
         } catch (err) {
-            console.error('[Multiplayer] Failed to create bullet:', err);
+            _error('[Multiplayer] Failed to create bullet:', err);
         }
     }
 
@@ -2963,7 +2969,7 @@
             if (!objectInfo) return;
             game.multiplayer.gameStateObjectId = objectInfo.id;
         } catch (err) {
-            console.error('[Multiplayer] Failed to create GameState:', err);
+            _error('[Multiplayer] Failed to create GameState:', err);
         }
     }
 
@@ -3141,7 +3147,7 @@
             
             // Fallback: if ship creation failed, create local ship
             if (!game.ship) {
-                console.warn('[Game] Ship creation failed, creating local fallback');
+                _warn('[Game] Ship creation failed, creating local fallback');
                 game.ship = new Ship(0.5, 0.5, colorIndex);
                 game.ship.memberId = member?.id;
                 game.ship.invulnerable = CONFIG.INVULNERABILITY_TIME;
@@ -3444,7 +3450,7 @@
             await ObjectSync.replaceObject(
                 parentAsteroid.syncObjectId, replacements, 'Session', ownerMemberId);
         } catch (err) {
-            console.error('[Multiplayer] Failed to replace asteroid:', err);
+            _error('[Multiplayer] Failed to replace asteroid:', err);
         }
     }
 
@@ -4506,7 +4512,7 @@
             const result = await SessionClient.getActiveSessions();
             updateSessionList(result);
         } catch (err) {
-            console.error('Failed to refresh sessions:', err);
+            _error('Failed to refresh sessions:', err);
             setPickerStatus('Failed to load sessions', 'error');
         }
     }
@@ -4532,7 +4538,7 @@
                 // reconnected but the server already processed our disconnect (member
                 // removed). Trigger full rejoin to restore session membership.
                 ObjectSync.on('onReconciliationFailed', () => {
-                    console.warn('[Session] Reconciliation failed — server no longer recognizes this connection. Triggering full rejoin.');
+                    _warn('[Session] Reconciliation failed — server no longer recognizes this connection. Triggering full rejoin.');
                     const lostSessionId = sessionPicker.currentSessionId || SessionClient.getLastSessionId();
                     // Capture the old memberId BEFORE clearSessionState wipes it.
                     // Required for the server-side eviction path during rejoin.
@@ -4589,7 +4595,7 @@
                 throw new Error('Connection failed');
             }
         } catch (err) {
-            console.error('Session hub connection failed:', err);
+            _error('Session hub connection failed:', err);
             setPickerStatus('Offline - Solo play only', 'error');
             sessionPicker.connected = false;
             updatePickerButtons();
@@ -4640,7 +4646,7 @@
                 await refreshSessionList();
             }
         } catch (err) {
-            console.error('Join session failed:', err);
+            _error('Join session failed:', err);
             setPickerStatus('Failed to join session', 'error');
             await refreshSessionList();
         }
@@ -4686,7 +4692,7 @@
                 await refreshSessionList();
             }
         } catch (err) {
-            console.error('Create session failed:', err);
+            _error('Create session failed:', err);
             setPickerStatus('Failed to create session', 'error');
             await refreshSessionList();
         }
@@ -4699,7 +4705,7 @@
             try {
                 await SessionClient.leaveSession();
             } catch (err) {
-                console.error('Failed to leave session before solo:', err);
+                _error('Failed to leave session before solo:', err);
             }
             sessionPicker.currentSessionId = null;
             sessionPicker.isServer = false;
@@ -4755,7 +4761,7 @@
                 try {
                     await SessionClient.leaveSession();
                 } catch (err) {
-                    console.error('Failed to leave session:', err);
+                    _error('Failed to leave session:', err);
                 }
             }
 
@@ -4791,7 +4797,7 @@
             try {
                 await init();
             } catch (err) {
-                console.error('[Game] Failed to start game:', err);
+                _error('[Game] Failed to start game:', err);
             }
         }
     }
@@ -4938,7 +4944,7 @@
      */
     async function attemptAutoRejoin(sessionId, oldMemberId = null) {
         if (rejoinInProgress || leavingSession) {
-            console.log('[Rejoin] Skipped — rejoinInProgress:', rejoinInProgress, 'leavingSession:', leavingSession);
+            _log('[Rejoin] Skipped — rejoinInProgress:', rejoinInProgress, 'leavingSession:', leavingSession);
             return;
         }
 
@@ -4948,11 +4954,11 @@
         if (document.hidden) {
             pendingRejoinSessionId = sessionId;
             pendingRejoinMemberId = oldMemberId ?? game.sessionInfo?.memberId ?? null;
-            console.log('[Rejoin] Deferred — tab hidden. Session:', sessionId);
+            _log('[Rejoin] Deferred — tab hidden. Session:', sessionId);
             return;
         }
 
-        console.log('[Rejoin] Starting. Session:', sessionId, 'OldMember:', oldMemberId,
+        _log('[Rejoin] Starting. Session:', sessionId, 'OldMember:', oldMemberId,
             'game.state:', game.state, 'game.mode:', game.mode);
         rejoinInProgress = true;
         // Suspend reconciliation during the rejoin window. Any visibilitychange or
@@ -4987,11 +4993,11 @@
                     setPickerStatus(`Reconnecting... (connecting)`, 'error');
                     await connectToSessionHub(true);
                     if (!SessionClient.isConnected()) {
-                        console.warn('[Rejoin] Connect failed on attempt', attempt + 1);
+                        _warn('[Rejoin] Connect failed on attempt', attempt + 1);
                         setPickerStatus(`Reconnecting... (connect failed)`, 'error');
                         continue;
                     }
-                    console.log('[Rejoin] Connected. Attempt', attempt + 1);
+                    _log('[Rejoin] Connected. Attempt', attempt + 1);
 
                     // Wipe stale local game state (game.astervoids/bullets and
                     // ObjectSync) BEFORE rejoin. The server's eviction path deleted
@@ -5012,7 +5018,7 @@
                     setPickerStatus(`Reconnecting... (joining session)`, 'error');
                     const result = await SessionClient.joinSession(sessionId, oldMemberId);
                     if (result) {
-                        console.log('[Rejoin] Success! Session:', result.session.name,
+                        _log('[Rejoin] Success! Session:', result.session.name,
                             'Role:', result.member.role, 'Objects:', result.session.objects?.length);
                         setPickerStatus('Reconnected!', 'connected');
                         // Successfully rejoined — restore game/lobby state
@@ -5061,7 +5067,7 @@
                         break;
                     }
                 } catch (err) {
-                    console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
+                    _error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
                     setPickerStatus(`Rejoin error: ${err.message}`, 'error');
                 }
             }
@@ -5147,7 +5153,7 @@
 
     // Handle session expiration (server-side timeout)
     SessionClient.on('onSessionExpired', (reason) => {
-        console.warn('[Game] Session expired:', reason);
+        _warn('[Game] Session expired:', reason);
         returnToStartScreen(reason);
     });
 
@@ -5331,7 +5337,7 @@
             // background), it deferred to avoid wasting retries on a throttled
             // network. Now that the tab is visible, execute the deferred rejoin.
             if (!document.hidden && pendingRejoinSessionId && !rejoinInProgress) {
-                console.log('[Visibility] Triggering deferred rejoin. Session:', pendingRejoinSessionId);
+                _log('[Visibility] Triggering deferred rejoin. Session:', pendingRejoinSessionId);
                 const sid = pendingRejoinSessionId;
                 const mid = pendingRejoinMemberId;
                 pendingRejoinSessionId = null;
@@ -5344,7 +5350,7 @@
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
                 if (hiddenDurationMs > 5000 && !rejoinInProgress) {
-                    console.log('[Visibility] Long background (' + hiddenDurationMs + 'ms). Triggering direct rejoin.');
+                    _log('[Visibility] Long background (' + hiddenDurationMs + 'ms). Triggering direct rejoin.');
                     // Long background — connection is almost certainly dead.
                     // Capture session info before anything clears it, then
                     // force a fresh connection + rejoin immediately.
