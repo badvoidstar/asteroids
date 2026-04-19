@@ -4552,6 +4552,15 @@
                         returnToStartScreen('Session lost during reconnection');
                     }
                 });
+                // Unfreeze after successful reconciliation (deferred from onConnected
+                // to avoid a brief stale-state flicker while reconciliation is pending)
+                ObjectSync.on('onReconciliationComplete', () => {
+                    if (game.connectionLost && SessionClient.isInSession()) {
+                        game.connectionLost = false;
+                        game.lastFrameTime = 0;
+                        reconnectingOverlay.classList.remove('visible');
+                    }
+                });
                 // Apply configured sync timing and field compression map
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
@@ -5042,8 +5051,11 @@
 
     // Clear connection-lost state when SignalR reconnects (or initial connect)
     SessionClient.on('onConnected', () => {
-        if (game.connectionLost && SessionClient.isInSession()) {
-            // Only unfreeze here for SignalR auto-reconnect (member still in session).
+        if (game.connectionLost && SessionClient.isInSession() && !ObjectSync.isReconciling()) {
+            // Only unfreeze here for SignalR auto-reconnect (member still in session)
+            // when reconciliation is NOT in progress. If reconciliation is pending,
+            // defer unfreezing to onReconciliationComplete — this avoids a brief
+            // stale-state flicker while the server hasn't confirmed membership.
             // For full disconnect + auto-rejoin, attemptAutoRejoin clears the flag
             // after joinSession() succeeds, ensuring networking is fully restored.
             game.connectionLost = false;

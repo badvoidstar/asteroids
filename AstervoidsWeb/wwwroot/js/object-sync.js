@@ -146,7 +146,8 @@ const ObjectSync = (function() {
         onObjectDeleted: null,
         onBatchReceived: null,
         onSyncError: null,
-        onReconciliationFailed: null
+        onReconciliationFailed: null,
+        onReconciliationComplete: null
     };
     
     /**
@@ -606,8 +607,18 @@ const ObjectSync = (function() {
             
             // console.log('[ObjectSync] Reconciliation complete, objects:', objects.size);
             reconciliationCount++;
+            if (callbacks.onReconciliationComplete) {
+                callbacks.onReconciliationComplete();
+            }
         } catch (err) {
             console.error('[ObjectSync] Reconciliation failed:', err);
+            // Treat invoke errors the same as a null snapshot: the connection
+            // is broken (e.g. stale WebSocket after mobile background) and the
+            // server no longer recognizes us. Fire the failure callback so the
+            // game can trigger a full rejoin instead of silently stalling.
+            if (callbacks.onReconciliationFailed) {
+                callbacks.onReconciliationFailed();
+            }
         } finally {
             reconciling = false;
         }
@@ -1094,6 +1105,7 @@ const ObjectSync = (function() {
         handleOwnershipMigration,
         handleMemberDeparture,
         trackEventSequence,
+        isReconciling: () => reconciling,
         on,
         clear
     };
