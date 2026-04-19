@@ -58,16 +58,7 @@ public class ObjectService : IObjectService
             if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
                 return null;
 
-            var obj = new SessionObject
-            {
-                SessionId = sessionId,
-                CreatorMemberId = creatorMemberId,
-                OwnerMemberId = effectiveOwner,
-                Scope = scope,
-                // Clone the caller-supplied data to prevent the caller mutating it after the fact
-                Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>()
-            };
-
+            var obj = NewSessionObject(sessionId, creatorMemberId, effectiveOwner, scope, data);
             session.Objects.TryAdd(obj.Id, obj);
             return obj;
         }
@@ -183,15 +174,7 @@ public class ObjectService : IObjectService
                     ? spec.OwnerOverride.Value
                     : ownerMemberId;
 
-                var obj = new SessionObject
-                {
-                    SessionId = sessionId,
-                    CreatorMemberId = ownerMemberId,
-                    OwnerMemberId = effectiveOwner,
-                    Scope = spec.Scope,
-                    // Clone data so spec mutations after the call don't corrupt the stored object
-                    Data = new Dictionary<string, object?>(spec.Data)
-                };
+                var obj = NewSessionObject(sessionId, ownerMemberId, effectiveOwner, spec.Scope, spec.Data);
                 session.Objects.TryAdd(obj.Id, obj);
                 created.Add(obj);
             }
@@ -239,4 +222,24 @@ public class ObjectService : IObjectService
         obj.Version++;
         obj.UpdatedAt = DateTime.UtcNow;
     }
+
+    /// <summary>
+    /// Constructs a fresh <see cref="SessionObject"/>, defensively cloning <paramref name="data"/>
+    /// so caller mutations after the call cannot corrupt the stored object. Caller is responsible
+    /// for inserting it into <c>session.Objects</c>.
+    /// </summary>
+    private static SessionObject NewSessionObject(
+        Guid sessionId,
+        Guid creatorMemberId,
+        Guid ownerMemberId,
+        ObjectScope scope,
+        Dictionary<string, object?>? data)
+        => new()
+        {
+            SessionId = sessionId,
+            CreatorMemberId = creatorMemberId,
+            OwnerMemberId = ownerMemberId,
+            Scope = scope,
+            Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>()
+        };
 }

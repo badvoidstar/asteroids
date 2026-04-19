@@ -2542,6 +2542,21 @@
     // ============================================
 
     /**
+     * Shared helper: delete a synced object from ObjectSync, swallowing and logging errors.
+     * Returns true if a delete was attempted (whether or not it succeeded), false if the
+     * id was already missing.
+     */
+    async function deleteSyncedObject(syncObjectId, label) {
+        if (!syncObjectId) return false;
+        try {
+            await ObjectSync.deleteObject(syncObjectId);
+        } catch (err) {
+            console.error(`[Multiplayer] Failed to delete ${label}:`, err);
+        }
+        return true;
+    }
+
+    /**
      * Create a ship object in ObjectSync for the local player
      * Called when entering a multiplayer game
      * @param {number} colorIndex - The color index for this player's ship
@@ -2585,13 +2600,9 @@
      */
     async function deleteSyncedShip() {
         if (!game.multiplayer.myShipObjectId) return;
-        
-        try {
-            await ObjectSync.deleteObject(game.multiplayer.myShipObjectId);
-        } catch (err) {
-            console.error('[Multiplayer] Failed to delete ship:', err);
-        }
-        
+
+        await deleteSyncedObject(game.multiplayer.myShipObjectId, 'ship');
+
         game.multiplayer.myShipObjectId = null;
         game.ship = null;
     }
@@ -2748,13 +2759,7 @@
      * @param {Asteroid} asteroid - The asteroid to delete
      */
     async function deleteSyncedAsteroid(asteroid) {
-        if (!asteroid.syncObjectId) return;
-        
-        try {
-            await ObjectSync.deleteObject(asteroid.syncObjectId);
-        } catch (err) {
-            console.error('[Multiplayer] Failed to delete asteroid:', err);
-        }
+        await deleteSyncedObject(asteroid.syncObjectId, 'asteroid');
     }
 
     /**
@@ -2866,13 +2871,7 @@
      * @param {Bullet} bullet - The bullet to delete
      */
     async function deleteSyncedBullet(bullet) {
-        if (!bullet.syncObjectId) return;
-        
-        try {
-            await ObjectSync.deleteObject(bullet.syncObjectId);
-        } catch (err) {
-            console.error('[Multiplayer] Failed to delete bullet:', err);
-        }
+        await deleteSyncedObject(bullet.syncObjectId, 'bullet');
     }
 
     /**
