@@ -101,7 +101,11 @@ public class SessionHub : Hub
         var bytes = EstimatePayloadBytes(args);
         var recipients = session.Members.Keys.Where(id => id != excludeMemberId);
         _metrics.OnBroadcastToMembers(recipients, bytes);
-        await Clients.OthersInGroup(session.Id.ToString()).SendAsync(method, args);
+        // SendCoreAsync, NOT SendAsync — the latter has no params object?[] overload, so
+        // SendCoreAsync(method, args) would resolve to SendAsync(string, object?) and wrap
+        // the entire args array as a single client argument, breaking handlers that
+        // expect multiple positional arguments.
+        await Clients.OthersInGroup(session.Id.ToString()).SendCoreAsync(method, args);
     }
 
     /// <summary>
@@ -113,7 +117,8 @@ public class SessionHub : Hub
     {
         var bytes = EstimatePayloadBytes(args);
         _metrics.OnBroadcastToMembers(session.Members.Keys, bytes);
-        await Clients.Group(session.Id.ToString()).SendAsync(method, args);
+        // SendCoreAsync — see BroadcastToOthersAsync for the rationale.
+        await Clients.Group(session.Id.ToString()).SendCoreAsync(method, args);
     }
 
     /// <summary>
