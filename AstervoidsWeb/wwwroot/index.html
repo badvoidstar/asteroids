@@ -4511,11 +4511,11 @@
     }
 
     // Connect to session hub
-    async function connectToSessionHub() {
+    async function connectToSessionHub(forceFresh = false) {
         setPickerStatus('Connecting...', 'connecting');
 
         try {
-            const success = await SessionClient.connect();
+            const success = await SessionClient.connect(forceFresh);
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
@@ -4914,6 +4914,10 @@
         // member if it hasn't detected the dead connection yet (race condition: server's
         // ClientTimeoutInterval can be longer than the client's reconnect retry window).
         const oldMemberId = game.sessionInfo?.memberId ?? null;
+        // Clear any stale session/member refs so the upcoming forced-fresh connect's
+        // onConnected callback doesn't see isInSession()===true and prematurely flip
+        // game.connectionLost off before joinSession actually completes.
+        SessionClient.clearSessionState();
         setPickerStatus('Connection lost - reconnecting...', 'error');
 
         const maxAttempts = 3;
@@ -4925,10 +4929,13 @@
                         await new Promise(r => setTimeout(r, 2000 * attempt));
                     }
 
-                    // Reconnect to hub
-                    if (!SessionClient.isConnected()) {
-                        await connectToSessionHub();
-                    }
+                    // Always rebuild the SignalR connection from scratch. SignalR's
+                    // `state` can falsely report `Connected` after the OS kills the
+                    // WebSocket while the browser is backgrounded on mobile. Invoking
+                    // joinSession over such a zombie transport hangs or throws and
+                    // burns retries — leaving the player stranded on the start screen
+                    // with ambient asteroids when the rejoin should have succeeded.
+                    await connectToSessionHub(true);
                     if (!SessionClient.isConnected()) continue;
 
                     // Try to rejoin the same session, evicting the stale old member

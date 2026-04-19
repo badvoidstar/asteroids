@@ -35,8 +35,8 @@ const SessionClient = (function() {
     /**
      * Initialize the SignalR connection.
      */
-    async function connect() {
-        if (connection && connection.state === signalR.HubConnectionState.Connected) {
+    async function connect(forceFresh = false) {
+        if (!forceFresh && connection && connection.state === signalR.HubConnectionState.Connected) {
             // console.log('[SessionClient] Already connected');
             return true;
         }
@@ -46,6 +46,13 @@ const SessionClient = (function() {
         // WebSocket connections when backgrounded. Without this cleanup, the
         // old connection's onclose fires after the new connection is established
         // and trashes the restored session state.
+        //
+        // forceFresh=true skips the early-return above so callers (notably
+        // attemptAutoRejoin) can guarantee a brand-new transport even when
+        // SignalR's `state` still misleadingly reads `Connected`. On mobile
+        // foreground the WebSocket has been killed by the OS but SignalR has
+        // not yet detected the dead transport — invoking over it hangs or
+        // throws and consumes rejoin retries.
         //
         // The connection = null before stale.stop() is intentional: it ensures
         // any synchronously-fired onclose from stop() sees connection !== thisConnection
