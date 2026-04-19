@@ -5231,7 +5231,11 @@
             // runs when hidden but isSessionMode()/state conditions don't match.
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
-                if (SessionClient.isConnected()) {
+                // Skip reconciliation while a rejoin is in flight — a snapshot taken
+                // mid-rejoin can predate the just-created ship, which would then be
+                // trimmed as a "ghost" and trigger onObjectDeleted, nulling game.ship
+                // and leaving the player stuck in a no-ship spectating shell.
+                if (SessionClient.isConnected() && !rejoinInProgress) {
                     ObjectSync.triggerReconciliation();
                 }
             }

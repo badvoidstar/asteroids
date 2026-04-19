@@ -561,9 +561,16 @@ const ObjectSync = (function() {
                 }
             }
             
-            // Remove ghost objects (locally present but not on server)
+            // Remove ghost objects (locally present but not on server).
+            // Skip locally-created objects (isLocal=true): a successful local create
+            // has already been server-acknowledged via the invoke response, so its
+            // absence from this snapshot just means the snapshot predates the create.
+            // Trimming such an object would race with createSyncedShip during a rejoin
+            // and incorrectly null out the freshly-created ship. Genuine server-side
+            // deletions of locally-created objects still arrive via OnObjectDeleted
+            // broadcasts, which trigger the proper cleanup path.
             for (const [id, obj] of objects) {
-                if (!serverObjectIds.has(id)) {
+                if (!serverObjectIds.has(id) && !obj.isLocal) {
                     removeObjectLocal(id);
                     if (callbacks.onObjectDeleted) {
                         callbacks.onObjectDeleted(obj);
