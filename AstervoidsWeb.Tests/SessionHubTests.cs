@@ -300,4 +300,60 @@ public class SessionHubTests
         snapshotCapturedAfterAdd.Should().BeTrue(
             "snapshot must be captured after AddToGroupAsync to include concurrent state changes");
     }
+
+    /// <summary>
+    /// Regression: BroadcastToOthersAsync / BroadcastToAllAsync MUST use SendCoreAsync,
+    /// not SendAsync. SendAsync has no params object?[] overload, so SendAsync(method, args)
+    /// would resolve to SendAsync(string, object?) and wrap the entire args array as a
+    /// single client argument — clients expect multiple positional args (e.g.
+    /// OnObjectCreated(objectInfo, memberId, sequence, timestamp) → 4 args). This test
+    /// verifies CreateObject's broadcast spreads its args correctly.
+    /// </summary>
+    [Fact]
+    public async Task CreateObject_BroadcastsArgsAsMultiplePositionalArguments()
+    {
+        // Arrange
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+
+        object?[]? capturedArgs = null;
+        string? capturedMethod = null;
+
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((m, a, _) =>
+            {
+                capturedMethod = m;
+                capturedArgs = a;
+            })
+            .Returns(Task.CompletedTask);
+
+        var hub = new SessionHub(_sessionService, _objectService,
+            Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService());
+        var context = new Mock<HubCallerContext>();
+        context.SetupGet(c => c.ConnectionId).Returns("connection-1");
+        hub.Context = context.Object;
+        var clients = new Mock<IHubCallerClients>();
+        clients.Setup(c => c.OthersInGroup(It.IsAny<string>())).Returns(clientProxy.Object);
+        clients.Setup(c => c.Group(It.IsAny<string>())).Returns(clientProxy.Object);
+        hub.Clients = clients.Object;
+        var groups = new Mock<IGroupManager>();
+        groups.Setup(g => g.AddToGroupAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        hub.Groups = groups.Object;
+
+        // Act
+        var response = await hub.CreateObject(
+            new Dictionary<string, object?> { ["type"] = "asteroid" }, "Session");
+
+        // Assert
+        response.Should().NotBeNull();
+        capturedMethod.Should().Be("OnObjectCreated");
+        capturedArgs.Should().NotBeNull();
+        // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp) = 4 args.
+        // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 4).
+        capturedArgs!.Length.Should().Be(4,
+            "broadcast helpers must spread args via SendCoreAsync, not wrap them through SendAsync(string, object?)");
+    }
 }

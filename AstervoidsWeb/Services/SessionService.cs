@@ -218,14 +218,12 @@ public class SessionService : ISessionService
             if (session.LifecycleState == SessionLifecycleState.Destroyed)
             {
                 // Session is already gone — clean up stale index entries silently
-                _connectionToMember.TryRemove(connectionId, out _);
-                _memberToSession.TryRemove(memberId, out _);
+                UnregisterMember(connectionId, memberId);
                 return null;
             }
 
             // Remove the member from global indexes and session.Members atomically
-            _connectionToMember.TryRemove(connectionId, out _);
-            _memberToSession.TryRemove(memberId, out _);
+            UnregisterMember(connectionId, memberId);
 
             if (!session.Members.TryRemove(memberId, out var member))
             {
@@ -237,20 +235,12 @@ public class SessionService : ISessionService
             // ── Server promotion ───────────────────────────────────────────────────
             // If the departing member was the server, promote the oldest remaining
             // member (deterministic: earliest JoinedAt, then lowest Id as tie-breaker).
-            Member? promotedMember = null;
-            if (member.Role == MemberRole.Server && session.Members.Count > 0)
+            var promotedMember = PromoteNextServer(session, member);
+            if (promotedMember != null)
             {
-                var promoted = session.Members.Values
-                    .OrderBy(m => m.JoinedAt)
-                    .ThenBy(m => m.Id)
-                    .First();
-                promoted.Role = MemberRole.Server;
-                promotedMember = promoted;
-                session.Version++;
-
                 _logger?.LogInformation(
                     "Member {PromotedMemberId} promoted to Server in session {SessionName} ({SessionId})",
-                    promoted.Id, session.Name, session.Id);
+                    promotedMember.Id, session.Name, session.Id);
             }
 
             // Snapshot remaining member IDs *after* removal and promotion
@@ -355,8 +345,7 @@ public class SessionService : ISessionService
             var connectionIds = new List<string>();
             foreach (var member in session.Members.Values)
             {
-                _memberToSession.TryRemove(member.Id, out _);
-                _connectionToMember.TryRemove(member.ConnectionId, out _);
+                UnregisterMember(member.ConnectionId, member.Id);
                 connectionIds.Add(member.ConnectionId);
             }
 
@@ -389,6 +378,38 @@ public class SessionService : ISessionService
     }
 
     /// <summary>
+    /// Removes the (connectionId, memberId) pair from the global lookup dictionaries.
+    /// Idempotent; safe to call when entries may already be gone.
+    /// </summary>
+    private void UnregisterMember(string connectionId, Guid memberId)
+    {
+        _connectionToMember.TryRemove(connectionId, out _);
+        _memberToSession.TryRemove(memberId, out _);
+    }
+
+    /// <summary>
+    /// If <paramref name="departingMember"/> was the session's Server, promotes the
+    /// oldest remaining member (deterministic: earliest JoinedAt, then lowest Id as
+    /// tie-breaker) to Server and bumps <c>session.Version</c>. Returns the promoted
+    /// member, or null if no promotion was needed (the departing member was a Client,
+    /// or no members remain).
+    /// Must be called while holding <c>session.SyncRoot</c>.
+    /// </summary>
+    private static Member? PromoteNextServer(Session session, Member departingMember)
+    {
+        if (departingMember.Role != MemberRole.Server || session.Members.Count == 0)
+            return null;
+
+        var promoted = session.Members.Values
+            .OrderBy(m => m.JoinedAt)
+            .ThenBy(m => m.Id)
+            .First();
+        promoted.Role = MemberRole.Server;
+        session.Version++;
+        return promoted;
+    }
+
+    /// <summary>
     /// Forcefully removes a stale member from a session during reconnection.
     /// Removes global index entries, the member from <c>session.Members</c>,
     /// promotes a new server if the evicted member was the server, and handles
@@ -401,24 +422,12 @@ public class SessionService : ISessionService
     private EvictionInfo EvictMemberInternal(Session session, Guid memberId, Member member)
     {
         // Remove from global indexes
-        _connectionToMember.TryRemove(member.ConnectionId, out _);
-        _memberToSession.TryRemove(memberId, out _);
+        UnregisterMember(member.ConnectionId, memberId);
         session.Members.TryRemove(memberId, out _);
 
         // ── Server promotion ───────────────────────────────────────────────────
-        // If the evicted member was the server, promote the oldest remaining
-        // member (same deterministic logic as LeaveSession).
-        Member? promotedMember = null;
-        if (member.Role == MemberRole.Server && session.Members.Count > 0)
-        {
-            var promoted = session.Members.Values
-                .OrderBy(m => m.JoinedAt)
-                .ThenBy(m => m.Id)
-                .First();
-            promoted.Role = MemberRole.Server;
-            promotedMember = promoted;
-            session.Version++;
-        }
+        // Same deterministic logic as LeaveSession (oldest remaining member).
+        var promotedMember = PromoteNextServer(session, member);
 
         // ── Object cleanup ─────────────────────────────────────────────────────
         // Use the same HandleObjectDeparture logic as LeaveSession so that
