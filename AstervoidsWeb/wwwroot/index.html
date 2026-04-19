@@ -4921,6 +4921,11 @@
     // attemptAutoRejoin so a transport drop mid-leave can't trigger an auto-rejoin
     // back into the session the user is leaving (would create ghost membership).
     let leavingSession = false;
+    // Deferred rejoin: when attemptAutoRejoin is called while the tab is hidden
+    // (mobile background), network ops would fail. Save the info and let
+    // visibilitychange trigger the rejoin when the tab becomes visible.
+    let pendingRejoinSessionId = null;
+    let pendingRejoinMemberId = null;
 
     /**
      * Attempt to reconnect and rejoin a session after an unexpected disconnect.
@@ -4933,6 +4938,17 @@
      */
     async function attemptAutoRejoin(sessionId, oldMemberId = null) {
         if (rejoinInProgress || leavingSession) return;
+
+        // Mobile browsers throttle/block network while backgrounded. Attempting
+        // to reconnect now would exhaust all retries before the user even sees
+        // the tab. Defer until the tab becomes visible.
+        if (document.hidden) {
+            pendingRejoinSessionId = sessionId;
+            pendingRejoinMemberId = oldMemberId ?? game.sessionInfo?.memberId ?? null;
+            console.log('[Rejoin] Deferred — tab hidden. Session:', sessionId);
+            return;
+        }
+
         rejoinInProgress = true;
         // Suspend reconciliation during the rejoin window. Any visibilitychange or
         // SignalR onreconnected reconciliation triggered concurrently would race
@@ -4945,7 +4961,7 @@
         if (oldMemberId == null) {
             oldMemberId = game.sessionInfo?.memberId ?? null;
         }
-        setPickerStatus('Connection lost - reconnecting...', 'error');
+        setPickerStatus('Reconnecting... (starting)', 'error');
 
         const maxAttempts = 3;
         try {
@@ -4953,6 +4969,7 @@
                 try {
                     // Wait before retrying (except first attempt)
                     if (attempt > 0) {
+                        setPickerStatus(`Reconnecting... (attempt ${attempt + 1}/${maxAttempts})`, 'error');
                         await new Promise(r => setTimeout(r, 2000 * attempt));
                     }
 
@@ -4960,8 +4977,12 @@
                     // the old connection may appear "Connected" but the underlying
                     // WebSocket is dead. Forcing ensures ObjectSync.init() is called
                     // on the new connection and cancels any stale auto-reconnect.
+                    setPickerStatus(`Reconnecting... (connecting)`, 'error');
                     await connectToSessionHub(true);
-                    if (!SessionClient.isConnected()) continue;
+                    if (!SessionClient.isConnected()) {
+                        setPickerStatus(`Reconnecting... (connect failed)`, 'error');
+                        continue;
+                    }
 
                     // Wipe stale local game state (game.astervoids/bullets and
                     // ObjectSync) BEFORE rejoin. The server's eviction path deleted
@@ -4979,8 +5000,10 @@
                     resetMultiplayerState();
 
                     // Try to rejoin the same session, evicting the stale old member
+                    setPickerStatus(`Reconnecting... (joining session)`, 'error');
                     const result = await SessionClient.joinSession(sessionId, oldMemberId);
                     if (result) {
+                        setPickerStatus('Reconnected!', 'connected');
                         // Successfully rejoined — restore game/lobby state
                         game.mode = 'session';
                         game.sessionInfo = {
@@ -5023,10 +5046,12 @@
                         return;
                     } else {
                         // Session no longer exists or is full
+                        setPickerStatus(`Rejoin failed: session not found`, 'error');
                         break;
                     }
                 } catch (err) {
                     console.error('[Rejoin] Attempt', attempt + 1, 'failed:', err);
+                    setPickerStatus(`Rejoin error: ${err.message}`, 'error');
                 }
             }
 
@@ -5289,6 +5314,20 @@
             // 10-retry auto-reconnect cycle; go straight to full rejoin.
             const hiddenDurationMs = hiddenTimestamp ? Date.now() - hiddenTimestamp : 0;
             hiddenTimestamp = null;
+
+            // ── Deferred rejoin ─────────────────────────────────────────────
+            // If attemptAutoRejoin was called while the tab was hidden (mobile
+            // background), it deferred to avoid wasting retries on a throttled
+            // network. Now that the tab is visible, execute the deferred rejoin.
+            if (!document.hidden && pendingRejoinSessionId && !rejoinInProgress) {
+                const sid = pendingRejoinSessionId;
+                const mid = pendingRejoinMemberId;
+                pendingRejoinSessionId = null;
+                pendingRejoinMemberId = null;
+                game.connectionLost = true;
+                reconnectingOverlay.classList.add('visible');
+                attemptAutoRejoin(sid, mid);
+            }
 
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
