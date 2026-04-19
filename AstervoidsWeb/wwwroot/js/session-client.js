@@ -53,10 +53,26 @@ const SessionClient = (function() {
         // assigned is safe because JavaScript is single-threaded — no other code can
         // access `connection` until we yield at await connection.start() below, by
         // which point `connection` is already set to the new connection.
+        //
+        // IMPORTANT: await stop() to ensure the old WebSocket is fully closed before
+        // starting a new one. On mobile browsers with limited resources, starting a
+        // new WebSocket while the old one is still closing can fail.
         if (connection) {
             const stale = connection;
             connection = null; // Clear reference so stale handlers are ignored
-            try { stale.stop(); } catch (e) { /* ignore */ }
+            // Also clear stale session state — the old connection's onclose handler
+            // is guarded (won't fire), so currentSession/currentMember would remain
+            // stale. This prevents the onConnected callback from seeing isInSession()
+            // as true when we're actually between sessions during a force-reconnect.
+            currentSession = null;
+            currentMember = null;
+            try {
+                // Race against a 3s timeout to prevent hanging on dead connections
+                await Promise.race([
+                    stale.stop(),
+                    new Promise(r => setTimeout(r, 3000))
+                ]);
+            } catch (e) { /* ignore */ }
         }
 
         try {
@@ -82,7 +98,7 @@ const SessionClient = (function() {
             connection.keepAliveIntervalInMilliseconds = 10000;
 
             await connection.start();
-            // console.log('[SessionClient] Connected to session hub');
+            console.log('[SessionClient] Connected to session hub');
             reconnectAttempts = 0;
 
             if (callbacks.onConnected) {
@@ -341,9 +357,10 @@ const SessionClient = (function() {
         ensureConnected();
 
         try {
+            console.log('[SessionClient] JoinSession invoking:', sessionId, 'evict:', evictMemberId);
             const response = GuidUtils.transformBinaryGuids(await connection.invoke('JoinSession', sessionId, evictMemberId));
             if (!response) {
-                // console.log('[SessionClient] JoinSession failed - session full or already in a session');
+                console.warn('[SessionClient] JoinSession returned null — session not found, full, or rejected');
                 return null;
             }
 
@@ -359,7 +376,7 @@ const SessionClient = (function() {
                 role: response.role
             };
 
-            // console.log('[SessionClient] Joined session:', currentSession.name);
+            console.log('[SessionClient] Joined session:', currentSession.name, 'as', currentMember.role);
             lastSessionId = currentSession.id;
 
             if (callbacks.onSessionJoined) {

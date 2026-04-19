@@ -4937,7 +4937,10 @@
      *   the session can appear "full" of our own ghost member.
      */
     async function attemptAutoRejoin(sessionId, oldMemberId = null) {
-        if (rejoinInProgress || leavingSession) return;
+        if (rejoinInProgress || leavingSession) {
+            console.log('[Rejoin] Skipped — rejoinInProgress:', rejoinInProgress, 'leavingSession:', leavingSession);
+            return;
+        }
 
         // Mobile browsers throttle/block network while backgrounded. Attempting
         // to reconnect now would exhaust all retries before the user even sees
@@ -4949,6 +4952,8 @@
             return;
         }
 
+        console.log('[Rejoin] Starting. Session:', sessionId, 'OldMember:', oldMemberId,
+            'game.state:', game.state, 'game.mode:', game.mode);
         rejoinInProgress = true;
         // Suspend reconciliation during the rejoin window. Any visibilitychange or
         // SignalR onreconnected reconciliation triggered concurrently would race
@@ -4961,17 +4966,19 @@
         if (oldMemberId == null) {
             oldMemberId = game.sessionInfo?.memberId ?? null;
         }
-        setPickerStatus('Reconnecting... (starting)', 'error');
+        setPickerStatus('Reconnecting...', 'error');
 
-        const maxAttempts = 3;
+        const maxAttempts = 5;
         try {
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 try {
-                    // Wait before retrying (except first attempt)
+                    // Wait before each attempt (including first). Mobile browsers may
+                    // need a brief pause after tab-visible before WebSocket works.
+                    const delay = attempt === 0 ? 500 : 2000 * attempt;
                     if (attempt > 0) {
                         setPickerStatus(`Reconnecting... (attempt ${attempt + 1}/${maxAttempts})`, 'error');
-                        await new Promise(r => setTimeout(r, 2000 * attempt));
                     }
+                    await new Promise(r => setTimeout(r, delay));
 
                     // Always force a fresh connection — after mobile background,
                     // the old connection may appear "Connected" but the underlying
@@ -4980,9 +4987,11 @@
                     setPickerStatus(`Reconnecting... (connecting)`, 'error');
                     await connectToSessionHub(true);
                     if (!SessionClient.isConnected()) {
+                        console.warn('[Rejoin] Connect failed on attempt', attempt + 1);
                         setPickerStatus(`Reconnecting... (connect failed)`, 'error');
                         continue;
                     }
+                    console.log('[Rejoin] Connected. Attempt', attempt + 1);
 
                     // Wipe stale local game state (game.astervoids/bullets and
                     // ObjectSync) BEFORE rejoin. The server's eviction path deleted
@@ -5003,6 +5012,8 @@
                     setPickerStatus(`Reconnecting... (joining session)`, 'error');
                     const result = await SessionClient.joinSession(sessionId, oldMemberId);
                     if (result) {
+                        console.log('[Rejoin] Success! Session:', result.session.name,
+                            'Role:', result.member.role, 'Objects:', result.session.objects?.length);
                         setPickerStatus('Reconnected!', 'connected');
                         // Successfully rejoined — restore game/lobby state
                         game.mode = 'session';
@@ -5077,13 +5088,13 @@
 
     // Clear connection-lost state when SignalR reconnects (or initial connect)
     SessionClient.on('onConnected', () => {
-        if (game.connectionLost && SessionClient.isInSession() && !ObjectSync.isReconciling()) {
+        if (game.connectionLost && SessionClient.isInSession() && !ObjectSync.isReconciling()
+            && !rejoinInProgress) {
             // Only unfreeze here for SignalR auto-reconnect (member still in session)
-            // when reconciliation is NOT in progress. If reconciliation is pending,
-            // defer unfreezing to onReconciliationComplete — this avoids a brief
-            // stale-state flicker while the server hasn't confirmed membership.
-            // For full disconnect + auto-rejoin, attemptAutoRejoin clears the flag
-            // after joinSession() succeeds, ensuring networking is fully restored.
+            // when reconciliation is NOT in progress and a full rejoin is NOT in progress.
+            // During rejoinInProgress, attemptAutoRejoin owns the unfreeze — it will
+            // clear connectionLost after joinSession succeeds. Unfreezing here would
+            // let the game loop run with stale/empty state before the rejoin completes.
             game.connectionLost = false;
             game.lastFrameTime = 0; // Reset to prevent delta time jump
             reconnectingOverlay.classList.remove('visible');
@@ -5320,6 +5331,7 @@
             // background), it deferred to avoid wasting retries on a throttled
             // network. Now that the tab is visible, execute the deferred rejoin.
             if (!document.hidden && pendingRejoinSessionId && !rejoinInProgress) {
+                console.log('[Visibility] Triggering deferred rejoin. Session:', pendingRejoinSessionId);
                 const sid = pendingRejoinSessionId;
                 const mid = pendingRejoinMemberId;
                 pendingRejoinSessionId = null;
@@ -5332,6 +5344,7 @@
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
                 if (hiddenDurationMs > 5000 && !rejoinInProgress) {
+                    console.log('[Visibility] Long background (' + hiddenDurationMs + 'ms). Triggering direct rejoin.');
                     // Long background — connection is almost certainly dead.
                     // Capture session info before anything clears it, then
                     // force a fresh connection + rejoin immediately.
