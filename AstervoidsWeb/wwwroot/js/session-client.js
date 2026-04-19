@@ -35,8 +35,8 @@ const SessionClient = (function() {
     /**
      * Initialize the SignalR connection.
      */
-    async function connect() {
-        if (connection && connection.state === signalR.HubConnectionState.Connected) {
+    async function connect(force = false) {
+        if (!force && connection && connection.state === signalR.HubConnectionState.Connected) {
             // console.log('[SessionClient] Already connected');
             return true;
         }

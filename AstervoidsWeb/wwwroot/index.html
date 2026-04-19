@@ -4512,11 +4512,11 @@
     }
 
     // Connect to session hub
-    async function connectToSessionHub() {
+    async function connectToSessionHub(force = false) {
         setPickerStatus('Connecting...', 'connecting');
 
         try {
-            const success = await SessionClient.connect();
+            const success = await SessionClient.connect(force);
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
@@ -4956,10 +4956,11 @@
                         await new Promise(r => setTimeout(r, 2000 * attempt));
                     }
 
-                    // Reconnect to hub
-                    if (!SessionClient.isConnected()) {
-                        await connectToSessionHub();
-                    }
+                    // Always force a fresh connection — after mobile background,
+                    // the old connection may appear "Connected" but the underlying
+                    // WebSocket is dead. Forcing ensures ObjectSync.init() is called
+                    // on the new connection and cancels any stale auto-reconnect.
+                    await connectToSessionHub(true);
                     if (!SessionClient.isConnected()) continue;
 
                     // Wipe stale local game state (game.astervoids/bullets and
@@ -5189,8 +5190,10 @@
     // so background updates run at ~1fps rather than the target framerate.
     // The dt cap (3x) limits per-tick physics to avoid large jumps.
     let backgroundInterval = null;
+    let hiddenTimestamp = null;
     document.addEventListener('visibilitychange', () => {
         if (document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
+            hiddenTimestamp = Date.now();
             // Tab hidden during multiplayer - use setInterval as fallback
             if (!backgroundInterval) {
                 const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
@@ -5281,16 +5284,27 @@
                 clearInterval(backgroundInterval);
                 backgroundInterval = null;
             }
-            // When returning to a multiplayer session, reset frame time to avoid
-            // a large delta-time jump and reconcile state with the server.
-            // The !document.hidden guard is needed because the else branch also
-            // runs when hidden but isSessionMode()/state conditions don't match.
-            // The !rejoinInProgress guard prevents reconciliation while a full
-            // rejoin is in flight — currentMember may briefly be null, and the
-            // reconciliation snapshot would race with the joinSession snapshot apply.
+            // Measure how long the tab was hidden. On mobile, >5s means the OS
+            // likely killed the WebSocket — skip triggerReconciliation and the
+            // 10-retry auto-reconnect cycle; go straight to full rejoin.
+            const hiddenDurationMs = hiddenTimestamp ? Date.now() - hiddenTimestamp : 0;
+            hiddenTimestamp = null;
+
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
-                if (SessionClient.isConnected() && !rejoinInProgress) {
+                if (hiddenDurationMs > 5000 && !rejoinInProgress) {
+                    // Long background — connection is almost certainly dead.
+                    // Capture session info before anything clears it, then
+                    // force a fresh connection + rejoin immediately.
+                    const savedSessionId = sessionPicker.currentSessionId || SessionClient.getLastSessionId();
+                    const oldMemberId = SessionClient.getCurrentMember()?.id
+                        ?? game.sessionInfo?.memberId ?? null;
+                    if (savedSessionId) {
+                        game.connectionLost = true;
+                        reconnectingOverlay.classList.add('visible');
+                        attemptAutoRejoin(savedSessionId, oldMemberId);
+                    }
+                } else if (SessionClient.isConnected() && !rejoinInProgress) {
                     ObjectSync.triggerReconciliation();
                 }
             }
