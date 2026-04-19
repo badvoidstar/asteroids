@@ -13,6 +13,8 @@
     <!-- Web App Manifest for Add to Home Screen -->
     <link rel="manifest" href="manifest.json">
     <title>Astervoids</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate icon" href="/favicon.svg">
     <style>
         /* ============================================
            STYLES - Minimal CSS for game presentation
@@ -619,7 +621,7 @@
     </div>
 
     <!-- SignalR for session connectivity -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <script src="/js/signalr.min.js"></script>
     <!-- SignalR MessagePack hub protocol (binary encoding; smaller payloads than JSON) -->
     <script src="/js/signalr-protocol-msgpack.min.js"></script>
     <!-- Binary GUID conversion (server sends 16-byte binary GUIDs; this converts to strings) -->
@@ -4533,6 +4535,10 @@
                 ObjectSync.on('onReconciliationFailed', () => {
                     console.warn('[Session] Reconciliation failed — server no longer recognizes this connection. Triggering full rejoin.');
                     const lostSessionId = sessionPicker.currentSessionId || SessionClient.getLastSessionId();
+                    // Capture the old memberId BEFORE clearSessionState wipes it.
+                    // Required for the server-side eviction path during rejoin.
+                    const oldMemberId = SessionClient.getCurrentMember()?.id
+                        ?? game.sessionInfo?.memberId ?? null;
                     if (lostSessionId) {
                         // Re-freeze gameplay: onConnected may have unfrozen the game,
                         // but the session is broken. Keep the player frozen until rejoin.
@@ -4542,7 +4548,7 @@
                         }
                         // Clear stale session state so SessionClient knows we're not in a session
                         SessionClient.clearSessionState();
-                        attemptAutoRejoin(lostSessionId);
+                        attemptAutoRejoin(lostSessionId, oldMemberId);
                     } else {
                         returnToStartScreen('Session lost during reconnection');
                     }
@@ -4724,38 +4730,46 @@
 
     // Leave lobby and return to start state
     async function handleLeaveLobby(message = null) {
-        // Delete synced ship if we have one
-        if (game.multiplayer.myShipObjectId) {
-            await deleteSyncedShip();
-        }
-        
-        if (sessionPicker.currentSessionId && SessionClient.isConnected()) {
-            try {
-                await SessionClient.leaveSession();
-            } catch (err) {
-                console.error('Failed to leave session:', err);
-            }
-        }
-
-        // Reset multiplayer state
-        resetMultiplayerState();
-        
-        // Reset to start state
-        game.state = 'start';
-        game.mode = 'solo';
-        game.sessionInfo = null;
+        // Mark as leaving FIRST and clear session refs synchronously so that a
+        // transport drop during the awaited teardown below cannot trigger
+        // attemptAutoRejoin into the session we're voluntarily leaving.
+        leavingSession = true;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.gameStarted = false;
+        try {
+            // Delete synced ship if we have one
+            if (game.multiplayer.myShipObjectId) {
+                await deleteSyncedShip();
+            }
+
+            if (SessionClient.isConnected() && SessionClient.isInSession()) {
+                try {
+                    await SessionClient.leaveSession();
+                } catch (err) {
+                    console.error('Failed to leave session:', err);
+                }
+            }
+
+            // Reset multiplayer state
+            resetMultiplayerState();
+
+            // Reset to start state
+            game.state = 'start';
+            game.mode = 'solo';
+            game.sessionInfo = null;
         
         // Recalculate viewport for solo mode
         resizeCanvas(true);
         
         updateHUD();
         
-        await refreshSessionList();
-        if (message) {
-            setPickerStatus(message, 'error');
+            await refreshSessionList();
+            if (message) {
+                setPickerStatus(message, 'error');
+            }
+        } finally {
+            leavingSession = false;
         }
     }
 
@@ -4776,28 +4790,31 @@
 
     // Return to start screen
     async function returnToStartScreen(errorMessage = null) {
-        // Delete synced ship if we have one
-        if (game.multiplayer.myShipObjectId) {
-            await deleteSyncedShip();
-        }
-        
-        // Leave session if in one
-        if (isSessionMode() && SessionClient.isConnected()) {
-            SessionClient.leaveSession().catch(console.error);
-        }
-
-        // Reset multiplayer state
-        resetMultiplayerState();
-        
-        // Reset game mode
-        game.mode = 'solo';
-        game.sessionInfo = null;
-
-        // Reset session picker state
+        // Mark as leaving FIRST and clear session refs synchronously so that a
+        // transport drop during the awaited teardown below cannot trigger
+        // attemptAutoRejoin into the session we're voluntarily leaving.
+        leavingSession = true;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.selectedSessionId = null;
         sessionPicker.gameStarted = false;
+        try {
+            // Delete synced ship if we have one
+            if (game.multiplayer.myShipObjectId) {
+                await deleteSyncedShip();
+            }
+
+            // Leave session if in one
+            if (isSessionMode() && SessionClient.isConnected()) {
+                SessionClient.leaveSession().catch(console.error);
+            }
+
+            // Reset multiplayer state
+            resetMultiplayerState();
+
+            // Reset game mode
+            game.mode = 'solo';
+            game.sessionInfo = null;
 
         // Reset game state
         game.state = 'start';
@@ -4849,6 +4866,9 @@
         } else {
             refreshSessionList();
         }
+        } finally {
+            leavingSession = false;
+        }
     }
 
     // Setup picker button handlers
@@ -4888,20 +4908,35 @@
 
     // Session client event handlers
     let rejoinInProgress = false;
+    // Set synchronously at the top of any voluntary leave path (returnToStartScreen,
+    // handleLeaveLobby) BEFORE awaiting any teardown. Guards onDisconnected and
+    // attemptAutoRejoin so a transport drop mid-leave can't trigger an auto-rejoin
+    // back into the session the user is leaving (would create ghost membership).
+    let leavingSession = false;
 
     /**
      * Attempt to reconnect and rejoin a session after an unexpected disconnect.
      * Used when mobile browsers kill WebSocket connections during background suspension.
      * @param {string} sessionId - The session ID to rejoin
+     * @param {string|null} oldMemberId - Old member ID to evict server-side if the server
+     *   hasn't detected the dead connection yet. MUST be captured by the caller before
+     *   game.sessionInfo is cleared, otherwise the eviction path is silently skipped and
+     *   the session can appear "full" of our own ghost member.
      */
-    async function attemptAutoRejoin(sessionId) {
-        if (rejoinInProgress) return;
+    async function attemptAutoRejoin(sessionId, oldMemberId = null) {
+        if (rejoinInProgress || leavingSession) return;
         rejoinInProgress = true;
+        // Suspend reconciliation during the rejoin window. Any visibilitychange or
+        // SignalR onreconnected reconciliation triggered while currentMember is
+        // briefly null would evaluate isLocal incorrectly and (more importantly)
+        // race with the snapshot apply path inside joinSession.
+        ObjectSync.suspendReconciliation();
         const wasPlaying = game.state === 'playing' || game.state === 'waveDelay';
-        // Capture old memberId before reconnection so the server can evict the stale
-        // member if it hasn't detected the dead connection yet (race condition: server's
-        // ClientTimeoutInterval can be longer than the client's reconnect retry window).
-        const oldMemberId = game.sessionInfo?.memberId ?? null;
+        // Fall back to game.sessionInfo only if caller didn't supply oldMemberId
+        // (preserves backwards compatibility but is unsafe — see onDisconnected).
+        if (oldMemberId == null) {
+            oldMemberId = game.sessionInfo?.memberId ?? null;
+        }
         setPickerStatus('Connection lost - reconnecting...', 'error');
 
         const maxAttempts = 3;
@@ -4918,6 +4953,21 @@
                         await connectToSessionHub();
                     }
                     if (!SessionClient.isConnected()) continue;
+
+                    // Wipe stale local game state (game.astervoids/bullets and
+                    // ObjectSync) BEFORE rejoin. The server's eviction path deleted
+                    // member-scoped objects (ship/bullets) and may have re-adopted
+                    // session-scoped ones (asteroids) under a new ownerId. The snapshot
+                    // returned by joinSession will repopulate ObjectSync from scratch,
+                    // so any stale syncObjectId references on local arrays must be gone
+                    // first to prevent rendering ghost objects whose IDs no longer exist.
+                    //
+                    // Crucially: this must run BEFORE joinSession, NOT after — joinSession
+                    // fires onSessionJoined synchronously inside its await, which loads
+                    // the snapshot into ObjectSync. Calling ObjectSync.clear() after that
+                    // would wipe the snapshot and leave the rejoining client with no
+                    // visible objects (and the authority would re-spawn duplicates).
+                    resetMultiplayerState();
 
                     // Try to rejoin the same session, evicting the stale old member
                     const result = await SessionClient.joinSession(sessionId, oldMemberId);
@@ -4937,22 +4987,28 @@
                             obj => obj.data?.type === OBJECT_TYPES.GAME_STATE
                         );
                         sessionPicker.connected = true;
-                        game.connectionLost = false;
-                        game.lastFrameTime = 0; // Reset to prevent delta time jump
-                        reconnectingOverlay.classList.remove('visible');
                         resizeCanvas(true);
 
                         if (wasPlaying && sessionPicker.gameStarted) {
                             // Was mid-game — set to lobby to satisfy startGameFromPicker
-                            // precondition, then re-enter the in-progress game
+                            // precondition, then re-enter the in-progress game.
+                            // Keep gameplay frozen (game.connectionLost stays true) until
+                            // init() completes — otherwise the loop would tick a frame
+                            // with no ship and stale arrays before createSyncedShip runs.
                             game.state = 'lobby';
                             await startGameFromPicker();
                         } else {
-                            // Return to lobby
+                            // Return to lobby — no ship needed, safe to unfreeze immediately
                             game.state = 'lobby';
                             updatePickerButtons();
                             startScreen.classList.remove('hidden');
                         }
+
+                        // Now that init() (if any) has completed and the player has a
+                        // working ship, unfreeze the game loop and hide the overlay.
+                        game.connectionLost = false;
+                        game.lastFrameTime = 0; // Reset to prevent delta time jump
+                        reconnectingOverlay.classList.remove('visible');
 
                         await refreshSessionList();
                         return;
@@ -4969,6 +5025,7 @@
             returnToStartScreen('Session ended');
         } finally {
             rejoinInProgress = false;
+            ObjectSync.resumeReconciliation();
         }
     }
 
@@ -4999,7 +5056,19 @@
 
     SessionClient.on('onDisconnected', (error) => {
         sessionPicker.connected = false;
+        // If the user is voluntarily leaving, do nothing — leavingSession is set
+        // synchronously at the top of returnToStartScreen / handleLeaveLobby. Without
+        // this guard a transport drop during leave teardown would auto-rejoin into
+        // the session we're leaving, producing ghost membership.
+        if (leavingSession) return;
+
+        // Capture both the lost session id AND the old member id BEFORE clearing
+        // any session refs. attemptAutoRejoin reads game.sessionInfo lazily inside
+        // an async function — by the time it runs, sessionInfo could be null
+        // (e.g. concurrent returnToStartScreen), causing the eviction path to be
+        // skipped and the rejoin to fail with "Session is full" on our own ghost.
         const lostSessionId = sessionPicker.currentSessionId;
+        const oldMemberId = game.sessionInfo?.memberId ?? null;
         sessionPicker.currentSessionId = null;
         sessionPicker.isServer = false;
         sessionPicker.gameStarted = false;
@@ -5015,7 +5084,7 @@
 
         if (lostSessionId) {
             // Lost connection while in a session — attempt auto-rejoin
-            attemptAutoRejoin(lostSessionId);
+            attemptAutoRejoin(lostSessionId, oldMemberId);
         } else if (game.state !== 'start') {
             returnToStartScreen('Disconnected from server');
         } else {
@@ -5205,9 +5274,12 @@
             // a large delta-time jump and reconcile state with the server.
             // The !document.hidden guard is needed because the else branch also
             // runs when hidden but isSessionMode()/state conditions don't match.
+            // The !rejoinInProgress guard prevents reconciliation while a full
+            // rejoin is in flight — currentMember may briefly be null, and the
+            // reconciliation snapshot would race with the joinSession snapshot apply.
             if (!document.hidden && isSessionMode() && (game.state === 'playing' || game.state === 'waveDelay')) {
                 game.lastFrameTime = 0;
-                if (SessionClient.isConnected()) {
+                if (SessionClient.isConnected() && !rejoinInProgress) {
                     ObjectSync.triggerReconciliation();
                 }
             }

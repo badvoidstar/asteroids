@@ -108,6 +108,19 @@ const ObjectSync = (function() {
     const memberSequences = new Map(); // memberId -> lastSeq
     let reconciling = false;
     let reconciliationCount = 0;
+    // External callers (e.g. attemptAutoRejoin) can suspend reconciliation during
+    // windows where currentMember/currentSession are mid-transition. While suspended,
+    // triggerReconciliation() is a silent no-op. Counter (not bool) so nested
+    // suspend/resume calls compose correctly.
+    let reconciliationSuspendCount = 0;
+
+    // Tracks objects locally deleted but not yet acknowledged by the server.
+    // Reconciliation skips these IDs in the "add missing object" pass — the server's
+    // snapshot may still contain them (delete in flight), and re-adding them would
+    // resurrect a ghost the user already destroyed. Cleared when DeleteObject's
+    // invoke resolves (success or failure) since by then the snapshot will reflect
+    // the deletion.
+    const pendingDeletes = new Set();
     
     // Delta encoding: track last-sent data per object to only send changes
     const lastSentData = new Map();
@@ -272,9 +285,23 @@ const ObjectSync = (function() {
         fullSyncCounter = 0;
         senderSequence = 0;
         memberSequences.clear();
+        pendingDeletes.clear();
         reconciling = false;
         reconciliationCount = 0;
         flushInProgress = false;
+    }
+
+    /**
+     * Suspend reconciliation. Calls compose (counter, not bool). While suspended,
+     * triggerReconciliation() is a silent no-op. Used by attemptAutoRejoin to
+     * prevent reconciliation from racing with a full rejoin in progress.
+     */
+    function suspendReconciliation() {
+        reconciliationSuspendCount++;
+    }
+
+    function resumeReconciliation() {
+        if (reconciliationSuspendCount > 0) reconciliationSuspendCount--;
     }
 
     /**
@@ -330,6 +357,12 @@ const ObjectSync = (function() {
 
     /**
      * Handle session joined - load existing objects.
+     *
+     * Version-aware: if an object already exists locally with a higher (or equal)
+     * version than the snapshot, the snapshot value is ignored. This prevents the
+     * snapshot from clobbering a live OnObjectsUpdated broadcast that arrived
+     * between the hub's AddToGroupAsync and the snapshot delivery in the JoinSession
+     * response. (See SessionHub.JoinSession ordering.)
      */
     function handleSessionJoined(session, member) {
         resetState();
@@ -337,6 +370,11 @@ const ObjectSync = (function() {
         if (session.objects) {
             for (const obj of session.objects) {
                 obj.data = expandData(obj.data);
+                const existing = objects.get(obj.id);
+                if (existing && existing.version >= obj.version) {
+                    // A live broadcast already populated this object at >= this version
+                    continue;
+                }
                 registerObject(obj, false);
             }
         }
@@ -512,6 +550,7 @@ const ObjectSync = (function() {
      */
     async function triggerReconciliation() {
         if (reconciling) return;
+        if (reconciliationSuspendCount > 0) return;
         reconciling = true;
         
         try {
@@ -552,6 +591,10 @@ const ObjectSync = (function() {
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
                     }
+                } else if (pendingDeletes.has(obj.id)) {
+                    // Locally deleted but server hasn't processed yet — do NOT
+                    // resurrect. The server will broadcast OnObjectDeleted shortly.
+                    continue;
                 } else {
                     // Add missing object
                     const localObj = registerObject(obj, false);
@@ -561,9 +604,11 @@ const ObjectSync = (function() {
                 }
             }
             
-            // Remove ghost objects (locally present but not on server)
+            // Remove ghost objects (locally present but not on server).
+            // Skip pendingDeletes — they're already gone locally and are about
+            // to be confirmed by the server.
             for (const [id, obj] of objects) {
-                if (!serverObjectIds.has(id)) {
+                if (!serverObjectIds.has(id) && !pendingDeletes.has(id)) {
                     removeObjectLocal(id);
                     if (callbacks.onObjectDeleted) {
                         callbacks.onObjectDeleted(obj);
@@ -893,6 +938,9 @@ const ObjectSync = (function() {
 
         // Local-first: remove immediately so getObjectsByType() won't return it
         removeObjectLocal(objectId);
+        // Track as pending so an interleaving reconciliation snapshot does not
+        // resurrect this object before the server processes the delete.
+        pendingDeletes.add(objectId);
 
         // Also remove from pending updates
         pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
@@ -912,6 +960,11 @@ const ObjectSync = (function() {
                 callbacks.onSyncError('delete', err);
             }
             return false;
+        } finally {
+            // Whether the server accepted, rejected, or threw, the request has
+            // resolved. Any subsequent snapshot reflects the post-resolution state,
+            // so we no longer need to suppress this id from reconciliation.
+            pendingDeletes.delete(objectId);
         }
     }
 
@@ -1060,6 +1113,8 @@ const ObjectSync = (function() {
         getSendRate,
         updateSendRate,
         triggerReconciliation,
+        suspendReconciliation,
+        resumeReconciliation,
         handleOwnershipMigration,
         handleMemberDeparture,
         trackEventSequence,
