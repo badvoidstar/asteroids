@@ -342,7 +342,7 @@ flowchart TB
     subgraph "Hub Methods → Broadcast Targets"
         direction TB
         CREATE["CreateSession(metadata?)<br/>→ Add to AllClients (in OnConnectedAsync) + SessionGroup<br/>→ Broadcast: OnSessionsChanged to AllClients<br/>→ Response: sessionId, name, memberId, role, metadata"]
-        JOIN["JoinSession(sessionId, evictMemberId?)<br/>→ If evictMemberId: EvictMemberInternal + broadcast OnMemberLeft<br/>  to existing group BEFORE adding new member<br/>→ Snapshot members + objects (before AddToGroup to avoid dup events)<br/>→ Add to SessionGroup<br/>→ Broadcast: OnMemberJoined to OthersInGroup<br/>→ Response: memberId, role, members[], objects[], metadata"]
+        JOIN["JoinSession(sessionId, evictMemberId?)<br/>→ If evictMemberId: EvictMemberInternal + broadcast OnMemberLeft<br/>  to existing group BEFORE adding new member<br/>→ Add to SessionGroup FIRST (so concurrent broadcasts<br/>  reach the joiner; client dedups vs snapshot by Version)<br/>→ Snapshot members + objects<br/>→ Broadcast: OnMemberJoined to OthersInGroup<br/>→ Response: memberId, role, members[], objects[], metadata"]
         LEAVE["LeaveSession()<br/>→ Atomic SessionService.LeaveSession (promotion + object cleanup)<br/>→ Remove from SessionGroup<br/>→ Broadcast: OnMemberLeft to Group (all remaining)<br/>→ Broadcast: OnSessionsChanged to AllClients"]
         GAS["GetActiveSessions()<br/>→ No broadcast (read-only)<br/>→ Response: ActiveSessionsResponse"]
         CO["CreateObject(data, scope, ownerMemberId?)<br/>→ Broadcast: OnObjectCreated to OthersInGroup<br/>→ Response: objectInfo + memberSequence"]
@@ -829,14 +829,18 @@ sequenceDiagram
         end
     else Max retries exceeded (or mobile auto-rejoin)
         SR->>C: onclose(error)
-        C->>C: attemptAutoRejoin(sessionId)
-        C->>C: connect() stops old connection,<br/>creates new one (sessionClient.clearSessionState)
-        C->>HUB: JoinSession(sessionId, evictMemberId=oldMemberId)
-        Note over HUB: If old member still present (server hadn't<br/>processed disconnect yet — up to ClientTimeoutSeconds),<br/>it is evicted atomically and OnMemberLeft is broadcast<br/>to remaining members BEFORE the new member is added.
-        HUB-->>C: Rejoin response (new memberId, members[], objects[])<br/>game.connectionLost cleared on success
+        C->>C: attemptAutoRejoin(sessionId, oldMemberId)<br/>Guards: rejoinInProgress, leavingSession.<br/>If document.hidden: defer (save pendingRejoinSessionId/MemberId,<br/>resume on visibilitychange).<br/>ObjectSync.suspendReconciliation() while rejoining.
+        loop Up to 5 attempts (delay 0.5s, then 2s × n)
+            C->>C: connectToSessionHub(force=true) —<br/>await stale.stop() with timeout, clear currentSession/<br/>currentMember, then build new connection.
+            C->>HUB: JoinSession(sessionId, evictMemberId=oldMemberId)
+            Note over HUB: If old member still present (server hadn't<br/>processed disconnect yet — up to ClientTimeoutSeconds),<br/>it is evicted atomically and OnMemberLeft is broadcast<br/>to remaining members BEFORE the new member is added.
+            HUB-->>C: Rejoin response (new memberId, members[], objects[])
+        end
+        C->>C: resetMultiplayerState() BEFORE handleSessionJoined<br/>loads snapshot (avoids ObjectSync.clear wiping it).<br/>game.connectionLost cleared, ObjectSync.resumeReconciliation().
     end
 
     Note over C: Stale connection guard: setupEventHandlers()<br/>captures thisConnection reference.<br/>Old connection's onclose/on* events<br/>are silently ignored if connection<br/>has been replaced by connect().
+    Note over C: Reconciliation safety: ObjectSync.pendingDeletes Set<br/>prevents triggerReconciliation from resurrecting<br/>locally-deleted objects whose server delete is in flight.
 ```
 
 ## SessionService: Thread Safety
@@ -973,7 +977,7 @@ astervoids/
 │   │   └── HubDtos.cs          # [MessagePackObject] request/response DTOs (camelCase keys)
 │   │
 │   └── wwwroot/
-│       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~5200 lines)
+│       ├── index.html          # Single-file game: HTML5 Canvas + CSS + JS (~5400 lines)
 │       ├── session-test.html   # Session management test harness
 │       ├── manifest.json       # PWA web app manifest
 │       ├── debug/
@@ -989,7 +993,7 @@ astervoids/
 │           ├── signalr.min.js                     # SignalR client library (local copy)
 │           └── signalr-protocol-msgpack.min.js    # MessagePack protocol for SignalR client
 │
-├── AstervoidsWeb.Tests/        # xUnit test project (~112 tests)
+├── AstervoidsWeb.Tests/        # xUnit test project (~115 tests)
 │   ├── AstervoidsWeb.Tests.csproj   # Test dependencies: xUnit, FluentAssertions, Moq
 │   ├── TestBase.cs                  # Shared helpers: CreateTestSession / CreateTestSessionWithClient
 │   ├── SessionServiceTests.cs       # Session create/join/leave/naming
