@@ -160,28 +160,7 @@ jobs:
             # Branch: provision with azd, then deploy with az cli to specific container app
             # First, provision the infrastructure
             azd provision --no-prompt
-
-            # Defensive check: azd's deployment-state cache can misreport "no changes"
-            # when a different branch previously had the same sanitized (20-char) env
-            # name, leaving stale subscription deployment history. If the branch
-            # container app wasn't actually created, fall back to a direct bicep
-            # deployment so the rest of the pipeline (image push + containerapp update)
-            # has a target to deploy to.
-            CONTAINER_APP_NAME_PRE="${{ env.CONTAINER_APP_PREFIX }}-${SANITIZED_BRANCH}"
-            if ! az containerapp show \
-                  --name "$CONTAINER_APP_NAME_PRE" \
-                  --resource-group "${{ env.PRODUCTION_RG }}" \
-                  &>/dev/null; then
-              echo "::warning::Container app '$CONTAINER_APP_NAME_PRE' missing after azd provision (likely stale azd state). Forcing direct bicep deployment."
-              az deployment sub create \
-                --location westus2 \
-                --template-file infra/main.bicep \
-                --parameters environmentName="${{ steps.vars.outputs.env_name }}" \
-                             location=westus2 \
-                             useSharedInfra=true \
-                             webServiceName="$CONTAINER_APP_NAME_PRE"
-            fi
-
+            
             # Get the container registry name from azd outputs
             ACR_NAME=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_NAME=' | cut -d'=' -f2 | tr -d '"')
             ACR_LOGIN_SERVER=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_ENDPOINT=' | cut -d'=' -f2 | tr -d '"')
