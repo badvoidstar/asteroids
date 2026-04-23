@@ -29,6 +29,217 @@ graph TB
 
 ---
 
+## Client Architecture
+
+The browser client is split into four cooperative modules loaded before `index.html`'s inline script runs. Each module exposes only an explicit `return { ... }` object; all internal state is closure-private. Dependency direction is strictly top-down — no code above a given layer ever calls into a layer below it directly.
+
+### Layer Boundaries
+
+```mermaid
+graph TB
+    GAME["index.html<br/>Game loop · Rendering · Input · Gameplay rules"]
+    OS["ObjectSync  (object-sync.js)<br/>Object registry · Delta encoding · Batched flush<br/>Per-member sequencing · Reconciliation · Field-name compression"]
+    SC["SessionClient  (session-client.js)<br/>SignalR lifecycle · Hub RPC wrappers<br/>Stale-connection guard() · GUID normalization"]
+    GU["GuidUtils  (guid-utils.js)<br/>bytesToGuid · transformBinaryGuids"]
+    HUB["/sessionHub<br/>ASP.NET Core SignalR — MessagePack"]
+
+    GAME -->|"tick(dt) · create/update/delete/replaceObject · on(event)"| OS
+    GAME -->|"connect · createSession · joinSession · leaveSession · on(event)"| SC
+    OS -->|"createObject · updateObjects · deleteObject<br/>replaceObject · getSessionState"| SC
+    SC -->|"transformBinaryGuids(result / args)"| GU
+    SC <-->|"WebSocket · MessagePack binary"| HUB
+```
+
+### Dependency Invariants
+
+These rules are enforced purely by module structure and must not be violated when extending the client:
+
+- **Only `SessionClient` holds a `signalR.HubConnection`.** The hub URL `/sessionHub` and `MessagePackHubProtocol` are referenced nowhere outside `session-client.js`. `index.html` contains no `signalR.*` references.
+- **Only `SessionClient` calls `GuidUtils.transformBinaryGuids`.** It is applied in both the `guard()` event wrapper (all hub push callbacks) and `invokeHub()` (all RPC responses), so nothing above `SessionClient` ever observes a raw 16-byte `Uint8Array` GUID.
+- **`ObjectSync` is the sole consumer of `SessionClient.{createObject, updateObjects, deleteObject, replaceObject, getSessionState}`.** The game never calls these transport methods directly.
+- **The game never directly manages `memberSequence`, delta encoding, or reconciliation.** Per-member sequence tracking, gap detection, and `GetSessionState` calls are entirely encapsulated inside `ObjectSync`.
+- **Send rate is decoupled from frame rate.** The game calls only `ObjectSync.tick(frameTimeSec)` once per frame; `ObjectSync` internally computes `sendThreshold` from `nominalFrameTime` and flushes batched mutations independently.
+
+> These are the client-side analogues of the server-side lock ordering described in the [Thread Safety](#sessionservice-thread-safety) section.
+
+### SessionClient Public API
+
+#### RPC Wrappers
+
+All wrappers route through `invokeHub()`, which enforces session membership and applies `GuidUtils.transformBinaryGuids` to the result before returning it to the caller.
+
+| Wrapper | Hub method | Wire args | Return (after GUID normalization) |
+|---|---|---|---|
+| `createSession(metadata?)` | `CreateSession` | `metadata?` | `{ session, member }` or `null` |
+| `joinSession(sessionId, evictMemberId?)` | `JoinSession` | `sessionId, evictMemberId?` | `{ session, member }` or `null` |
+| `leaveSession()` | `LeaveSession` | — | `void` (broadcast only) |
+| `getActiveSessions()` | `GetActiveSessions` | — | `{ sessions[], maxSessions, canCreateSession }` |
+| `createObject(data, scope, ownerMemberId?)` | `CreateObject` | `data, scope, ownerMemberId?` | `{ objectInfo, memberSequence }` |
+| `updateObjects(updates, senderSequence, senderSendIntervalMs)` | `UpdateObjects` | `updates[], senderSequence, clientTimestamp†, senderSendIntervalMs` | `{ versions{}, memberSequence, serverTimestamp }` |
+| `replaceObject(deleteObjectId, replacements, scope, ownerMemberId?)` | `ReplaceObject` | `deleteObjectId, replacements[], scope, ownerMemberId?` | `createdInfos[]` |
+| `deleteObject(objectId)` | `DeleteObject` | `objectId` | `{ success, memberSequence }` |
+| `getSessionState()` | `GetSessionState` | — | `{ members[], objects[], memberSequences{} }` |
+
+† `clientTimestamp = Date.now()` is injected by the `updateObjects` wrapper; the JS caller does not pass it.
+
+#### Lifecycle and State Methods
+
+These methods have no corresponding hub RPC.
+
+| Method | Description |
+|---|---|
+| `connect(force?)` | Opens `/sessionHub` with `MessagePackHubProtocol`; `force=true` tears down the existing connection first (awaits `stop()` with a 3 s timeout before creating a new one) |
+| `disconnect()` | Stops the connection and clears all state including `lastSessionId` |
+| `on(eventName, callback)` | Registers a named callback from the fixed `callbacks` set |
+| `getCurrentSession()` | Returns the current session object (`id, name, members[], objects[], metadata`) or `null` |
+| `getCurrentMember()` | Returns the current member object (`id, role`) or `null` |
+| `isConnected()` | `true` when the connection is `HubConnectionState.Connected` |
+| `isInSession()` | `true` when `currentSession !== null` |
+| `getLastSessionId()` | Returns the session id from the most recent join; preserved across unexpected disconnects for auto-rejoin |
+| `clearSessionState()` | Blanks `currentSession` and `currentMember` without stopping the transport; used during auto-rejoin |
+
+### SessionClient Event Callbacks
+
+`SessionClient.on(name, fn)` registers callbacks from a fixed set of **16** names. The regular mapping is `OnFooBar` (hub broadcast) → `onFooBar` (JS callback). All handler arguments are walked through `GuidUtils.transformBinaryGuids` by `guard()` before dispatch, so callers never observe raw `Uint8Array` GUIDs.
+
+| JS callback | Hub source | Notes |
+|---|---|---|
+| `onConnected` | `onreconnected` / initial `connect()` | Fires on first connect and after every successful automatic reconnection |
+| `onReconnecting` | `onreconnecting` | Transport lost; SignalR is retrying |
+| `onDisconnected` | `onclose` | Connection permanently closed; `error` is `null` for intentional disconnect |
+| `onSessionCreated` | `createSession()` response | Not a hub broadcast; fired after local state is populated from the RPC response |
+| `onSessionJoined` | `joinSession()` response | Not a hub broadcast |
+| `onSessionLeft` | `leaveSession()` | Not a hub broadcast |
+| `onMemberJoined` | `OnMemberJoined` | `(memberInfo, senderMemberId, memberSequence)` |
+| `onMemberLeft` | `OnMemberLeft` | `(info, senderMemberId, memberSequence)`; may be immediately followed by `onRoleChanged` if the local member was promoted |
+| `onRoleChanged` | Derived from `OnMemberLeft` | Fired only when `info.promotedMemberId === currentMember.id`; arg: `(newRole)` |
+| `onObjectCreated` | `OnObjectCreated` | `(objectInfo, senderMemberId, memberSequence)` |
+| `onObjectsUpdated` | `OnObjectsUpdated` | Arg reorder: hub sends `serverTimestamp` at position 4; callback puts it at position 1 → `(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs)` |
+| `onObjectDeleted` | `OnObjectDeleted` | `(objectId, senderMemberId, memberSequence)` |
+| `onObjectReplaced` | `OnObjectReplaced` | `(event, senderMemberId, memberSequence)` |
+| `onSessionsChanged` | `OnSessionsChanged` | No args; signal only — caller must call `getActiveSessions()` to get the updated list |
+| `onSessionExpired` | `OnSessionExpired` | `(reason)` — server-driven session destroy via `SessionCleanupService` |
+| `onError` | Internal | `(errorMessage)` — fired on connection or RPC errors |
+
+### ObjectSync Public API
+
+#### Lifecycle / Config
+
+| Method | Description |
+|---|---|
+| `init()` | Subscribes to the six `SessionClient` events the sync layer consumes (`onObjectCreated`, `onObjectsUpdated`, `onObjectDeleted`, `onObjectReplaced`, `onSessionJoined`, `onSessionLeft`) |
+| `configure(config)` | Sets `nominalFrameTime`, `minFrameTime`, `deltaEncoding`, `adaptiveSendRate`, and `fieldMap` |
+| `clear()` | Resets all local state (objects, sequences, pending updates); called on session leave |
+
+#### Object Mutations
+
+| Method | Description |
+|---|---|
+| `createObject(data, scope?, ownerMemberId?, isStillNeeded?)` | **Response-first**: invokes `CreateObject`, registers the server-assigned id + version; if `isStillNeeded()` returns `false` after the round-trip, fires a fire-and-forget delete to clean up the orphan |
+| `updateObject(id, data, immediate?)` | Mutates the local object immediately and queues for batched flush; `immediate=true` forces a flush without waiting for `tick()` |
+| `deleteObject(id)` | **Local-first**: removes from the local map and `pendingUpdates`, adds to `pendingDeletes`, then invokes `DeleteObject` |
+| `replaceObject(deleteId, replacements, scope?, ownerMemberId?)` | Atomic delete-plus-create round-trip; local map is not mutated until the `OnObjectReplaced` broadcast echo arrives |
+| `flushUpdates()` | Builds the wire batch (delta or full), compresses field names via `fieldMap`, and calls `SessionClient.updateObjects` |
+
+#### Frame Pump
+
+| Method | Description |
+|---|---|
+| `tick(frameTimeSec)` | Called once per game frame; recomputes `sendThreshold = round(nominalFrameTime / clampedFrameTime)`, increments the frame counter, and calls `flushUpdates()` when the threshold is reached |
+
+#### Queries
+
+| Method | Description |
+|---|---|
+| `getObject(id)` | Returns the local object with the given id, or `undefined` |
+| `getAllObjects()` | Returns an array of all locally tracked objects |
+| `getObjectsByOwner(memberId)` | Returns all objects where `ownerMemberId === memberId` |
+| `getObjectsByType(type)` | O(n-matching) type lookup via the internal `typeIndex` |
+| `getObjectByType(type)` | O(1) singleton lookup (e.g. `GameState`) via `typeIndex` |
+| `getObjectCount()` | Returns the number of locally tracked objects |
+| `getReconciliationCount()` | Returns the number of completed reconciliations in this session |
+| `getSendRate()` | Returns the current effective send rate in Hz (`round(1 / nominalFrameTime)`) |
+| `isReconciling()` | `true` while a `GetSessionState` reconciliation round-trip is in progress |
+
+#### Adaptive Send Rate
+
+| Method | Description |
+|---|---|
+| `updateSendRate(rttMs)` | Scales `nominalFrameTime` linearly from measured RTT (only when `adaptiveSendRate` is enabled); low RTT → 20 Hz, high RTT → 1 Hz |
+
+#### Reconciliation Control
+
+| Method | Description |
+|---|---|
+| `triggerReconciliation()` | Fetches a full state snapshot from the server and syncs the local object map; no-op while suspended or already reconciling |
+| `suspendReconciliation()` | Increments the suspend counter; while `> 0`, `triggerReconciliation()` is a silent no-op |
+| `resumeReconciliation()` | Decrements the suspend counter |
+
+#### Cross-Layer Coordination Hooks
+
+| Method | Description |
+|---|---|
+| `handleOwnershipMigration(migratedObjects)` | Applies server-authoritative `{ objectId, newOwnerId, newVersion }` entries from `MemberLeftInfo`; prevents version drift from blind local increments |
+| `handleMemberDeparture(deletedObjectIds)` | Removes member-scoped objects from the local map and fires `onObjectDeleted` for each |
+| `trackEventSequence(senderMemberId, memberSequence)` | Public alias for `trackMemberSequence`; keeps the per-member sequence map current for events not handled internally by `ObjectSync` |
+
+#### Event Registration
+
+| Method | Description |
+|---|---|
+| `on(eventName, callback)` | Registers a callback from the fixed 7-name `callbacks` set |
+
+### ObjectSync Event Callbacks
+
+`ObjectSync.on(name, fn)` registers callbacks from a fixed set of **7** names.
+
+| Callback | Signature | Notes |
+|---|---|---|
+| `onObjectCreated` | `(obj)` | Fires when an object is first registered locally (from remote creation, reconciliation, or own `createObject` response) |
+| `onObjectUpdated` | `(obj)` | Fires when a remote update is applied to a locally tracked object |
+| `onObjectDeleted` | `(obj)` | Fires when an object is removed from the local map (remote delete, member departure, or reconciliation ghost removal) |
+| `onBatchReceived` | `(serverTimestamp, clientTimestamp?, senderSendIntervalMs?, senderMemberId?, responseTimestamp?)` | Powers the full RTT→TX→BUF pipeline (see [Networking: RTT → TX → BUF Pipeline](#networking-rtt--tx--buf-pipeline)). For remote batches `clientTimestamp` is `null`; for own flush responses `clientTimestamp` is set and RTT is computable as `responseTimestamp - clientTimestamp` |
+| `onSyncError` | `(operation, error)` | Fires when a `createObject`, `updateObject`, or `deleteObject` RPC fails |
+| `onReconciliationFailed` | `()` | Fires when `GetSessionState` returns `null` or throws — the server no longer recognizes this connection as a session member; drives `attemptAutoRejoin` in the game |
+| `onReconciliationComplete` | `()` | Fires at the end of a successful reconciliation round-trip |
+
+### Cross-Layer Coordination Contracts
+
+The following implicit protocols are promoted here to explicit contracts.
+
+#### Member Departure Ordering
+
+Inside the game's `onMemberLeft(info, ...)` handler, the game **must** call `ObjectSync.handleOwnershipMigration(info.migratedObjects)` and `ObjectSync.handleMemberDeparture(info.deletedObjectIds)` **before** reading ownership from the local object map. These calls apply the server-authoritative versions from `MemberLeftInfo` — skipping them would cause blind local increments to diverge from the server version, triggering spurious reconciliations.
+
+#### Auto-Rejoin Reentry
+
+The `attemptAutoRejoin` path wraps its multi-step reentry with `suspendReconciliation` / `resumeReconciliation` (counter-based, so nested calls compose correctly) and uses `clearSessionState()` to drop stale refs without tearing down the transport:
+
+```
+ObjectSync.suspendReconciliation()      // prevent snapshot races mid-rejoin
+SessionClient.clearSessionState()       // drop stale currentSession/currentMember
+                                        //   without stopping the SignalR connection
+SessionClient.joinSession(sessionId, evictMemberId)   // evict own stale member if still present
+ObjectSync.resumeReconciliation()
+```
+
+Cross-reference: [SignalR Reconnection & Reconciliation](#signalr-reconnection--reconciliation).
+
+#### Local-First Delete Safety
+
+`ObjectSync.deleteObject` adds the object id to `pendingDeletes` immediately after removing it from the local map, before the `DeleteObject` invoke resolves. A concurrent `triggerReconciliation` snapshot skips ids in `pendingDeletes` on the "add missing object" pass, preventing a racing snapshot from resurrecting a locally-deleted object. `pendingDeletes` is cleared when the invoke resolves (success or failure).
+
+#### Field-Name Compression Boundary
+
+`ObjectSync.compressData` / `expandData` apply the configured `fieldMap` exactly at the wire boundary:
+
+- **Before send**: after delta computation, field names are compressed (e.g. `velocityX` → `vx`).
+- **After receive**: field names are expanded before dispatch to game callbacks.
+
+Game logic always uses readable field names. An empty `fieldMap` (the default) means pass-through — compression is purely opt-in via `configure({ fieldMap: { ... } })`.
+
+---
+
 ## Backend Data Model
 
 ```mermaid
@@ -895,7 +1106,7 @@ flowchart TB
         direction TB
         MP["AddMessagePackProtocol with CompositeResolver:<br/>• BinaryGuidResolver (16-byte binary GUIDs<br/>  via BinaryGuidFormatter / NullableGuidFormatter)<br/>• ContractlessStandardResolver (DTOs + collections)<br/>• MessagePackSecurity.UntrustedData<br/>~25-30% smaller payloads vs JSON;<br/>~19 bytes saved per GUID over the wire."]
         DTO["Hub DTOs (HubDtos.cs) annotated with<br/>[MessagePackObject] + [Key('camelCaseName')]<br/>so the JS contract is preserved (camelCase names)."]
-        JSGUID["JS client transforms binary GUIDs to strings<br/>at the boundary via GuidUtils.transformBinaryGuids<br/>(applied to handler args + invokeHub responses)."]
+        JSGUID["JS client transforms binary GUIDs to strings<br/>at the boundary via GuidUtils.transformBinaryGuids<br/>(applied to handler args + invokeHub responses).<br/>See: Client Architecture — Dependency Invariants."]
     end
 
     subgraph "REST API (camelCase JSON)"
@@ -985,11 +1196,12 @@ astervoids/
 │       ├── srvmon/
 │       │   └── index.html      # Server monitoring page; polls /api/srvmon every 2s
 │       └── js/
-│           ├── session-client.js                  # SignalR connection & session API wrapper
-│           │                                      # (joinSession supports evictMemberId; reconciliation-
-│           │                                      # failure callback drives auto-rejoin)
-│           ├── object-sync.js                     # Object registry, delta encoding, sync timing
-│           ├── guid-utils.js                      # bytesToGuid + transformBinaryGuids helpers
+│           ├── session-client.js                  # SignalR lifecycle, hub RPC wrappers, stale-connection
+│           │                                      # guard(), GUID normalization. See: Client Architecture.
+│           ├── object-sync.js                     # Object registry, type index, delta encoding, batched flush,
+│           │                                      # per-member sequencing, reconciliation, field-name compression.
+│           │                                      # See: Client Architecture.
+│           ├── guid-utils.js                      # bytesToGuid · transformBinaryGuids (binary GUID → string)
 │           ├── signalr.min.js                     # SignalR client library (local copy)
 │           └── signalr-protocol-msgpack.min.js    # MessagePack protocol for SignalR client
 │
