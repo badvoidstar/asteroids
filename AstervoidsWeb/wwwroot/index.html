@@ -1266,13 +1266,6 @@
                     mean * networkFactor + CONFIG.ADAPTIVE_DELAY_JITTER_MULT * stddev);
 
                 ad.computedDelay += CONFIG.ADAPTIVE_DELAY_SMOOTHING * (rawDelay - ad.computedDelay);
-
-                // DIAGNOSTIC: log BUF calculation internals (remove after debugging)
-                if (!ad._diagCount) ad._diagCount = 0;
-                if (++ad._diagCount % 20 === 0) {
-                    const sorted = [...ad.packetIntervals].sort((a, b) => a - b);
-                    // console.log(`[BUF] interval=${interval.toFixed(1)} mean=${mean.toFixed(1)} obsMean=${observedMean.toFixed(1)} σ=${stddev.toFixed(1)} nf=${networkFactor.toFixed(3)} raw=${rawDelay.toFixed(1)} buf=${ad.computedDelay.toFixed(1)} min=${sorted[0].toFixed(0)} max=${sorted[sorted.length-1].toFixed(0)} samples=${ad.packetIntervals.length}`);
-                }
             }
         },
 
@@ -1365,14 +1358,15 @@
                     const timeDiff = curr.time - prev.time;
                     if (timeDiff <= 0) return curr.data;
 
-                    // BUG RISK: when timeDiff is very small (burst arrivals), inflating
-                    // to minTimeDiff makes t artificially small, causing interpolation to
-                    // linger near prev even though targetTime is past both snapshots.
-                    // Fix: replace with `if (timeDiff < delay * 0.5) return curr.data;`
-                    // and use timeDiff directly instead of effectiveTimeDiff.
-                    const minTimeDiff = delay * 0.5;
-                    const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
-                    const t = (targetTime - prev.time) / effectiveTimeDiff;
+                    // Burst-arrival guard: when two snapshots arrive almost
+                    // simultaneously (timeDiff << delay), interpolating between
+                    // them is meaningless — snap to the newer snapshot instead.
+                    // The previous implementation inflated timeDiff to delay*0.5,
+                    // which made t artificially small and caused the render to
+                    // linger near prev even after targetTime had advanced past curr.
+                    if (timeDiff < delay * 0.5) return curr.data;
+
+                    const t = (targetTime - prev.time) / timeDiff;
 
                     if (this.shouldSnap(prev.data, curr.data)) {
                         return curr.data;
@@ -1386,7 +1380,7 @@
                         velocity: curr.velocity,
                         rotationSpeed: curr.rotationSpeed
                     };
-                    return this.hermite(pseudoState, Math.min(t, 1), effectiveTimeDiff);
+                    return this.hermite(pseudoState, Math.min(t, 1), timeDiff);
                 }
             }
 
@@ -1864,6 +1858,13 @@
             this.memberId = null;          // Session member ID who owns this ship
             this.score = 0;                // Per-ship score (self-awarded)
             this.hitCount = 0;             // Monotonic hit counter (GameState owner watches)
+            // Vertex cache — avoid re-computing the triangle every frame when pose
+            // hasn't changed. Invalidated when x/y/angle/reference dimension shift.
+            this._verts = [{x:0,y:0}, {x:0,y:0}, {x:0,y:0}];
+            this._vertCacheX = NaN;
+            this._vertCacheY = NaN;
+            this._vertCacheAngle = NaN;
+            this._vertCacheRef = NaN;
         }
 
         /**
@@ -1891,10 +1892,12 @@
         /**
          * Return only dynamic fields for per-frame updates.
          * Static fields (type, colorIndex, memberId) are sent in creation data.
+         * 'type' is omitted: delta encoding would suppress it after the first send,
+         * but removing it from the local update data avoids the baseline-diff cost
+         * and shrinks the rare full-sync payloads (FULL_SYNC_INTERVAL).
          */
         toUpdateData() {
             return {
-                type: OBJECT_TYPES.SHIP,
                 x: this.x,
                 y: this.y,
                 angle: this.angle,
@@ -1942,9 +1945,12 @@
                 this.velocityY += Math.sin(this.angle) * CONFIG.SHIP_THRUST * dt;
             }
             
-            // Limit to max speed (in reference-dimension per second)
-            const speed = Math.sqrt(this.velocityX ** 2 + this.velocityY ** 2);
-            if (speed > CONFIG.SHIP_MAX_SPEED) {
+            // Limit to max speed (in reference-dimension per second).
+            // Compare squared magnitudes to skip sqrt when under the cap.
+            const speedSq = this.velocityX * this.velocityX + this.velocityY * this.velocityY;
+            const maxSpeedSq = CONFIG.SHIP_MAX_SPEED * CONFIG.SHIP_MAX_SPEED;
+            if (speedSq > maxSpeedSq) {
+                const speed = Math.sqrt(speedSq);
                 this.velocityX = (this.velocityX / speed) * CONFIG.SHIP_MAX_SPEED;
                 this.velocityY = (this.velocityY / speed) * CONFIG.SHIP_MAX_SPEED;
             }
@@ -1965,30 +1971,37 @@
 
         /**
          * Get the ship's triangle vertices in pixel coordinates for rendering
-         * Converts from normalized position to pixels
-         * @returns {array} Array of {x, y} vertices in pixels
+         * Converts from normalized position to pixels.
+         * Uses an in-place cache of 3 pre-allocated vertex objects; only recomputes
+         * when position, angle, or reference dimension change.
+         * @returns {array} Array of {x, y} vertices in pixels (shared; do not mutate)
          */
         getVertices() {
             const pixelX = fromNormalizedX(this.x);
             const pixelY = fromNormalizedY(this.y);
-            const size = fromNormalizedSize(CONFIG.SHIP_SIZE);
-            return [
-                // Nose (front point)
-                {
-                    x: pixelX + Math.cos(this.angle) * size,
-                    y: pixelY + Math.sin(this.angle) * size
-                },
-                // Left wing
-                {
-                    x: pixelX + Math.cos(this.angle + Math.PI * 0.8) * size * 0.7,
-                    y: pixelY + Math.sin(this.angle + Math.PI * 0.8) * size * 0.7
-                },
-                // Right wing
-                {
-                    x: pixelX + Math.cos(this.angle - Math.PI * 0.8) * size * 0.7,
-                    y: pixelY + Math.sin(this.angle - Math.PI * 0.8) * size * 0.7
-                }
-            ];
+            const ref = getReferenceDimension();
+            if (pixelX === this._vertCacheX &&
+                pixelY === this._vertCacheY &&
+                this.angle === this._vertCacheAngle &&
+                ref === this._vertCacheRef) {
+                return this._verts;
+            }
+            const size = CONFIG.SHIP_SIZE * ref;
+            const v = this._verts;
+            // Nose (front point)
+            v[0].x = pixelX + Math.cos(this.angle) * size;
+            v[0].y = pixelY + Math.sin(this.angle) * size;
+            // Left wing
+            v[1].x = pixelX + Math.cos(this.angle + Math.PI * 0.8) * size * 0.7;
+            v[1].y = pixelY + Math.sin(this.angle + Math.PI * 0.8) * size * 0.7;
+            // Right wing
+            v[2].x = pixelX + Math.cos(this.angle - Math.PI * 0.8) * size * 0.7;
+            v[2].y = pixelY + Math.sin(this.angle - Math.PI * 0.8) * size * 0.7;
+            this._vertCacheX = pixelX;
+            this._vertCacheY = pixelY;
+            this._vertCacheAngle = this.angle;
+            this._vertCacheRef = ref;
+            return v;
         }
 
         /**
@@ -2129,10 +2142,10 @@
         /**
          * Return only dynamic fields for per-frame updates.
          * Static fields (type, radius, velocityX/Y, rotationSpeed, seed) are sent in creation data.
+         * 'type' is omitted for the same reason as Ship.toUpdateData.
          */
         toUpdateData() {
             return {
-                type: OBJECT_TYPES.ASTEROID,
                 x: this.x,
                 y: this.y,
                 angle: this.angle
@@ -2330,10 +2343,10 @@
         /**
          * Return only dynamic fields for per-frame updates.
          * Static fields (type, velocityX/Y, colorIndex, ownerMemberId) are sent in creation data.
+         * 'type' is omitted for the same reason as Ship.toUpdateData.
          */
         toUpdateData() {
             return {
-                type: OBJECT_TYPES.BULLET,
                 x: this.x,
                 y: this.y,
                 lifetime: this.lifetime,
@@ -2443,12 +2456,37 @@
     const waveDisplay = document.getElementById('wave');
     const livesDisplay = document.getElementById('lives');
 
+    // HUD last-rendered values — avoid redundant DOM textContent writes every frame.
+    // Score/wave/lives change at most on discrete events, so rewriting at 60 Hz is wasted work.
+    const hudCache = {
+        score: null,
+        wave: null,
+        lives: null,
+        display: null,
+        sessionIndicatorText: null,
+        sessionIndicatorVisible: null
+    };
+
     // Gameplay overlay references (crisp HTML text instead of canvas-drawn text)
     const waveOverlay = document.getElementById('wave-overlay');
     const waveTextEl = document.getElementById('wave-text');
     const gameoverOverlay = document.getElementById('gameover-overlay');
     const gameoverScoreEl = document.getElementById('gameover-score');
     const gameoverPromptEl = document.getElementById('gameover-prompt');
+
+    // FPS tracking — rolling EMA of frame intervals (ms). Used only for diagnostic
+    // reporting via the debug BroadcastChannel; has no effect on gameplay.
+    const fpsTracker = {
+        alpha: 0.1,              // EMA smoothing factor
+        avgFrameMs: 1000 / 60,   // seeded at 60 fps
+        sample(deltaMs) {
+            if (deltaMs <= 0 || deltaMs > 1000) return; // ignore pauses / huge gaps
+            this.avgFrameMs += this.alpha * (deltaMs - this.avgFrameMs);
+        },
+        getFps() {
+            return this.avgFrameMs > 0 ? Math.round(1000 / this.avgFrameMs) : 0;
+        }
+    };
 
     // BroadcastChannel for sending debug metrics to /debug page.
     // Uses a heartbeat pattern: the debug page sends periodic pings, and we
@@ -3674,12 +3712,28 @@
             for (let j = game.astervoids.length - 1; j >= 0; j--) {
                 const asteroid = game.astervoids[j];
                 
+                const bulletPxX = fromNormalizedX(bullet.x);
+                const bulletPxY = fromNormalizedY(bullet.y);
+                const bulletPxRadius = fromNormalizedSize(CONFIG.BULLET_RADIUS);
+
+                // Broad phase: circle-vs-circle on bounding radii.
+                // Asteroid vertices are jagged and can extend up to
+                // radius × (1 + JAGGEDNESS) from center (see generateShape).
+                // Use that conservative bound so grazing hits aren't missed.
+                const asteroidPxX = fromNormalizedX(asteroid.x);
+                const asteroidPxY = fromNormalizedY(asteroid.y);
+                const asteroidPxBound = fromNormalizedSize(asteroid.radius) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+                const dx = bulletPxX - asteroidPxX;
+                const dy = bulletPxY - asteroidPxY;
+                const reach = bulletPxRadius + asteroidPxBound;
+                if (dx * dx + dy * dy > reach * reach) continue;
+
                 const bulletCircle = {
-                    x: fromNormalizedX(bullet.x),
-                    y: fromNormalizedY(bullet.y),
-                    radius: fromNormalizedSize(CONFIG.BULLET_RADIUS)
+                    x: bulletPxX,
+                    y: bulletPxY,
+                    radius: bulletPxRadius
                 };
-                
+
                 if (circlePolygonCollision(bulletCircle, asteroid.getWorldVertices())) {
                     if (isSessionMode()) {
                         // Check if we own this asteroid
@@ -3814,8 +3868,21 @@
      */
     function checkShipAsteroidCollision(ship) {
         const shipVertices = ship.getVertices();
-        
+        const shipPxX = fromNormalizedX(ship.x);
+        const shipPxY = fromNormalizedY(ship.y);
+        const shipPxRadius = fromNormalizedSize(CONFIG.SHIP_SIZE);
+
         for (const asteroid of game.astervoids) {
+            // Broad phase: circle-vs-circle on bounding radii to skip far-away asteroids.
+            // Asteroid jagged vertices can extend up to radius × (1 + JAGGEDNESS).
+            const astPxX = fromNormalizedX(asteroid.x);
+            const astPxY = fromNormalizedY(asteroid.y);
+            const astPxBound = fromNormalizedSize(asteroid.radius) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+            const dx = shipPxX - astPxX;
+            const dy = shipPxY - astPxY;
+            const reach = shipPxRadius + astPxBound;
+            if (dx * dx + dy * dy > reach * reach) continue;
+
             const asteroidVerts = asteroid.getWorldVertices();
             
             // Check if any ship vertex is inside asteroid
@@ -3876,22 +3943,39 @@
         if (hudDisplay) {
             const showHud = game.state !== 'start' &&
                 (!isSessionMode() || ObjectSync.getObjectByType(OBJECT_TYPES.GAME_STATE));
-            hudDisplay.style.display = showHud ? 'flex' : 'none';
+            const desired = showHud ? 'flex' : 'none';
+            if (hudCache.display !== desired) {
+                hudDisplay.style.display = desired;
+                hudCache.display = desired;
+            }
         }
-        
-        scoreDisplay.textContent = `Score: ${game.score}`;
-        waveDisplay.textContent = `Wave: ${game.wave}`;
-        livesDisplay.textContent = `Lives: ${game.lives}`;
-        
-        // Update session indicator
+
+        if (hudCache.score !== game.score) {
+            scoreDisplay.textContent = `Score: ${game.score}`;
+            hudCache.score = game.score;
+        }
+        if (hudCache.wave !== game.wave) {
+            waveDisplay.textContent = `Wave: ${game.wave}`;
+            hudCache.wave = game.wave;
+        }
+        if (hudCache.lives !== game.lives) {
+            livesDisplay.textContent = `Lives: ${game.lives}`;
+            hudCache.lives = game.lives;
+        }
+
+        // Update session indicator (only when visibility or text changes)
         const sessionIndicator = document.getElementById('session-indicator');
         if (sessionIndicator) {
-            if (isSessionMode() && game.sessionInfo) {
-                sessionIndicator.textContent = `🎮 ${game.sessionInfo.name}`;
-                sessionIndicator.style.display = '';
-            } else {
-                sessionIndicator.textContent = '';
-                sessionIndicator.style.display = 'none';
+            const inSession = isSessionMode() && game.sessionInfo;
+            const desiredText = inSession ? `🎮 ${game.sessionInfo.name}` : '';
+            const desiredVisible = inSession ? '' : 'none';
+            if (hudCache.sessionIndicatorText !== desiredText) {
+                sessionIndicator.textContent = desiredText;
+                hudCache.sessionIndicatorText = desiredText;
+            }
+            if (hudCache.sessionIndicatorVisible !== desiredVisible) {
+                sessionIndicator.style.display = desiredVisible;
+                hudCache.sessionIndicatorVisible = desiredVisible;
             }
         }
         
@@ -3913,6 +3997,7 @@
                 tx: Math.round(1000 / ObjectSync.getSendRate()),
                 jitter: Math.round(RemoteObjects.getJitter()),
                 buf: Math.round(RemoteObjects.getDelay()),
+                fps: fpsTracker.getFps(),
                 ownedObjs,
                 totalObjs: allObjs,
                 reconciliationCount: ObjectSync.getReconciliationCount(),
@@ -3929,6 +4014,31 @@
     // ============================================
 
     /**
+     * Batch-draw a list of asteroids in a single beginPath/stroke pair.
+     * All asteroids share the same stroke style, so merging their paths
+     * eliminates per-asteroid canvas state changes and stroke calls.
+     * Produces identical visuals to looping asteroid.draw(ctx) individually.
+     * @param {CanvasRenderingContext2D} ctx - Canvas context
+     * @param {Asteroid[]} astervoids - Asteroids to render
+     */
+    function drawAsteroidsBatched(ctx, astervoids) {
+        if (!astervoids || astervoids.length === 0) return;
+        ctx.strokeStyle = CONFIG.STROKE_COLOR;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (const asteroid of astervoids) {
+            const worldVerts = asteroid.getWorldVertices();
+            if (!worldVerts || worldVerts.length === 0) continue;
+            ctx.moveTo(worldVerts[0].x, worldVerts[0].y);
+            for (let i = 1; i < worldVerts.length; i++) {
+                ctx.lineTo(worldVerts[i].x, worldVerts[i].y);
+            }
+            ctx.closePath();
+        }
+        ctx.stroke();
+    }
+
+    /**
      * Main game loop - called every frame
      * @param {number} timestamp - Current time from requestAnimationFrame
      */
@@ -3937,6 +4047,9 @@
         if (!game.lastFrameTime) game.lastFrameTime = timestamp;
         const elapsed = timestamp - game.lastFrameTime;
         game.lastFrameTime = timestamp;
+
+        // Track FPS from the inter-frame interval (diagnostic only)
+        fpsTracker.sample(elapsed);
         
         // Calculate delta time multiplier (1.0 = one frame at 60fps = 16.67ms)
         const targetFrameTime = 1000 / CONFIG.TARGET_FPS;
@@ -4013,25 +4126,25 @@
                     game.astervoids.forEach(asteroid => asteroid.update(dt));
                 }
                 
-                // Update bullets and remove expired ones
-                // (spectators have no own bullets — filter runs harmlessly)
+                // Update bullets and remove expired ones in-place (avoids allocating
+                // a new array each frame). Spectators have no own bullets — filter runs harmlessly.
                 const myMemberId = SessionClient.getCurrentMember()?.id;
-                game.bullets = game.bullets.filter(bullet => {
+                for (let i = game.bullets.length - 1; i >= 0; i--) {
+                    const bullet = game.bullets[i];
                     // Only locally update our own bullets; remote bullets are positioned by sync
                     const isMyBullet = !isSessionMode() || bullet.ownerMemberId === myMemberId;
                     if (isMyBullet) {
                         bullet.update(dt);
                     }
-                    
+
                     // Only expire our own bullets; remote bullet lifecycle is owner-driven
                     if (isMyBullet && bullet.isExpired()) {
                         if (isSessionMode() && bullet.syncObjectId) {
                             deleteSyncedBullet(bullet);
                         }
-                        return false;
+                        game.bullets.splice(i, 1);
                     }
-                    return true;
-                });
+                }
                 
                 // Sync local bullets to ObjectSync
                 if (isSessionMode()) {
@@ -4125,11 +4238,11 @@
         
         // Draw cosmetic astervoids only on start screen when not in session
         if (game.state === 'start' && !isSessionMode()) {
-            game.cosmeticAstervoids.forEach(asteroid => asteroid.draw(ctx));
+            drawAsteroidsBatched(ctx, game.cosmeticAstervoids);
         }
         
         // Draw game entities (now in gameplay coordinates)
-        game.astervoids.forEach(asteroid => asteroid.draw(ctx));
+        drawAsteroidsBatched(ctx, game.astervoids);
         game.bullets.forEach(bullet => bullet.draw(ctx));
         
         // Draw ships

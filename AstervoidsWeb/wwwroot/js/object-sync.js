@@ -102,8 +102,10 @@ const ObjectSync = (function() {
     // Type index for faster lookups - maps type string to Set of object IDs
     const typeIndex = new Map();
     
-    // Pending updates to be batched
-    let pendingUpdates = [];
+    // Pending updates to be batched.
+    // Map<objectId, data> so repeated updateObject() calls for the same object
+    // coalesce in O(1) instead of scanning an array.
+    const pendingUpdates = new Map();
     
     // Sender sequence counter (incremented per flush)
     let senderSequence = 0;
@@ -277,7 +279,7 @@ const ObjectSync = (function() {
         objects.clear();
         typeIndex.clear();
         lastSentData.clear();
-        pendingUpdates = [];
+        pendingUpdates.clear();
         frameCounter = 0;
         fullSyncCounter = 0;
         senderSequence = 0;
@@ -731,15 +733,12 @@ const ObjectSync = (function() {
             updateTypeIndex(obj, oldType, data.type);
         }
 
-        // Queue for batch sync
-        const existingUpdate = pendingUpdates.find(u => u.objectId === objectId);
-        if (existingUpdate) {
-            Object.assign(existingUpdate.data, data);
+        // Queue for batch sync: O(1) coalesce by objectId
+        const existingData = pendingUpdates.get(objectId);
+        if (existingData) {
+            Object.assign(existingData, data);
         } else {
-            pendingUpdates.push({
-                objectId: objectId,
-                data: { ...data }
-            });
+            pendingUpdates.set(objectId, { ...data });
         }
 
         if (immediate) {
@@ -837,7 +836,7 @@ const ObjectSync = (function() {
      * changed fields are re-included in the next flush.
      */
     async function flushUpdates() {
-        if (pendingUpdates.length === 0) return;
+        if (pendingUpdates.size === 0) return;
         if (!SessionClient.isInSession()) return;
         if (flushInProgress) return;
 
@@ -850,23 +849,23 @@ const ObjectSync = (function() {
 
             updates = [];
             sentDeltas = new Map();
-            for (const update of pendingUpdates) {
-                const delta = computeDelta(update.objectId, update.data, forceFullSync);
+            for (const [objectId, data] of pendingUpdates) {
+                const delta = computeDelta(objectId, data, forceFullSync);
                 if (delta) {
                     updates.push({
-                        objectId: update.objectId,
+                        objectId: objectId,
                         data: delta
                     });
-                    sentDeltas.set(update.objectId, delta);
+                    sentDeltas.set(objectId, delta);
                 }
             }
         } else {
-            updates = pendingUpdates.map(update => ({
-                objectId: update.objectId,
-                data: update.data
-            }));
+            updates = [];
+            for (const [objectId, data] of pendingUpdates) {
+                updates.push({ objectId: objectId, data: data });
+            }
         }
-        pendingUpdates = [];
+        pendingUpdates.clear();
 
         if (updates.length === 0) return;
 
@@ -945,7 +944,7 @@ const ObjectSync = (function() {
         pendingDeletes.add(objectId);
 
         // Also remove from pending updates
-        pendingUpdates = pendingUpdates.filter(u => u.objectId !== objectId);
+        pendingUpdates.delete(objectId);
 
         try {
             const response = await SessionClient.deleteObject(objectId);

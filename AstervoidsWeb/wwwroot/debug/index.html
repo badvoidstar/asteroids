@@ -119,9 +119,16 @@
             return 'rtt-bad';
         }
 
+        function fpsClass(fps) {
+            if (fps >= 55) return 'rtt-good';
+            if (fps >= 30) return 'rtt-ok';
+            return 'rtt-bad';
+        }
+
         function renderCoreMetrics(data) {
             const items = [
                 { label: 'RTT', value: `${data.rtt} ms`, cls: rttClass(data.rtt) },
+                { label: 'FPS', value: `${data.fps ?? '—'}`, cls: data.fps != null ? fpsClass(data.fps) : '' },
                 { label: 'TX (send interval)', value: `${data.tx} ms` },
                 { label: 'Jitter', value: `${data.jitter} ms` },
                 { label: 'Buffer delay', value: `${data.buf} ms` },
