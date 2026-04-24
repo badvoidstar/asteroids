@@ -1030,6 +1030,13 @@
         // 0 = always perpendicular (legacy behaviour); 1 = at a grazing hit the smaller piece
         // travels straight along the bullet's forward direction. Clamped to [0, 1].
         SPLIT_AXIS_ROTATION_BIAS: 0.5,
+        // How strongly the bullet's perpendicular impact offset blends each child's
+        // resulting linear-momentum direction from the split-axis direction toward the
+        // parent asteroid's pre-split direction. 0 = always pure split-axis (legacy
+        // behaviour); 1 = at a grazing hit (|offsetN|=1) each child fully inherits the
+        // parent's direction, while a head-on hit (offsetN=0) still resolves to the
+        // split axis. Linear blend in between. Clamped to [0, 1].
+        SPLIT_MOMENTUM_BLEND_BIAS: 1.0,
         // Random angle jitter (radians) added to each child's launch direction for visual variety.
         // Set to 0 for fully deterministic split directions.
         SPLIT_ANGLE_JITTER: 0.5,
@@ -3412,8 +3419,14 @@
      *    smaller piece travels in the bullet's forward direction (and the larger
      *    piece travels opposite).
      *
-     * The strength of both effects is configurable via `CONFIG.SPLIT_OFFSET_RATIO_BIAS`
-     * and `CONFIG.SPLIT_AXIS_ROTATION_BIAS`.
+     * In addition, each child's resulting linear-momentum direction is linearly blended
+     * between the split-axis direction (current calculation) and the parent's pre-split
+     * direction, parameterised by |offsetN|: 0 → pure split-axis, 1 → pure parent direction.
+     *
+     * The strength of all three effects is configurable via `CONFIG.SPLIT_OFFSET_RATIO_BIAS`,
+     * `CONFIG.SPLIT_AXIS_ROTATION_BIAS`, and `CONFIG.SPLIT_MOMENTUM_BLEND_BIAS`. Each bias
+     * scales its effect linearly toward zero (i.e. toward the original split-axis-only
+     * behaviour) as the bias approaches 0.
      *
      * All values are in normalized coordinates. Called by the asteroid owner to process
      * a hit. In session mode, computes split and sends to server — all local state
@@ -3453,6 +3466,7 @@
 
         const offsetBias = Math.min(1, Math.max(0, CONFIG.SPLIT_OFFSET_RATIO_BIAS));
         const axisBias = Math.min(1, Math.max(0, CONFIG.SPLIT_AXIS_ROTATION_BIAS));
+        const momentumBias = Math.min(1, Math.max(0, CONFIG.SPLIT_MOMENTUM_BLEND_BIAS));
         const n = offsetN * offsetBias;
         const absN = Math.abs(n);
         // sign(0) → +1 so n=0 still picks a definite (perpendicular) axis side.
@@ -3518,6 +3532,15 @@
         const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
         const totalChildInertia = childSpecs.reduce((sum, c) => sum + c.radius ** 4, 0);
 
+        // Blend amount for per-child momentum direction: 0 at head-on (pure split axis),
+        // 1 at fully grazing (pure parent direction). Scales linearly with |offsetN| and
+        // the SPLIT_MOMENTUM_BLEND_BIAS config; bias→0 reverts to split-axis-only motion.
+        // Falls back to 0 when the parent has no well-defined direction (speed ≈ 0).
+        const parentSpeedSafe = parentSpeed > 1e-9 ? parentSpeed : 0;
+        const parentDirX = parentSpeedSafe > 0 ? asteroid.velocityX / parentSpeedSafe : 0;
+        const parentDirY = parentSpeedSafe > 0 ? asteroid.velocityY / parentSpeedSafe : 0;
+        const momentumBlend = parentSpeedSafe > 0 ? Math.abs(offsetN) * momentumBias : 0;
+
         // Build child asteroid data
         const childAsteroids = [];
         const angleJitter = CONFIG.SPLIT_ANGLE_JITTER || 0;
@@ -3531,12 +3554,19 @@
 
             const angle = baseAngle + (angleJitter > 0 ? randomRange(-angleJitter, angleJitter) : 0);
 
+            // Linearly blend the child's velocity vector between the split-axis direction
+            // (momentumBlend = 0) and the parent's pre-split direction (momentumBlend = 1).
+            const splitDirX = Math.cos(angle);
+            const splitDirY = Math.sin(angle);
+            const dirX = (1 - momentumBlend) * splitDirX + momentumBlend * parentDirX;
+            const dirY = (1 - momentumBlend) * splitDirY + momentumBlend * parentDirY;
+
             const childAsteroid = new Asteroid(
                 asteroid.x,
                 asteroid.y,
                 childRadius,
-                Math.cos(angle) * childSpeed,
-                Math.sin(angle) * childSpeed
+                dirX * childSpeed,
+                dirY * childSpeed
             );
 
             // Override random spin: distribute angular momentum asymmetrically between children
