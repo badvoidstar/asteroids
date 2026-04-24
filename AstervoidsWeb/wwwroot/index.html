@@ -3554,12 +3554,22 @@
 
             const angle = baseAngle + (angleJitter > 0 ? randomRange(-angleJitter, angleJitter) : 0);
 
-            // Linearly blend the child's velocity vector between the split-axis direction
-            // (momentumBlend = 0) and the parent's pre-split direction (momentumBlend = 1).
+            // Linearly blend the child's velocity *direction* between the split-axis
+            // direction (momentumBlend = 0) and the parent's pre-split direction
+            // (momentumBlend = 1), then renormalize so |dir| = 1. Without the
+            // renormalization, intermediate blends of two non-collinear unit vectors
+            // produce a sub-unit-length vector, which silently scales childSpeed down
+            // and discards kinetic energy (worst-case ~29% loss at t=0.5, θ=90°).
             const splitDirX = Math.cos(angle);
             const splitDirY = Math.sin(angle);
-            const dirX = (1 - momentumBlend) * splitDirX + momentumBlend * parentDirX;
-            const dirY = (1 - momentumBlend) * splitDirY + momentumBlend * parentDirY;
+            const blendX = (1 - momentumBlend) * splitDirX + momentumBlend * parentDirX;
+            const blendY = (1 - momentumBlend) * splitDirY + momentumBlend * parentDirY;
+            // Defensive: if splitDir and parentDir are exactly antiparallel at t=0.5
+            // the blend is the zero vector; fall back to the split-axis direction so
+            // the child still launches with its full energy-conserving speed.
+            const blendMag = Math.hypot(blendX, blendY);
+            const dirX = blendMag > 1e-9 ? blendX / blendMag : splitDirX;
+            const dirY = blendMag > 1e-9 ? blendY / blendMag : splitDirY;
 
             const childAsteroid = new Asteroid(
                 asteroid.x,
