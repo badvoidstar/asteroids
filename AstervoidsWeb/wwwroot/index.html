@@ -1039,13 +1039,21 @@
         // as 1/R across splits). blend=1 makes injected energy proportional to parent
         // cross-section (≈ mass), which yields generation-independent separation speed
         // and tames child spin from 1/R² → 1/R.
-        BULLET_ENERGY_SIZE_BLEND: 1.0,
+        BULLET_ENERGY_SIZE_BLEND: 0.0,
         // Fraction of E_b that goes into parent rigid-body KE (deflection + spin);
         // the remainder (1 − kappa) becomes fragment separation energy E_sep. Low
         // values keep impact spin visually tame — torque/I grows as 1/R for a
         // fixed-energy impulse. Lowering kappa reduces deflection and spin by
         // √kappa while leaving fragment separation speed essentially unchanged.
-        SPLIT_KAPPA: 0.001,
+        SPLIT_KAPPA: 0.0001,
+        // Weighting factor [0..1] applied to |offsetN| when computing the mass-split
+        // ratio. With bias=1 the mass split follows the geometric formula
+        //   fSmall = max(MIN_SPLIT_RATIO, 0.5·(1 − |offsetN|))
+        // (50/50 head-on → MIN_SPLIT_RATIO at full graze). With bias=0 the split is
+        // always 50/50 regardless of offset (modulo the MIN_SPLIT_RATIO floor, which
+        // is moot at 0.5). Intermediate values smoothly interpolate. Independent of
+        // impulse/torque physics — only the mass partition is affected.
+        MASS_SPLIT_BIAS: 1.0,
         
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
@@ -2514,6 +2522,7 @@
         'BULLET_KINETIC_ENERGY',
         'BULLET_ENERGY_SIZE_BLEND',
         'SPLIT_KAPPA',
+        'MASS_SPLIT_BIAS',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -3516,9 +3525,10 @@
         const dE_rigid = (Jmag * Jmag) / (2 * M) * leverFactor;
         const E_sep    = Math.max(0, E_b - dE_rigid);
 
-        // Mass split: 50/50 head-on, skewed for glancing.
+        // Mass split: bias=1 → 50/50 head-on, skewed for glancing; bias=0 → always 50/50.
         const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
-        const fSmall   = Math.max(minRatio, 0.5 * (1 - Math.abs(offsetN)));
+        const massBias = Math.max(0, Math.min(1, CONFIG.MASS_SPLIT_BIAS));
+        const fSmall   = Math.max(minRatio, 0.5 * (1 - massBias * Math.abs(offsetN)));
         const fLarge   = 1 - fSmall;
 
         const rSmall = R * Math.sqrt(fSmall);

@@ -20,6 +20,7 @@
  *   8. BULLET_ENERGY_SIZE_BLEND=0 → effectiveEb = BULLET_KINETIC_ENERGY (legacy)
  *   9. BULLET_ENERGY_SIZE_BLEND=1 → separation speed is generation-independent
  *  10. BULLET_ENERGY_SIZE_BLEND=0 → separation speed compounds as 1/R (regression)
+ *  11. MASS_SPLIT_BIAS=0 → fSmall = 0.5 for any |offsetN|; bias=1 → legacy formula
  */
 
 import { test } from 'node:test';
@@ -34,8 +35,9 @@ const CONFIG = {
     MIN_ASTEROID_RADIUS: 0.025,
     INITIAL_ASTEROID_RADIUS: 0.083,
     ASTEROID_DENSITY: 5.0,
-    BULLET_ENERGY_SIZE_BLEND: 1.0,
-    SPLIT_KAPPA: 0.001,
+    BULLET_ENERGY_SIZE_BLEND: 0.0,
+    SPLIT_KAPPA: 0.0001,
+    MASS_SPLIT_BIAS: 1.0,
 };
 
 // kappa is now read from CONFIG.SPLIT_KAPPA (matching the game's CONFIG object).
@@ -102,7 +104,8 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle, cfg = CONFIG) {
 
     // Mass split.
     const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
-    const fSmall   = Math.max(minRatio, 0.5 * (1 - Math.abs(offsetN)));
+    const massBias = Math.max(0, Math.min(1, cfg.MASS_SPLIT_BIAS ?? 1));
+    const fSmall   = Math.max(minRatio, 0.5 * (1 - massBias * Math.abs(offsetN)));
     const fLarge   = 1 - fSmall;
 
     const rSmall = R * Math.sqrt(fSmall);
@@ -394,4 +397,44 @@ test('size blend = 0 → separation speed scales as 1/R across generations', () 
     // Legacy behaviour: half radius → ~2× separation speed.
     assert.ok(Math.abs(speedHalf / speedFull - 2.0) < 1e-9,
         `expected ~2× speed at half R (compounding), got ratio ${speedHalf / speedFull}`);
+});
+
+// ─── Test 11: mass-split bias controls offset → asymmetry ───────────────────
+// bias = 1 reproduces the legacy formula fSmall = max(min, 0.5·(1−|offsetN|));
+// bias = 0 forces fSmall = 0.5 for every offset (modulo the MIN_SPLIT_RATIO floor,
+// which doesn't trigger at 0.5). Intermediate bias smoothly interpolates.
+test('mass split bias: 0 → always 50/50; 1 → legacy offset-driven split', () => {
+    const R = CONFIG.INITIAL_ASTEROID_RADIUS;
+    const cfgZero = { ...CONFIG, MASS_SPLIT_BIAS: 0.0 };
+    const cfgHalf = { ...CONFIG, MASS_SPLIT_BIAS: 0.5 };
+    const cfgOne  = { ...CONFIG, MASS_SPLIT_BIAS: 1.0 };
+    const M = CONFIG.ASTEROID_DENSITY * R * R;
+
+    for (const offsetN of [0, 0.3, 0.7, 1.0]) {
+        const c0 = fragment(R, 0, 0, 0, offsetN, 0, cfgZero);
+        const cH = fragment(R, 0, 0, 0, offsetN, 0, cfgHalf);
+        const c1 = fragment(R, 0, 0, 0, offsetN, 0, cfgOne);
+
+        // bias=0 → both children carry exactly 0.5 of M (no skew).
+        if (c0.length === 2) {
+            assert.ok(Math.abs(c0[0].m - 0.5 * M) < 1e-12 && Math.abs(c0[1].m - 0.5 * M) < 1e-12,
+                `bias=0 offsetN=${offsetN}: expected 50/50 masses, got ${c0[0].m / M}, ${c0[1].m / M}`);
+        }
+
+        // bias=1 → matches the legacy max(minRatio, 0.5·(1−|offsetN|)) formula.
+        const expectedFSmall1 = Math.max(CONFIG.MIN_SPLIT_RATIO, 0.5 * (1 - Math.abs(offsetN)));
+        if (c1.length === 2) {
+            const fSmallObs = Math.min(c1[0].m, c1[1].m) / M;
+            assert.ok(Math.abs(fSmallObs - expectedFSmall1) < 1e-12,
+                `bias=1 offsetN=${offsetN}: expected fSmall=${expectedFSmall1}, got ${fSmallObs}`);
+        }
+
+        // bias=0.5 → fSmall = max(minRatio, 0.5·(1 − 0.5·|offsetN|)) (interpolated).
+        const expectedFSmallH = Math.max(CONFIG.MIN_SPLIT_RATIO, 0.5 * (1 - 0.5 * Math.abs(offsetN)));
+        if (cH.length === 2) {
+            const fSmallObs = Math.min(cH[0].m, cH[1].m) / M;
+            assert.ok(Math.abs(fSmallObs - expectedFSmallH) < 1e-12,
+                `bias=0.5 offsetN=${offsetN}: expected fSmall=${expectedFSmallH}, got ${fSmallObs}`);
+        }
+    }
 });

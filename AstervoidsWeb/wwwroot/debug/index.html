@@ -238,16 +238,23 @@
             {
                 key: 'BULLET_ENERGY_SIZE_BLEND',
                 label: 'Bullet energy size blend',
-                min: 0, max: 1, step: 0.01, default: 1.0,
+                min: 0, max: 1, step: 0.01, default: 0.0,
                 fmt: v => v.toFixed(2),
                 help: '0 = fixed E_b per hit (legacy, compounds across splits). 1 = E_b ∝ R² (generation-independent separation speed).',
             },
             {
                 key: 'SPLIT_KAPPA',
                 label: 'Split kappa (impulse→rigid KE fraction)',
-                min: 0.0001, max: 0.01, step: 0.0001, default: 0.001,
-                fmt: v => v.toFixed(4),
+                min: 0.00001, max: 0.001, step: 0.00001, default: 0.0001,
+                fmt: v => v.toFixed(5),
                 help: 'Fraction of bullet energy → parent deflection + spin. Rest → fragment separation. Lower = less spin/deflection, same separation speed.',
+            },
+            {
+                key: 'MASS_SPLIT_BIAS',
+                label: 'Mass split bias (offset → asymmetry)',
+                min: 0, max: 1, step: 0.01, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
             },
         ];
 
