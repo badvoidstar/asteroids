@@ -1021,25 +1021,12 @@
         // Asteroid splitting
         SPLIT_COUNT: 2,             // Always split into 2 pieces
         MIN_SPLIT_RATIO: 0.1,       // Smallest piece is at least 10% of original (area fraction)
-        // How strongly the bullet's perpendicular impact offset biases the area split.
-        // 0 = always 50/50 (legacy random behaviour disabled); 1 = at a maximally off-center
-        // (grazing) hit the smaller piece reaches MIN_SPLIT_RATIO. Values are clamped to [0, 1].
-        SPLIT_OFFSET_RATIO_BIAS: 1.0,
-        // How strongly the bullet's perpendicular impact offset rotates the separation axis
-        // away from "perpendicular to bullet path" toward "aligned with bullet path".
-        // 0 = always perpendicular (legacy behaviour); 1 = at a grazing hit the smaller piece
-        // travels straight along the bullet's forward direction. Clamped to [0, 1].
-        SPLIT_AXIS_ROTATION_BIAS: 0.5,
-        // How strongly the bullet's perpendicular impact offset blends each child's
-        // resulting linear-momentum direction from the split-axis direction toward the
-        // parent asteroid's pre-split direction. 0 = always pure split-axis (legacy
-        // behaviour); 1 = at a grazing hit (|offsetN|=1) each child fully inherits the
-        // parent's direction, while a head-on hit (offsetN=0) still resolves to the
-        // split axis. Linear blend in between. Clamped to [0, 1].
-        SPLIT_AXIS_BLEND_BIAS: 0.75,
-        // Random angle jitter (radians) added to each child's launch direction for visual variety.
-        // Set to 0 for fully deterministic split directions.
-        SPLIT_ANGLE_JITTER: 0.5,
+        // Bullet kinetic energy delivered per hit, in (normalized reference-dim per second)².
+        // Single tunable controlling impact "punchiness". Total fragment KE = parent KE + this.
+        // Default chosen so a typical hit on a stationary medium asteroid (R≈0.05) gives each
+        // fragment a separation speed comparable to ASTEROID_BASE_SPEED (~0.15/s):
+        //   E ≈ R²·v_sep² ≈ 0.05²·0.15² ≈ 6e-5
+        BULLET_KINETIC_ENERGY: 6e-5,
         
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
@@ -1086,46 +1073,7 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
-        IMPACT_SPIN_FACTOR: 0.02,      // Tunable scaling for bullet impact torque on asteroid split
-
-        // Spin-distribution model used by splitAsteroid. Three choices, all share the
-        // same per-child loop and only differ in how rotationSpeed is computed:
-        //
-        //   'explosion' — ω_child = ω_parent ± bulletAM / I_child
-        //                Each child inherits the parent's rotation rate directly (no
-        //                inertia amplification) and receives a full opposite-sign
-        //                bullet kick. Snappiest feel; bullet hits are very visible.
-        //                Strict AM conservation: NO (the "lost" parent AM is implicitly
-        //                carried as orbital AM of the separating fragments, which we
-        //                don't model). No runaway across successive splits.
-        //
-        //   'merged'    — ω_child = ω_parent ± bulletAM / (2·I_child)
-        //                Same inheritance as 'explosion' but with half-magnitude
-        //                bullet kicks (matching the symmetric ±L_b/2 partition).
-        //                Calmer feel; spin changes still always reversible. No runaway.
-        //                Strict AM conservation: NO (same as 'explosion').
-        //
-        //   'rigid'     — ω_child = totalAM / totalChildInertia ± bulletAM / (2·I_child)
-        //                Strict rigid-body angular-momentum conservation: Σ(I·ω) is
-        //                preserved exactly across the split. Because Σ(child I) <
-        //                parent I, each child spins ~2× the parent's ω in a 50/50
-        //                split — i.e. a small initial spin amplifies geometrically
-        //                across generations and can become hard for bullets to flip.
-        //
-        // A/B test via URL: ?spin=explosion | ?spin=merged | ?spin=rigid
-        SPIN_MODEL: 'rigid'
     };
-
-    // URL override for SPIN_MODEL so different clients can A/B different models
-    // without rebuilding. Multiplayer-safe: each split is computed by the asteroid's
-    // owner and broadcast to all clients via ObjectSync, so model choice is local
-    // to whichever client owns the asteroid being split.
-    try {
-        const _spinParam = new URLSearchParams(window.location.search).get('spin');
-        if (_spinParam && ['explosion', 'merged', 'rigid'].includes(_spinParam)) {
-            CONFIG.SPIN_MODEL = _spinParam;
-        }
-    } catch (_) { /* non-browser env (tests) */ }
 
     // ============================================
     // SECTION 1B: MULTIPLAYER CONSTANTS
@@ -3458,232 +3406,138 @@
     }
 
     /**
-     * Split an asteroid into two smaller pieces
-     * Implements conservation of area (mass), energy, and angular momentum.
+     * Split an asteroid using a closed-form rigid-body fragmentation model.
      *
-     * The bullet's impact geometry shapes the split so that:
-     *  - A head-on hit (bullet path passes through the center of mass) yields an even
-     *    50/50 area split with a separation axis perpendicular to the bullet path.
-     *  - As the impact deviates from center, the split shifts linearly: the smaller
-     *    piece ends up on the same side of the bullet path as the impact point, and
-     *    the separation axis rotates linearly toward the bullet path so that the
-     *    smaller piece travels in the bullet's forward direction (and the larger
-     *    piece travels opposite).
+     * Conservation guarantees (in the parent's pre-impact rest frame):
+     *   • Linear momentum:   Σ m_i v_i  = M v + J                      (exact)
+     *   • Angular momentum:  Σ (m_i r_i×v_i + I_i ω_i) = I ω + r×J   (exact, parallel-axis)
+     *   • Energy:            Σ ½(m_i|v_i|² + I_i ω_i²) = ½M|v|² + ½Iω² + E_b  (exact)
      *
-     * In addition, each child's launch direction (a unit vector) is linearly blended
-     * between the split-axis direction (current calculation) and the parent's pre-split
-     * direction, parameterised by |offsetN|: 0 → pure split-axis, 1 → pure parent direction.
+     * Single configurable parameter: CONFIG.BULLET_KINETIC_ENERGY (E_b).
      *
-     * The strength of all three effects is configurable via `CONFIG.SPLIT_OFFSET_RATIO_BIAS`,
-     * `CONFIG.SPLIT_AXIS_ROTATION_BIAS`, and `CONFIG.SPLIT_AXIS_BLEND_BIAS`. Each bias
-     * scales its effect linearly toward zero (i.e. toward the original split-axis-only
-     * behaviour) as the bias approaches 0.
-     *
-     * All values are in normalized coordinates. Called by the asteroid owner to process
-     * a hit. In session mode, computes split and sends to server — all local state
-     * changes come back through OnObjectReplaced for atomic processing on all clients.
-     *
-     * @param {Asteroid} asteroid - The asteroid to split
-     * @param {string|null} childOwnerMemberId - Member ID to own the child asteroids (null = session default)
-     * @param {object} impact - Compact bullet impact descriptor at the moment of collision:
-     *   { bulletAngle, offsetN, impactTorque }
-     *   - bulletAngle: bullet velocity direction relative to the asteroid, atan2(relVelY, relVelX) [rad]
-     *   - offsetN: signed perpendicular offset from the asteroid center to the bullet's line,
-     *              normalized by the asteroid radius. Already in [-1, 1]; sign picks the
-     *              impact side (and thus the smaller piece's side).
-     *   - impactTorque: 2D cross product (offset × relVel) carrying the bullet's spin contribution.
-     *   These three scalars are all the split math needs and are cheap to transmit over the wire
-     *   for cross-network pendingHit handoff.
+     * @param {Asteroid} asteroid
+     * @param {string|null} childOwnerMemberId
+     * @param {{bulletAngle:number, offsetN:number, impactTorque:number}|null} impact
      */
     function splitAsteroid(asteroid, childOwnerMemberId = null, impact = null) {
-        // Don't split if too small
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
             if (isSessionMode() && asteroid.syncObjectId) {
                 deleteSyncedAsteroid(asteroid);
             }
-            return;  // Asteroid is destroyed, no children spawned
+            return;
         }
 
-        // Unpack compact impact descriptor; default to a zero/head-on impact for safety.
-        const impactTorque = impact?.impactTorque ?? 0;
-        const offsetN = Math.min(1, Math.max(-1, impact?.offsetN ?? 0));
-        // If the bullet direction is missing (legacy/null impact), fall back to the parent
-        // asteroid's velocity direction so we still have a well-defined separation axis.
+        // Unpack impact (safe defaults: head-on along parent velocity).
+        const offsetN = Math.max(-1, Math.min(1, impact?.offsetN ?? 0));
         let bulletAngle = impact?.bulletAngle;
-        if (bulletAngle === undefined || bulletAngle === null || !Number.isFinite(bulletAngle)) {
-            const fallbackMag = Math.hypot(asteroid.velocityX, asteroid.velocityY);
-            bulletAngle = fallbackMag > 1e-9 ? Math.atan2(asteroid.velocityY, asteroid.velocityX) : 0;
+        if (!Number.isFinite(bulletAngle)) {
+            const m = Math.hypot(asteroid.velocityX, asteroid.velocityY);
+            bulletAngle = m > 1e-9 ? Math.atan2(asteroid.velocityY, asteroid.velocityX) : 0;
         }
 
-        const offsetBias = Math.min(1, Math.max(0, CONFIG.SPLIT_OFFSET_RATIO_BIAS));
-        const axisBias = Math.min(1, Math.max(0, CONFIG.SPLIT_AXIS_ROTATION_BIAS));
-        const axisBlendBias = Math.min(1, Math.max(0, CONFIG.SPLIT_AXIS_BLEND_BIAS));
-        const n = offsetN * offsetBias;
-        const absN = Math.abs(n);
-        // sign(0) → +1 so n=0 still picks a definite (perpendicular) axis side.
-        const sideSign = n >= 0 ? 1 : -1;
+        // Bullet direction d̂ and separation normal n̂ = d̂ rotated +90°.
+        const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
+        const nx = -dy, ny = dx;
 
-        // Area split: smaller piece sits on the bullet-impact side. At |n|=0 it's
-        // exactly half; at |n|=1 it shrinks to MIN_SPLIT_RATIO. Note that
-        // smallerFrac + largerFrac === 1 by construction, so r1² + r2² === R²
-        // (area / mass is exactly conserved on a clean split).
-        const smallerFrac = 0.5 - (0.5 - CONFIG.MIN_SPLIT_RATIO) * absN;
-        const largerFrac = 1 - smallerFrac;
-        // Calculate child radii: r = R * sqrt(area fraction)
-        const smallerRadius = asteroid.radius * Math.sqrt(smallerFrac);
-        const largerRadius = asteroid.radius * Math.sqrt(largerFrac);
+        // Disk: M ∝ R², I = ½MR² (common ρπ factor cancels everywhere).
+        const R = asteroid.radius;
+        const M = R * R;
+        const I = 0.5 * M * R * R;
 
-        // Calculate parent's kinetic energy (E = 0.5 * mass * v²)
-        // Mass is proportional to area (r²), so E ∝ r² * v²
-        const parentSpeed = Math.sqrt(asteroid.velocityX ** 2 + asteroid.velocityY ** 2);
-        const parentEnergy = asteroid.radius ** 2 * parentSpeed ** 2;
+        // Impact point r relative to parent COM (on disk surface).
+        const b   = offsetN * R;
+        const rxN = b;
+        const rxD = -Math.sqrt(Math.max(0, R * R - b * b));
+        const rx  = rxD * dx + rxN * nx;
+        const ry  = rxD * dy + rxN * ny;
 
-        // Separation axis direction for the smaller piece. At |n|=0 this is the
-        // perpendicular to the bullet path (on the impact side); at |n|=1 it
-        // rotates fully onto the bullet's forward direction. The larger piece
-        // travels along the opposite direction of the same axis.
-        const smallerBaseAngle = bulletAngle + sideSign * (Math.PI / 2) * (1 - absN * axisBias);
-        const largerBaseAngle = smallerBaseAngle + Math.PI;
+        // Bullet impulse magnitude from E_b via inelastic-collision identity:
+        //   ΔE_rigid = |J|²/(2M) · (1 + 2b²/R²)   for a disk
+        const kappa = 0.15;                               // E_b fraction → parent rigid KE
+        const E_b   = CONFIG.BULLET_KINETIC_ENERGY;
+        const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
+        const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);
+        const Jx    = Jmag * dx, Jy = Jmag * dy;
 
-        // Order children so index 0 = smaller (impact-side) piece, index 1 = larger.
-        // Filter out any pieces that fall below the minimum spawn radius — this is
-        // the mechanism by which the system loses mass over time and eventually
-        // destroys all asteroids. Combined with the early-return above for
-        // radius ≤ MIN_ASTEROID_RADIUS, every parent asteroid converges to
-        // destruction in O(log(R / MIN_ASTEROID_RADIUS)) hits.
-        const childSpecs = [];
-        if (smallerRadius >= CONFIG.MIN_ASTEROID_RADIUS) {
-            childSpecs.push({ radius: smallerRadius, baseAngle: smallerBaseAngle });
-        }
-        if (largerRadius >= CONFIG.MIN_ASTEROID_RADIUS) {
-            childSpecs.push({ radius: largerRadius, baseAngle: largerBaseAngle });
-        }
+        // Post-impulse parent state.
+        const vxP    = asteroid.velocityX + Jx / M;
+        const vyP    = asteroid.velocityY + Jy / M;
+        const torque = rx * Jy - ry * Jx;                // r × J  (scalar in 2D)
+        const omegaP = (asteroid.rotationSpeed || 0) + torque / I;
 
-        // Invariant: total child area must not exceed parent area. With the formula
-        // above it's exactly equal pre-cull and strictly less post-cull, so the
-        // global sum of asteroid area is monotonically non-increasing on every
-        // split — guaranteeing termination.
-        const parentArea = asteroid.radius ** 2;
-        const childArea = childSpecs.reduce((sum, c) => sum + c.radius ** 2, 0);
-        if (childArea > parentArea + 1e-9) {
-            _error('[splitAsteroid] Area-conservation invariant violated:',
-                { parentArea, childArea, smallerFrac, largerFrac, n });
-        }
+        // Energy left for fragment separation.
+        const dE_rigid = (Jmag * Jmag) / (2 * M) * leverFactor;
+        const E_sep    = Math.max(0, E_b - dE_rigid);
 
-        // Calculate total mass of surviving children for energy distribution
-        const totalChildMass = childArea;
+        // Mass split: 50/50 head-on, skewed for glancing.
+        const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO ?? 0.1));
+        const fSmall   = Math.max(minRatio, 0.5 * (1 - Math.abs(offsetN)));
+        const fLarge   = 1 - fSmall;
 
-        // Spin distribution.
-        //
-        // Three models are supported, selected by CONFIG.SPIN_MODEL (see comment in
-        // CONFIG for the full physical rationale of each):
-        //
-        //   'explosion' : ω_child = ω_parent ± bulletAM / I_child
-        //   'merged'    : ω_child = ω_parent ± bulletAM / (2·I_child)
-        //   'rigid'     : ω_child = totalAM / totalChildInertia ± bulletAM / (2·I_child)
-        //
-        // 'explosion' and 'merged' inherit the parent's rotation rate directly (no
-        // inertia amplification, no runaway) and treat the "missing" parent AM as
-        // implicit orbital AM of the separating fragments. 'rigid' enforces strict
-        // Σ(I·ω) conservation, at the cost of geometric per-split spin amplification.
-        //
-        // impactTorque has units [normalized²/s]; converting to a per-frame angular
-        // impulse requires multiplying by radius² (to bring the spatial dimension up
-        // to inertia units) and dividing by TARGET_FPS.
-        const bulletAngularMomentum = impactTorque * asteroid.radius ** 2 / CONFIG.TARGET_FPS * CONFIG.IMPACT_SPIN_FACTOR;
-        // Used only by the 'rigid' model. Cheap to compute unconditionally; keeps
-        // the model selection a single switch inside the per-child loop.
-        const parentAngularMomentum = asteroid.radius ** 4 * asteroid.rotationSpeed;
-        const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
-        const totalChildInertia = childSpecs.reduce((sum, c) => sum + c.radius ** 4, 0);
+        const rSmall = R * Math.sqrt(fSmall);
+        const rLarge = R * Math.sqrt(fLarge);
+        const mSmall = fSmall * M;
+        const mLarge = fLarge * M;
 
-        // Blend amount for per-child launch-direction axis: 0 at head-on (pure split
-        // axis), 1 at fully grazing (pure parent direction). Scales linearly with
-        // |offsetN| and the SPLIT_AXIS_BLEND_BIAS config; bias→0 reverts to
-        // split-axis-only motion. Falls back to 0 when the parent has no well-defined
-        // direction (speed ≈ 0).
-        const parentSpeedSafe = parentSpeed > 1e-9 ? parentSpeed : 0;
-        const parentDirX = parentSpeedSafe > 0 ? asteroid.velocityX / parentSpeedSafe : 0;
-        const parentDirY = parentSpeedSafe > 0 ? asteroid.velocityY / parentSpeedSafe : 0;
-        const axisBlend = parentSpeedSafe > 0 ? Math.abs(offsetN) * axisBlendBias : 0;
+        // Separation axis n̂_sep — toward impact side.
+        const sideSign = offsetN >= 0 ? 1 : -1;
+        const sx = sideSign * nx, sy = sideSign * ny;
 
-        // Build child asteroid data
-        const childAsteroids = [];
-        const angleJitter = CONFIG.SPLIT_ANGLE_JITTER || 0;
-        for (let index = 0; index < childSpecs.length; index++) {
-            const { radius: childRadius, baseAngle } = childSpecs[index];
-
-            // Energy conservation: each piece gets energy proportional to its mass
-            const childMass = childRadius ** 2;
-            const childEnergy = totalChildMass > 0 ? parentEnergy * (childMass / totalChildMass) : 0;
-            const childSpeed = childMass > 0 ? Math.sqrt(childEnergy / childMass) : 0;
-
-            const angle = baseAngle + (angleJitter > 0 ? randomRange(-angleJitter, angleJitter) : 0);
-
-            // Linearly blend the child's launch direction (a unit-vector axis) between
-            // the split-axis direction (axisBlend = 0) and the parent's pre-split
-            // direction (axisBlend = 1), then renormalize so |dir| = 1. Without the
-            // renormalization, intermediate blends of two non-collinear unit vectors
-            // produce a sub-unit-length vector, which silently scales childSpeed down
-            // and discards kinetic energy (worst-case ~29% loss at t=0.5, θ=90°).
-            const splitDirX = Math.cos(angle);
-            const splitDirY = Math.sin(angle);
-            const blendX = (1 - axisBlend) * splitDirX + axisBlend * parentDirX;
-            const blendY = (1 - axisBlend) * splitDirY + axisBlend * parentDirY;
-            // Defensive: if splitDir and parentDir are exactly antiparallel at t=0.5
-            // the blend is the zero vector; fall back to the split-axis direction so
-            // the child still launches with its full energy-conserving speed.
-            const blendMag = Math.hypot(blendX, blendY);
-            const dirX = blendMag > 1e-9 ? blendX / blendMag : splitDirX;
-            const dirY = blendMag > 1e-9 ? blendY / blendMag : splitDirY;
-
-            const childAsteroid = new Asteroid(
-                asteroid.x,
-                asteroid.y,
-                childRadius,
-                dirX * childSpeed,
-                dirY * childSpeed
-            );
-
-            // Distribute spin per CONFIG.SPIN_MODEL. See the SPIN_MODEL comment
-            // in CONFIG for full physical rationale of each model.
-            const childInertia = childRadius ** 4;
-            const sign = (index === 0) ? 1 : -1;
-            if (childSpecs.length === 1 || totalChildInertia <= 0) {
-                // Only one child survived (or pathological inertia): no asymmetric
-                // partner to absorb the opposite kick, so just inherit + full kick.
-                childAsteroid.rotationSpeed = asteroid.rotationSpeed
-                    + bulletAngularMomentum / childInertia;
-            } else if (CONFIG.SPIN_MODEL === 'rigid') {
-                childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia
-                    + sign * bulletAngularMomentum / (2 * childInertia);
-            } else if (CONFIG.SPIN_MODEL === 'merged') {
-                childAsteroid.rotationSpeed = asteroid.rotationSpeed
-                    + sign * bulletAngularMomentum / (2 * childInertia);
-            } else {
-                // 'explosion' (default fallback for any unknown value)
-                childAsteroid.rotationSpeed = asteroid.rotationSpeed
-                    + sign * bulletAngularMomentum / childInertia;
-            }
-            childAsteroid.angle = asteroid.angle;
-
-            childAsteroids.push(childAsteroid);
-        }
-        
-        if (isSessionMode() && asteroid.syncObjectId) {
-            // Send to server — all clients (including us) will process via OnObjectReplaced
-            if (childAsteroids.length > 0) {
-                replaceSyncedAsteroid(asteroid, childAsteroids, childOwnerMemberId);
-            } else {
-                deleteSyncedAsteroid(asteroid);
-            }
+        const children = [];
+        if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
+            // Chip is debris — single child carries post-impulse motion.
+            children.push({ r: rLarge, m: mLarge, posOff: 0, vx: vxP, vy: vyP, omega: omegaP });
         } else {
-            // Solo mode — apply locally
-            for (const child of childAsteroids) {
-                game.astervoids.push(child);
-            }
+            // COMs on separation axis at distances that satisfy the parallel-axis identity
+            // I_s + I_l + m_s·d_s² + m_l·d_l² = I, guaranteeing exact AM and energy
+            // conservation. Derived: d_s = R·f_l, d_l = -R·f_s.
+            const dSmall = +R * fLarge;
+            const dLarge = -R * fSmall;
+
+            // Inherited rigid velocity at each COM: v' + ω' × r_i (in 2D: ω×r = (-ω·ry, ω·rx)).
+            const inh = (d) => ({
+                vx: vxP + (-omegaP) * (d * sy),
+                vy: vyP + ( omegaP) * (d * sx),
+            });
+            const iS = inh(dSmall), iL = inh(dLarge);
+
+            // Separation impulse along n̂_sep, equal-and-opposite, releasing E_sep:
+            //   s = √(2·E_sep·m_l / (m_s·M))
+            const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
+            children.push({
+                r: rSmall, m: mSmall, posOff: dSmall,
+                vx: iS.vx + s * sx,                      vy: iS.vy + s * sy,                      omega: omegaP,
+            });
+            children.push({
+                r: rLarge, m: mLarge, posOff: dLarge,
+                vx: iL.vx - s * sx * (mSmall / mLarge),  vy: iL.vy - s * sy * (mSmall / mLarge),  omega: omegaP,
+            });
         }
-        
+
+        // Materialise: posOff is in reference-dim units; convert to normalized x/y.
+        const refDim = getReferenceDimension();
+        const px2nx  = refDim / getGameWidth();
+        const py2ny  = refDim / getGameHeight();
+
+        const newAsteroids = children.map(c => {
+            const a = new Asteroid(
+                asteroid.x + c.posOff * sx * px2nx,
+                asteroid.y + c.posOff * sy * py2ny,
+                c.r, c.vx, c.vy
+            );
+            a.rotationSpeed = c.omega;
+            a.angle = asteroid.angle;
+            return a;
+        });
+
+        if (isSessionMode() && asteroid.syncObjectId) {
+            replaceSyncedAsteroid(asteroid, newAsteroids, childOwnerMemberId);
+        } else {
+            const idx = game.astervoids.indexOf(asteroid);
+            if (idx >= 0) game.astervoids.splice(idx, 1);
+            game.astervoids.push(...newAsteroids);
+        }
+
         updateHUD();
     }
 
