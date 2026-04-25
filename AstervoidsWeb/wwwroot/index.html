@@ -3460,7 +3460,7 @@
         // grows as 1/R for a fixed-energy impulse. Lowering kappa reduces both deflection
         // and spin proportionally to √kappa, while leaving fragment separation speed
         // (which scales with √(1−kappa)·E_b ≈ √E_b) essentially unchanged.
-        const kappa = 0.02;
+        const kappa = 0.005;
         const E_b   = CONFIG.BULLET_KINETIC_ENERGY;
         const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
         const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);
