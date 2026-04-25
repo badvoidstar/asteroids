@@ -1040,6 +1040,12 @@
         // cross-section (≈ mass), which yields generation-independent separation speed
         // and tames child spin from 1/R² → 1/R.
         BULLET_ENERGY_SIZE_BLEND: 1.0,
+        // Fraction of E_b that goes into parent rigid-body KE (deflection + spin);
+        // the remainder (1 − kappa) becomes fragment separation energy E_sep. Low
+        // values keep impact spin visually tame — torque/I grows as 1/R for a
+        // fixed-energy impulse. Lowering kappa reduces deflection and spin by
+        // √kappa while leaving fragment separation speed essentially unchanged.
+        SPLIT_KAPPA: 0.005,
         
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
@@ -2506,6 +2512,7 @@
     const DEBUG_OVERRIDABLE_KEYS = new Set([
         'ASTEROID_DENSITY',
         'BULLET_ENERGY_SIZE_BLEND',
+        'SPLIT_KAPPA',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -3484,14 +3491,7 @@
 
         // Bullet impulse magnitude from E_b via inelastic-collision identity:
         //   ΔE_rigid = |J|²/(2M) · (1 + 2b²/R²)   for a disk
-        // kappa = fraction of E_b that goes into parent rigid-body KE (deflection + spin);
-        // the remainder (1 − kappa) becomes fragment separation energy E_sep. Tuned low
-        // (0.02) so impact spin matches the visual feel of the previous implementation —
-        // small radii would otherwise produce uncomfortably high ω because torque/I
-        // grows as 1/R for a fixed-energy impulse. Lowering kappa reduces both deflection
-        // and spin proportionally to √kappa, while leaving fragment separation speed
-        // (which scales with √(1−kappa)·E_b ≈ √E_b) essentially unchanged.
-        const kappa = 0.005;
+        const kappa = Math.max(1e-6, Math.min(1, CONFIG.SPLIT_KAPPA));
         // Effective bullet energy: blend between fixed and size-proportional. With blend=0
         // E_b is constant per hit (legacy); with blend=1 E_b ∝ R² (injected energy scales
         // with parent cross-section / mass, yielding generation-independent separation

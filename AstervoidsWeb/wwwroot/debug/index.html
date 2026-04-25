@@ -235,6 +235,13 @@
                 fmt: v => v.toFixed(2),
                 help: '0 = fixed E_b per hit (legacy, compounds across splits). 1 = E_b ∝ R² (generation-independent separation speed).',
             },
+            {
+                key: 'SPLIT_KAPPA',
+                label: 'Split kappa (impulse→rigid KE fraction)',
+                min: 0.001, max: 0.5, step: 0.001, default: 0.005,
+                fmt: v => v.toFixed(3),
+                help: 'Fraction of bullet energy → parent deflection + spin. Rest → fragment separation. Lower = less spin/deflection, same separation speed.',
+            },
         ];
 
         const STORAGE_KEY = 'astervoids-debug-config';

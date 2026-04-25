@@ -35,13 +35,12 @@ const CONFIG = {
     INITIAL_ASTEROID_RADIUS: 0.083,
     ASTEROID_DENSITY: 1.0,
     BULLET_ENERGY_SIZE_BLEND: 1.0,
+    SPLIT_KAPPA: 0.005,
 };
 
-// kappa is intentionally duplicated here (not imported from index.html) to keep
-// these tests independent of the browser environment, matching the pattern of the
-// old spin-physics.test.mjs. It must be kept in sync with the hard-coded constant
-// in splitAsteroid() in AstervoidsWeb/wwwroot/index.html.
-const kappa = 0.005;  // fraction of E_b → parent rigid KE (hard-coded in splitAsteroid)
+// kappa is now read from CONFIG.SPLIT_KAPPA (matching the game's CONFIG object).
+// The standalone variable is kept as a convenience alias for the formulas below.
+const kappa = CONFIG.SPLIT_KAPPA;
 
 /** Effective bullet energy after the size-blend mapping. */
 function effectiveEb(R, cfg = CONFIG) {
