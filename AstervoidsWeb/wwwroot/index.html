@@ -3393,7 +3393,7 @@
      * Reducing these from four floats to two scalars (plus the existing torque) keeps the
      * cross-network pendingHit payload smaller while preserving exact split behaviour.
      *
-     * offsetX/offsetY must be in normalized canvas coords [0,1] (i.e. bullet.x - asteroid.x).
+     * offsetX/offsetY must be differences of normalized canvas coords (i.e. bullet.x - asteroid.x).
      * relVelX/relVelY must be in reference-dimension per second.
      * Both are converted to reference-dimension units internally so the cross product is
      * isotropic on non-square viewports.

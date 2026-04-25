@@ -81,7 +81,7 @@ function bulletDeltaL(I0, omega0, I1, omega1, Ltotal, Itotal) {
 
 // ─── Reference geometry ───────────────────────────────────────────────────────
 
-// Asteroid split with a moderately asymmetric ratio (35 % / 65 %) to expose the
+// Asteroid split with a moderately asymmetric ratio (35%/65%) to expose the
 // I0 ≠ I1 case where the old and new formulas diverge most clearly.
 const R       = 0.10;            // parent radius (reference-dimension units)
 const frac0   = 0.35;            // area fraction for the smaller (impact-side) child
