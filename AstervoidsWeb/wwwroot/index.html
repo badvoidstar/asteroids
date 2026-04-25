@@ -3453,7 +3453,11 @@
 
         // Bullet impulse magnitude from E_b via inelastic-collision identity:
         //   ΔE_rigid = |J|²/(2M) · (1 + 2b²/R²)   for a disk
-        const kappa = 0.15;                               // E_b fraction → parent rigid KE
+        // kappa = fraction of E_b that goes into parent rigid-body KE (deflection + spin);
+        // the remainder (1 − kappa) becomes fragment separation energy E_sep. 0.15 is
+        // chosen so most of the bullet's energy fragments the rock while a small but
+        // perceptible slice deflects/spins it; feels equivalent to ~15% inelastic coupling.
+        const kappa = 0.15;
         const E_b   = CONFIG.BULLET_KINETIC_ENERGY;
         const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
         const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);
@@ -3470,7 +3474,7 @@
         const E_sep    = Math.max(0, E_b - dE_rigid);
 
         // Mass split: 50/50 head-on, skewed for glancing.
-        const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO ?? 0.1));
+        const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
         const fSmall   = Math.max(minRatio, 0.5 * (1 - Math.abs(offsetN)));
         const fLarge   = 1 - fSmall;
 
@@ -3495,22 +3499,22 @@
             const dLarge = -R * fSmall;
 
             // Inherited rigid velocity at each COM: v' + ω' × r_i (in 2D: ω×r = (-ω·ry, ω·rx)).
-            const inh = (d) => ({
+            const rigidVelocityAt = (d) => ({
                 vx: vxP + (-omegaP) * (d * sy),
                 vy: vyP + ( omegaP) * (d * sx),
             });
-            const iS = inh(dSmall), iL = inh(dLarge);
+            const vS = rigidVelocityAt(dSmall), vL = rigidVelocityAt(dLarge);
 
             // Separation impulse along n̂_sep, equal-and-opposite, releasing E_sep:
             //   s = √(2·E_sep·m_l / (m_s·M))
             const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
             children.push({
                 r: rSmall, m: mSmall, posOff: dSmall,
-                vx: iS.vx + s * sx,                      vy: iS.vy + s * sy,                      omega: omegaP,
+                vx: vS.vx + s * sx,                      vy: vS.vy + s * sy,                      omega: omegaP,
             });
             children.push({
                 r: rLarge, m: mLarge, posOff: dLarge,
-                vx: iL.vx - s * sx * (mSmall / mLarge),  vy: iL.vy - s * sy * (mSmall / mLarge),  omega: omegaP,
+                vx: vL.vx - s * sx * (mSmall / mLarge),  vy: vL.vy - s * sy * (mSmall / mLarge),  omega: omegaP,
             });
         }
 

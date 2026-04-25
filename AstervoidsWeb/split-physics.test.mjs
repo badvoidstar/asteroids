@@ -30,6 +30,10 @@ const CONFIG = {
     MIN_ASTEROID_RADIUS: 0.025,
 };
 
+// kappa is intentionally duplicated here (not imported from index.html) to keep
+// these tests independent of the browser environment, matching the pattern of the
+// old spin-physics.test.mjs. It must be kept in sync with the hard-coded constant
+// in splitAsteroid() in AstervoidsWeb/wwwroot/index.html.
 const kappa = 0.15;  // fraction of E_b → parent rigid KE (hard-coded in splitAsteroid)
 
 /**
@@ -103,11 +107,11 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle) {
     const dLarge = -R * fSmall;
 
     // Inherited rigid velocity at each COM.
-    const inh = (d) => ({
+    const rigidVelocityAt = (d) => ({
         vx: vxP + (-omegaP) * (d * sy),
         vy: vyP + ( omegaP) * (d * sx),
     });
-    const iS = inh(dSmall), iL = inh(dLarge);
+    const vS = rigidVelocityAt(dSmall), vL = rigidVelocityAt(dLarge);
 
     // Separation impulse.
     const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
@@ -115,12 +119,12 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle) {
     return [
         {
             r: rSmall, m: mSmall,
-            vx: iS.vx + s * sx,                     vy: iS.vy + s * sy,                     omega: omegaP,
+            vx: vS.vx + s * sx,                     vy: vS.vy + s * sy,                     omega: omegaP,
             posX: dSmall * sx, posY: dSmall * sy,
         },
         {
             r: rLarge, m: mLarge,
-            vx: iL.vx - s * sx * (mSmall / mLarge), vy: iL.vy - s * sy * (mSmall / mLarge), omega: omegaP,
+            vx: vL.vx - s * sx * (mSmall / mLarge), vy: vL.vy - s * sy * (mSmall / mLarge), omega: omegaP,
             posX: dLarge * sx, posY: dLarge * sy,
         },
     ];
