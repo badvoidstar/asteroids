@@ -3522,15 +3522,27 @@
         // Calculate total mass of surviving children for energy distribution
         const totalChildMass = childArea;
 
-        // Angular momentum conservation (Option 2 + 3):
-        // Moment of inertia ∝ r⁴, so L = I × ω = r⁴ × rotationSpeed
-        const parentAngularMomentum = asteroid.radius ** 4 * asteroid.rotationSpeed;
-        // impactTorque has units [normalized²/s]; parentAngularMomentum has units [normalized⁴ × rad/frame].
-        // Multiply by asteroid.radius² to scale to the same spatial dimension, and divide by TARGET_FPS
-        // to convert from per-second to per-frame, yielding consistent [normalized⁴ × rad/frame] units.
+        // Spin distribution.
+        //
+        // We do NOT strictly conserve I·ω across the split. Naïvely doing so
+        // amplifies parent rotation: I ∝ r⁴, and Σ(child r⁴) < parent r⁴, so
+        // each split would double the inherited ω. After a few hits the
+        // inherited spin dominates the bullet contribution and grows
+        // monotonically, locking the asteroid into one rotation direction
+        // forever. (Physically the missing AM goes into the children's
+        // *orbital* angular momentum about the original CoM, which we don't
+        // model separately here.)
+        //
+        // Instead each child inherits the parent's ω directly, then receives
+        // an OPPOSITE-sign bullet kick — impact-side child spins one way,
+        // other child spins the other way. This matches the "explosion"
+        // intuition the original comment described and lets successive hits
+        // freely reverse spin direction.
+        //
+        // impactTorque has units [normalized²/s]; converting to a per-frame
+        // angular impulse requires multiplying by radius² (to bring the
+        // spatial dimension up to inertia units) and dividing by TARGET_FPS.
         const bulletAngularMomentum = impactTorque * asteroid.radius ** 2 / CONFIG.TARGET_FPS * CONFIG.IMPACT_SPIN_FACTOR;
-        const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
-        const totalChildInertia = childSpecs.reduce((sum, c) => sum + c.radius ** 4, 0);
 
         // Blend amount for per-child launch-direction axis: 0 at head-on (pure split
         // axis), 1 at fully grazing (pure parent direction). Scales linearly with
@@ -3580,22 +3592,19 @@
                 dirY * childSpeed
             );
 
-            // Override random spin: distribute angular momentum asymmetrically between children
-            // while conserving total angular momentum exactly: Σ(I_i × ω_i) = totalAngularMomentum
-            if (totalChildInertia > 0) {
-                if (childSpecs.length === 2) {
-                    // Child 0 gets a bonus spin from the bullet's angular momentum contribution;
-                    // child 1 compensates with the opposite adjustment to conserve the total exactly.
-                    if (index === 0) {
-                        childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia + bulletAngularMomentum / totalChildInertia;
-                    } else {
-                        const I0 = childSpecs[0].radius ** 4;
-                        const childInertia = childRadius ** 4;
-                        childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia - bulletAngularMomentum * I0 / (totalChildInertia * childInertia);
-                    }
-                } else {
-                    childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia;
-                }
+            // Override random spin: each child inherits parent's ω directly
+            // (no inertia-amplification doubling), then gets an opposite-sign
+            // bullet kick so impact-side and far-side spin in opposite
+            // directions. Magnitude scales as bulletAM / I_child so smaller
+            // (impact-side) pieces spin faster from the same impulse.
+            const childInertia = childRadius ** 4;
+            if (childSpecs.length === 2) {
+                const kickSign = index === 0 ? 1 : -1;
+                childAsteroid.rotationSpeed = asteroid.rotationSpeed
+                    + kickSign * bulletAngularMomentum / childInertia;
+            } else {
+                childAsteroid.rotationSpeed = asteroid.rotationSpeed
+                    + bulletAngularMomentum / childInertia;
             }
             childAsteroid.angle = asteroid.angle;
 
