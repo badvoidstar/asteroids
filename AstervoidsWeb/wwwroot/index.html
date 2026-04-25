@@ -1027,6 +1027,19 @@
         // fragment a separation speed comparable to ASTEROID_BASE_SPEED (~0.15/s):
         //   E ≈ R²·v_sep² ≈ 0.05²·0.15² ≈ 6e-5
         BULLET_KINETIC_ENERGY: 6e-5,
+        // Asteroid disk density. Mass is M = ASTEROID_DENSITY · R². Density cancels in
+        // all conservation laws, so increasing it uniformly scales every velocity outcome
+        // of a split (separation, deflection, spin) by 1/√density. Useful for damping
+        // compounding speeds across successive splits without changing E_b.
+        ASTEROID_DENSITY: 1.0,
+        // Blend [0..1] between fixed and size-proportional bullet energy injection.
+        // Effective E_b = BULLET_KINETIC_ENERGY · ((1 − blend) + blend · (R/R_ref)²)
+        // where R_ref = INITIAL_ASTEROID_RADIUS. blend=0 reproduces the legacy
+        // "constant energy per hit" behaviour (which causes separation/spin to compound
+        // as 1/R across splits). blend=1 makes injected energy proportional to parent
+        // cross-section (≈ mass), which yields generation-independent separation speed
+        // and tames child spin from 1/R² → 1/R.
+        BULLET_ENERGY_SIZE_BLEND: 1.0,
         
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
@@ -2483,13 +2496,28 @@
 
     // BroadcastChannel for sending debug metrics to /debug page.
     // Uses a heartbeat pattern: the debug page sends periodic pings, and we
-    // only compute + broadcast metrics when a listener is active.
+    // only compute + broadcast metrics when a listener is active. The debug
+    // page may also push live tuning overrides via { type:'config-update', key, value }.
     const debugChannel = new BroadcastChannel('astervoids-debug');
     let debugLastHeartbeat = 0;
     const DEBUG_HEARTBEAT_TIMEOUT = 2000; // ms before we consider the listener gone
+    // Allow-list of CONFIG keys the debug UI may override. Restricting to known-safe
+    // numeric tunables prevents stray messages from mutating arbitrary CONFIG fields.
+    const DEBUG_OVERRIDABLE_KEYS = new Set([
+        'ASTEROID_DENSITY',
+        'BULLET_ENERGY_SIZE_BLEND',
+    ]);
     debugChannel.onmessage = (event) => {
-        if (event.data === 'ping') {
+        const data = event.data;
+        if (data === 'ping') {
             debugLastHeartbeat = Date.now();
+            return;
+        }
+        if (data && data.type === 'config-update'
+            && DEBUG_OVERRIDABLE_KEYS.has(data.key)
+            && typeof data.value === 'number'
+            && Number.isFinite(data.value)) {
+            CONFIG[data.key] = data.value;
         }
     };
 
@@ -3439,9 +3467,12 @@
         const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
         const nx = -dy, ny = dx;
 
-        // Disk: M ∝ R², I = ½MR² (common ρπ factor cancels everywhere).
+        // Disk: M = ρ·R², I = ½MR² (the constant ρπ factor of a 2D disk is absorbed
+        // into ASTEROID_DENSITY; it cancels in every conservation law but uniformly
+        // scales velocity outcomes by 1/√ρ).
         const R = asteroid.radius;
-        const M = R * R;
+        const density = Math.max(1e-6, CONFIG.ASTEROID_DENSITY);
+        const M = density * R * R;
         const I = 0.5 * M * R * R;
 
         // Impact point r relative to parent COM (on disk surface).
@@ -3461,7 +3492,15 @@
         // and spin proportionally to √kappa, while leaving fragment separation speed
         // (which scales with √(1−kappa)·E_b ≈ √E_b) essentially unchanged.
         const kappa = 0.005;
-        const E_b   = CONFIG.BULLET_KINETIC_ENERGY;
+        // Effective bullet energy: blend between fixed and size-proportional. With blend=0
+        // E_b is constant per hit (legacy); with blend=1 E_b ∝ R² (injected energy scales
+        // with parent cross-section / mass, yielding generation-independent separation
+        // speed). R_ref = INITIAL_ASTEROID_RADIUS so a freshly-spawned asteroid receives
+        // exactly CONFIG.BULLET_KINETIC_ENERGY at any blend.
+        const blend = Math.max(0, Math.min(1, CONFIG.BULLET_ENERGY_SIZE_BLEND));
+        const Rref  = CONFIG.INITIAL_ASTEROID_RADIUS;
+        const sizeMul = (1 - blend) + blend * (R / Rref) * (R / Rref);
+        const E_b   = CONFIG.BULLET_KINETIC_ENERGY * sizeMul;
         const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
         const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);
         const Jx    = Jmag * dx, Jy = Jmag * dy;

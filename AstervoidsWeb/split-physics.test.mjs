@@ -16,6 +16,10 @@
  *   4. Head-on hit  (offsetN = 0)   → f_small = f_large = 0.5
  *   5. Grazing hit  (|offsetN| = 1) → f_small = MIN_SPLIT_RATIO
  *   6. One-child branch: rSmall < MIN_RADIUS → exactly one child, carrying v', ω'
+ *   7. ASTEROID_DENSITY: k× density uniformly damps every velocity by 1/√k
+ *   8. BULLET_ENERGY_SIZE_BLEND=0 → effectiveEb = BULLET_KINETIC_ENERGY (legacy)
+ *   9. BULLET_ENERGY_SIZE_BLEND=1 → separation speed is generation-independent
+ *  10. BULLET_ENERGY_SIZE_BLEND=0 → separation speed compounds as 1/R (regression)
  */
 
 import { test } from 'node:test';
@@ -28,6 +32,9 @@ const CONFIG = {
     BULLET_KINETIC_ENERGY: 6e-5,
     MIN_SPLIT_RATIO: 0.1,
     MIN_ASTEROID_RADIUS: 0.025,
+    INITIAL_ASTEROID_RADIUS: 0.083,
+    ASTEROID_DENSITY: 1.0,
+    BULLET_ENERGY_SIZE_BLEND: 1.0,
 };
 
 // kappa is intentionally duplicated here (not imported from index.html) to keep
@@ -35,6 +42,14 @@ const CONFIG = {
 // old spin-physics.test.mjs. It must be kept in sync with the hard-coded constant
 // in splitAsteroid() in AstervoidsWeb/wwwroot/index.html.
 const kappa = 0.005;  // fraction of E_b → parent rigid KE (hard-coded in splitAsteroid)
+
+/** Effective bullet energy after the size-blend mapping. */
+function effectiveEb(R, cfg = CONFIG) {
+    const blend = Math.max(0, Math.min(1, cfg.BULLET_ENERGY_SIZE_BLEND));
+    const Rref  = cfg.INITIAL_ASTEROID_RADIUS;
+    const sizeMul = (1 - blend) + blend * (R / Rref) * (R / Rref);
+    return cfg.BULLET_KINETIC_ENERGY * sizeMul;
+}
 
 /**
  * Core fragmentation math, extracted from splitAsteroid().
@@ -47,8 +62,9 @@ const kappa = 0.005;  // fraction of E_b → parent rigid KE (hard-coded in spli
  * @param {number} omega    - parent angular velocity
  * @param {number} offsetN  - normalised perpendicular impact offset ∈ [-1,1]
  * @param {number} bulletAngle - bullet direction angle (rad)
+ * @param {object} [cfg]    - override CONFIG (for density/blend tests)
  */
-function fragment(R, vx, vy, omega, offsetN, bulletAngle) {
+function fragment(R, vx, vy, omega, offsetN, bulletAngle, cfg = CONFIG) {
     // Clamp offsetN.
     offsetN = Math.max(-1, Math.min(1, offsetN));
 
@@ -56,8 +72,9 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle) {
     const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
     const nx = -dy, ny = dx;
 
-    // Disk: M ∝ R², I = ½MR².
-    const M = R * R;
+    // Disk: M = ρ·R², I = ½MR².
+    const density = cfg.ASTEROID_DENSITY;
+    const M = density * R * R;
     const I = 0.5 * M * R * R;
 
     // Impact point r relative to parent COM.
@@ -67,8 +84,8 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle) {
     const rx  = rxD * dx + rxN * nx;
     const ry  = rxD * dy + rxN * ny;
 
-    // Bullet impulse.
-    const E_b         = CONFIG.BULLET_KINETIC_ENERGY;
+    // Bullet impulse (size-blended energy).
+    const E_b         = effectiveEb(R, cfg);
     const leverFactor = 1 + 2 * (b * b) / (R * R);
     const Jmag        = Math.sqrt(2 * M * E_b * kappa / leverFactor);
     const Jx = Jmag * dx, Jy = Jmag * dy;
@@ -174,11 +191,11 @@ const CASES = Array.from({ length: 20 }, () => ({
 // ─── Test 1: Linear momentum conservation ───────────────────────────────────
 test('linear momentum: Σ m_i v_i = M v + J, to 1e-10', () => {
     for (const { R, vx, vy, omega, offsetN, bulletAngle } of CASES) {
-        const M  = R * R;
+        const M  = CONFIG.ASTEROID_DENSITY * R * R;
         const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
         const b  = Math.max(-1, Math.min(1, offsetN)) * R;
         const leverFactor = 1 + 2 * (b * b) / (R * R);
-        const Jmag = Math.sqrt(2 * M * CONFIG.BULLET_KINETIC_ENERGY * kappa / leverFactor);
+        const Jmag = Math.sqrt(2 * M * effectiveEb(R) * kappa / leverFactor);
         const Jx = Jmag * dx, Jy = Jmag * dy;
 
         const children = fragment(R, vx, vy, omega, offsetN, bulletAngle);
@@ -196,7 +213,7 @@ test('linear momentum: Σ m_i v_i = M v + J, to 1e-10', () => {
 // ─── Test 2: Angular momentum conservation ───────────────────────────────────
 test('angular momentum: Σ(m_i r_i×v_i + I_i ω_i) = I ω + r×J, to 1e-10', () => {
     for (const { R, vx, vy, omega, offsetN, bulletAngle } of CASES) {
-        const M  = R * R;
+        const M  = CONFIG.ASTEROID_DENSITY * R * R;
         const I  = 0.5 * M * R * R;
         const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
         const nx = -dy, ny = dx;
@@ -206,7 +223,7 @@ test('angular momentum: Σ(m_i r_i×v_i + I_i ω_i) = I ω + r×J, to 1e-10', ()
         const rx  = rxD * dx + rxN * nx;
         const ry  = rxD * dy + rxN * ny;
         const leverFactor = 1 + 2 * (b * b) / (R * R);
-        const Jmag = Math.sqrt(2 * M * CONFIG.BULLET_KINETIC_ENERGY * kappa / leverFactor);
+        const Jmag = Math.sqrt(2 * M * effectiveEb(R) * kappa / leverFactor);
         const Jx = Jmag * dx, Jy = Jmag * dy;
         const torqueJ = rx * Jy - ry * Jx;
 
@@ -224,7 +241,7 @@ test('angular momentum: Σ(m_i r_i×v_i + I_i ω_i) = I ω + r×J, to 1e-10', ()
 // The formula KE_after = KE_before + E_b holds exactly when the parent is at rest
 // (v=0, ω=0). In the lab frame a cross-term v·J + ω·(r×J) appears; the problem
 // statement's energy guarantee is scoped to the rest frame.
-test('energy (rest frame): Σ ½(m_i|v_i|²+I_i ω_i²) = E_b, to 1e-10', () => {
+test('energy (rest frame): Σ ½(m_i|v_i|²+I_i ω_i²) = E_b(R), to 1e-10', () => {
     const restCases = Array.from({ length: 20 }, () => ({
         R:           rand(R_MIN_TWO_CHILD * 1.01, 0.12),
         vx:          0,   // parent at rest
@@ -234,12 +251,12 @@ test('energy (rest frame): Σ ½(m_i|v_i|²+I_i ω_i²) = E_b, to 1e-10', () => 
         bulletAngle: rand(-Math.PI, Math.PI),
     }));
 
-    const E_b = CONFIG.BULLET_KINETIC_ENERGY;
     for (const { R, vx, vy, omega, offsetN, bulletAngle } of restCases) {
         const children = fragment(R, vx, vy, omega, offsetN, bulletAngle);
         const { KE } = sums(children);
 
-        // KE_before = 0 (parent at rest), so expected = E_b.
+        // KE_before = 0 (parent at rest), so expected = effectiveEb(R).
+        const E_b = effectiveEb(R);
         assert.ok(Math.abs(KE - E_b) < 1e-10,
             `KE: got ${KE}, expected ${E_b} (R=${R}, offsetN=${offsetN})`);
     }
@@ -287,7 +304,7 @@ test('one-child branch: when rSmall < MIN_RADIUS, exactly one child with v\', ω
     assert.strictEqual(children.length, 1, `expected 1 child, got ${children.length}`);
 
     // The single child must carry the post-impulse parent velocity v', ω'.
-    const M  = R * R;
+    const M  = CONFIG.ASTEROID_DENSITY * R * R;
     const I  = 0.5 * M * R * R;
     const dx = Math.cos(angle), dy = Math.sin(angle);
     const nx = -dy, ny = dx;
@@ -296,7 +313,7 @@ test('one-child branch: when rSmall < MIN_RADIUS, exactly one child with v\', ω
     const rx  = rxD * dx + b * nx;
     const ry  = rxD * dy + b * ny;
     const leverFactor = 1 + 2 * (b * b) / (R * R);
-    const Jmag = Math.sqrt(2 * M * CONFIG.BULLET_KINETIC_ENERGY * kappa / leverFactor);
+    const Jmag = Math.sqrt(2 * M * effectiveEb(R) * kappa / leverFactor);
     const Jx = Jmag * dx, Jy = Jmag * dy;
     const vxP    = vx + Jx / M;
     const vyP    = vy + Jy / M;
@@ -307,4 +324,74 @@ test('one-child branch: when rSmall < MIN_RADIUS, exactly one child with v\', ω
     assert.ok(Math.abs(c.vx - vxP) < 1e-12,    `c.vx = ${c.vx}, expected ${vxP}`);
     assert.ok(Math.abs(c.vy - vyP) < 1e-12,    `c.vy = ${c.vy}, expected ${vyP}`);
     assert.ok(Math.abs(c.omega - omegaP) < 1e-12, `c.omega = ${c.omega}, expected ${omegaP}`);
+});
+
+// ─── Test 7: Density uniformly damps velocity outcomes by 1/√ρ ──────────────
+// Increasing ASTEROID_DENSITY by k must scale separation/deflection/spin all by 1/√k,
+// because density cancels in conservation laws but reweights M = ρR². Energy is
+// preserved but distributed across more inertia.
+test('asteroid density: 4× density → all velocities scale by 1/√4 = 1/2', () => {
+    const R = 0.08, vx = 0.0, vy = 0.0, omega = 0.0;
+    const offsetN = 0.4, bulletAngle = 0.7;
+
+    const cfg1 = { ...CONFIG, ASTEROID_DENSITY: 1.0, BULLET_ENERGY_SIZE_BLEND: 0 };
+    const cfg4 = { ...CONFIG, ASTEROID_DENSITY: 4.0, BULLET_ENERGY_SIZE_BLEND: 0 };
+
+    const c1 = fragment(R, vx, vy, omega, offsetN, bulletAngle, cfg1);
+    const c4 = fragment(R, vx, vy, omega, offsetN, bulletAngle, cfg4);
+
+    assert.strictEqual(c1.length, c4.length);
+    for (let i = 0; i < c1.length; i++) {
+        // Velocity ratio ρ=4 vs ρ=1 should be exactly 1/2.
+        assert.ok(Math.abs(c4[i].vx - 0.5 * c1[i].vx) < 1e-12,
+            `vx[${i}]: ${c4[i].vx} vs 0.5·${c1[i].vx}`);
+        assert.ok(Math.abs(c4[i].vy - 0.5 * c1[i].vy) < 1e-12,
+            `vy[${i}]: ${c4[i].vy} vs 0.5·${c1[i].vy}`);
+        assert.ok(Math.abs(c4[i].omega - 0.5 * c1[i].omega) < 1e-12,
+            `ω[${i}]: ${c4[i].omega} vs 0.5·${c1[i].omega}`);
+    }
+});
+
+// ─── Test 8: blend=0 reproduces fixed-energy (legacy) behaviour ─────────────
+test('size blend = 0 → effectiveEb is exactly BULLET_KINETIC_ENERGY', () => {
+    const cfg = { ...CONFIG, BULLET_ENERGY_SIZE_BLEND: 0 };
+    for (const R of [0.02, 0.05, 0.083, 0.12]) {
+        assert.strictEqual(effectiveEb(R, cfg), cfg.BULLET_KINETIC_ENERGY,
+            `R=${R}: expected ${cfg.BULLET_KINETIC_ENERGY}, got ${effectiveEb(R, cfg)}`);
+    }
+});
+
+// ─── Test 9: blend=1 → generation-independent separation speed ──────────────
+// With fully size-proportional energy injection, a head-on split of a half-size
+// parent should yield the same per-child separation speed as a full-size parent.
+// This directly verifies that compounding is removed.
+test('size blend = 1 → separation speed is constant across parent radius (head-on)', () => {
+    const cfg = { ...CONFIG, BULLET_ENERGY_SIZE_BLEND: 1.0, ASTEROID_DENSITY: 1.0 };
+    const Rfull = cfg.INITIAL_ASTEROID_RADIUS;
+    const Rhalf = Rfull * 0.5;
+
+    // Use a head-on hit so the rest-frame separation is purely along the bullet axis.
+    const childrenFull = fragment(Rfull, 0, 0, 0, 0, 0, cfg);
+    const childrenHalf = fragment(Rhalf, 0, 0, 0, 0, 0, cfg);
+
+    // Head-on: 50/50 split; |v_child| should be the same regardless of R.
+    const speedFull = Math.hypot(childrenFull[0].vx, childrenFull[0].vy);
+    const speedHalf = Math.hypot(childrenHalf[0].vx, childrenHalf[0].vy);
+    assert.ok(Math.abs(speedFull - speedHalf) < 1e-12,
+        `speed compounds across generations: full=${speedFull}, half=${speedHalf}`);
+});
+
+// ─── Test 10: blend=0 → separation speed compounds as 1/R (legacy regression) ─
+test('size blend = 0 → separation speed scales as 1/R across generations', () => {
+    const cfg = { ...CONFIG, BULLET_ENERGY_SIZE_BLEND: 0, ASTEROID_DENSITY: 1.0 };
+    const Rfull = cfg.INITIAL_ASTEROID_RADIUS;
+    const Rhalf = Rfull * 0.5;
+
+    const speedFull = Math.hypot(...[fragment(Rfull, 0, 0, 0, 0, 0, cfg)[0].vx,
+                                     fragment(Rfull, 0, 0, 0, 0, 0, cfg)[0].vy]);
+    const speedHalf = Math.hypot(...[fragment(Rhalf, 0, 0, 0, 0, 0, cfg)[0].vx,
+                                     fragment(Rhalf, 0, 0, 0, 0, 0, cfg)[0].vy]);
+    // Legacy behaviour: half radius → ~2× separation speed.
+    assert.ok(Math.abs(speedHalf / speedFull - 2.0) < 1e-9,
+        `expected ~2× speed at half R (compounding), got ratio ${speedHalf / speedFull}`);
 });
