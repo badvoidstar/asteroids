@@ -224,9 +224,16 @@
             {
                 key: 'ASTEROID_DENSITY',
                 label: 'Asteroid density',
-                min: 0.1, max: 5, step: 0.05, default: 1.0,
-                fmt: v => v.toFixed(2),
+                min: 0.1, max: 20, step: 0.1, default: 5.0,
+                fmt: v => v.toFixed(1),
                 help: 'M = density · R². Higher density damps separation, deflection and spin uniformly by 1/√density.',
+            },
+            {
+                key: 'BULLET_KINETIC_ENERGY',
+                label: 'Bullet kinetic energy (E_b)',
+                min: 1e-6, max: 1e-3, step: 1e-6, default: 6e-5,
+                fmt: v => v.toExponential(2),
+                help: 'Total energy injected per bullet hit. More E_b = more stopping power, faster separation, more spin. Deflection/spin/separation all scale with √E_b.',
             },
             {
                 key: 'BULLET_ENERGY_SIZE_BLEND',
@@ -238,8 +245,8 @@
             {
                 key: 'SPLIT_KAPPA',
                 label: 'Split kappa (impulse→rigid KE fraction)',
-                min: 0.001, max: 0.5, step: 0.001, default: 0.005,
-                fmt: v => v.toFixed(3),
+                min: 0.0001, max: 0.01, step: 0.0001, default: 0.001,
+                fmt: v => v.toFixed(4),
                 help: 'Fraction of bullet energy → parent deflection + spin. Rest → fragment separation. Lower = less spin/deflection, same separation speed.',
             },
         ];

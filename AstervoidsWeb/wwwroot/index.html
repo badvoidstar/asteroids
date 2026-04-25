@@ -1031,7 +1031,7 @@
         // all conservation laws, so increasing it uniformly scales every velocity outcome
         // of a split (separation, deflection, spin) by 1/√density. Useful for damping
         // compounding speeds across successive splits without changing E_b.
-        ASTEROID_DENSITY: 1.0,
+        ASTEROID_DENSITY: 5.0,
         // Blend [0..1] between fixed and size-proportional bullet energy injection.
         // Effective E_b = BULLET_KINETIC_ENERGY · ((1 − blend) + blend · (R/R_ref)²)
         // where R_ref = INITIAL_ASTEROID_RADIUS. blend=0 reproduces the legacy
@@ -1045,7 +1045,7 @@
         // values keep impact spin visually tame — torque/I grows as 1/R for a
         // fixed-energy impulse. Lowering kappa reduces deflection and spin by
         // √kappa while leaving fragment separation speed essentially unchanged.
-        SPLIT_KAPPA: 0.005,
+        SPLIT_KAPPA: 0.001,
         
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
@@ -2511,6 +2511,7 @@
     // numeric tunables prevents stray messages from mutating arbitrary CONFIG fields.
     const DEBUG_OVERRIDABLE_KEYS = new Set([
         'ASTEROID_DENSITY',
+        'BULLET_KINETIC_ENERGY',
         'BULLET_ENERGY_SIZE_BLEND',
         'SPLIT_KAPPA',
     ]);

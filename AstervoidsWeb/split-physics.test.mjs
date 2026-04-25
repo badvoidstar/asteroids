@@ -33,9 +33,9 @@ const CONFIG = {
     MIN_SPLIT_RATIO: 0.1,
     MIN_ASTEROID_RADIUS: 0.025,
     INITIAL_ASTEROID_RADIUS: 0.083,
-    ASTEROID_DENSITY: 1.0,
+    ASTEROID_DENSITY: 5.0,
     BULLET_ENERGY_SIZE_BLEND: 1.0,
-    SPLIT_KAPPA: 0.005,
+    SPLIT_KAPPA: 0.001,
 };
 
 // kappa is now read from CONFIG.SPLIT_KAPPA (matching the game's CONFIG object).
@@ -86,7 +86,8 @@ function fragment(R, vx, vy, omega, offsetN, bulletAngle, cfg = CONFIG) {
     // Bullet impulse (size-blended energy).
     const E_b         = effectiveEb(R, cfg);
     const leverFactor = 1 + 2 * (b * b) / (R * R);
-    const Jmag        = Math.sqrt(2 * M * E_b * kappa / leverFactor);
+    const k           = cfg.SPLIT_KAPPA;
+    const Jmag        = Math.sqrt(2 * M * E_b * k / leverFactor);
     const Jx = Jmag * dx, Jy = Jmag * dy;
 
     // Post-impulse parent state.
