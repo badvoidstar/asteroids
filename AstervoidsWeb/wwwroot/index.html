@@ -1086,8 +1086,46 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
-        IMPACT_SPIN_FACTOR: 0.02       // Tunable scaling for bullet impact torque on asteroid split
+        IMPACT_SPIN_FACTOR: 0.02,      // Tunable scaling for bullet impact torque on asteroid split
+
+        // Spin-distribution model used by splitAsteroid. Three choices, all share the
+        // same per-child loop and only differ in how rotationSpeed is computed:
+        //
+        //   'explosion' — ω_child = ω_parent ± bulletAM / I_child
+        //                Each child inherits the parent's rotation rate directly (no
+        //                inertia amplification) and receives a full opposite-sign
+        //                bullet kick. Snappiest feel; bullet hits are very visible.
+        //                Strict AM conservation: NO (the "lost" parent AM is implicitly
+        //                carried as orbital AM of the separating fragments, which we
+        //                don't model). No runaway across successive splits.
+        //
+        //   'merged'    — ω_child = ω_parent ± bulletAM / (2·I_child)
+        //                Same inheritance as 'explosion' but with half-magnitude
+        //                bullet kicks (matching the symmetric ±L_b/2 partition).
+        //                Calmer feel; spin changes still always reversible. No runaway.
+        //                Strict AM conservation: NO (same as 'explosion').
+        //
+        //   'rigid'     — ω_child = totalAM / totalChildInertia ± bulletAM / (2·I_child)
+        //                Strict rigid-body angular-momentum conservation: Σ(I·ω) is
+        //                preserved exactly across the split. Because Σ(child I) <
+        //                parent I, each child spins ~2× the parent's ω in a 50/50
+        //                split — i.e. a small initial spin amplifies geometrically
+        //                across generations and can become hard for bullets to flip.
+        //
+        // A/B test via URL: ?spin=explosion | ?spin=merged | ?spin=rigid
+        SPIN_MODEL: 'merged'
     };
+
+    // URL override for SPIN_MODEL so different clients can A/B different models
+    // without rebuilding. Multiplayer-safe: each split is computed by the asteroid's
+    // owner and broadcast to all clients via ObjectSync, so model choice is local
+    // to whichever client owns the asteroid being split.
+    try {
+        const _spinParam = new URLSearchParams(window.location.search).get('spin');
+        if (_spinParam && ['explosion', 'merged', 'rigid'].includes(_spinParam)) {
+            CONFIG.SPIN_MODEL = _spinParam;
+        }
+    } catch (_) { /* non-browser env (tests) */ }
 
     // ============================================
     // SECTION 1B: MULTIPLAYER CONSTANTS
@@ -3537,25 +3575,27 @@
 
         // Spin distribution.
         //
-        // We do NOT strictly conserve I·ω across the split. Naïvely doing so
-        // amplifies parent rotation: I ∝ r⁴, and Σ(child r⁴) < parent r⁴, so
-        // each split would double the inherited ω. After a few hits the
-        // inherited spin dominates the bullet contribution and grows
-        // monotonically, locking the asteroid into one rotation direction
-        // forever. (Physically the missing AM goes into the children's
-        // *orbital* angular momentum about the original CoM, which we don't
-        // model separately here.)
+        // Three models are supported, selected by CONFIG.SPIN_MODEL (see comment in
+        // CONFIG for the full physical rationale of each):
         //
-        // Instead each child inherits the parent's ω directly, then receives
-        // an OPPOSITE-sign bullet kick — impact-side child spins one way,
-        // other child spins the other way. This matches the "explosion"
-        // intuition the original comment described and lets successive hits
-        // freely reverse spin direction.
+        //   'explosion' : ω_child = ω_parent ± bulletAM / I_child
+        //   'merged'    : ω_child = ω_parent ± bulletAM / (2·I_child)
+        //   'rigid'     : ω_child = totalAM / totalChildInertia ± bulletAM / (2·I_child)
         //
-        // impactTorque has units [normalized²/s]; converting to a per-frame
-        // angular impulse requires multiplying by radius² (to bring the
-        // spatial dimension up to inertia units) and dividing by TARGET_FPS.
+        // 'explosion' and 'merged' inherit the parent's rotation rate directly (no
+        // inertia amplification, no runaway) and treat the "missing" parent AM as
+        // implicit orbital AM of the separating fragments. 'rigid' enforces strict
+        // Σ(I·ω) conservation, at the cost of geometric per-split spin amplification.
+        //
+        // impactTorque has units [normalized²/s]; converting to a per-frame angular
+        // impulse requires multiplying by radius² (to bring the spatial dimension up
+        // to inertia units) and dividing by TARGET_FPS.
         const bulletAngularMomentum = impactTorque * asteroid.radius ** 2 / CONFIG.TARGET_FPS * CONFIG.IMPACT_SPIN_FACTOR;
+        // Used only by the 'rigid' model. Cheap to compute unconditionally; keeps
+        // the model selection a single switch inside the per-child loop.
+        const parentAngularMomentum = asteroid.radius ** 4 * asteroid.rotationSpeed;
+        const totalAngularMomentum = parentAngularMomentum + bulletAngularMomentum;
+        const totalChildInertia = childSpecs.reduce((sum, c) => sum + c.radius ** 4, 0);
 
         // Blend amount for per-child launch-direction axis: 0 at head-on (pure split
         // axis), 1 at fully grazing (pure parent direction). Scales linearly with
@@ -3605,19 +3645,25 @@
                 dirY * childSpeed
             );
 
-            // Override random spin: each child inherits parent's ω directly
-            // (no inertia-amplification doubling), then gets an opposite-sign
-            // bullet kick so impact-side and far-side spin in opposite
-            // directions. Magnitude scales as bulletAM / I_child so smaller
-            // (impact-side) pieces spin faster from the same impulse.
+            // Distribute spin per CONFIG.SPIN_MODEL. See the SPIN_MODEL comment
+            // in CONFIG for full physical rationale of each model.
             const childInertia = childRadius ** 4;
-            if (childSpecs.length === 2) {
-                const kickSign = index === 0 ? 1 : -1;
-                childAsteroid.rotationSpeed = asteroid.rotationSpeed
-                    + kickSign * bulletAngularMomentum / childInertia;
-            } else {
+            const sign = (index === 0) ? 1 : -1;
+            if (childSpecs.length === 1 || totalChildInertia <= 0) {
+                // Only one child survived (or pathological inertia): no asymmetric
+                // partner to absorb the opposite kick, so just inherit + full kick.
                 childAsteroid.rotationSpeed = asteroid.rotationSpeed
                     + bulletAngularMomentum / childInertia;
+            } else if (CONFIG.SPIN_MODEL === 'rigid') {
+                childAsteroid.rotationSpeed = totalAngularMomentum / totalChildInertia
+                    + sign * bulletAngularMomentum / (2 * childInertia);
+            } else if (CONFIG.SPIN_MODEL === 'merged') {
+                childAsteroid.rotationSpeed = asteroid.rotationSpeed
+                    + sign * bulletAngularMomentum / (2 * childInertia);
+            } else {
+                // 'explosion' (default fallback for any unknown value)
+                childAsteroid.rotationSpeed = asteroid.rotationSpeed
+                    + sign * bulletAngularMomentum / childInertia;
             }
             childAsteroid.angle = asteroid.angle;
 
