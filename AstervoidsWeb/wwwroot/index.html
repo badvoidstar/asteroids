@@ -3454,10 +3454,13 @@
         // Bullet impulse magnitude from E_b via inelastic-collision identity:
         //   ΔE_rigid = |J|²/(2M) · (1 + 2b²/R²)   for a disk
         // kappa = fraction of E_b that goes into parent rigid-body KE (deflection + spin);
-        // the remainder (1 − kappa) becomes fragment separation energy E_sep. 0.15 is
-        // chosen so most of the bullet's energy fragments the rock while a small but
-        // perceptible slice deflects/spins it; feels equivalent to ~15% inelastic coupling.
-        const kappa = 0.15;
+        // the remainder (1 − kappa) becomes fragment separation energy E_sep. Tuned low
+        // (0.02) so impact spin matches the visual feel of the previous implementation —
+        // small radii would otherwise produce uncomfortably high ω because torque/I
+        // grows as 1/R for a fixed-energy impulse. Lowering kappa reduces both deflection
+        // and spin proportionally to √kappa, while leaving fragment separation speed
+        // (which scales with √(1−kappa)·E_b ≈ √E_b) essentially unchanged.
+        const kappa = 0.02;
         const E_b   = CONFIG.BULLET_KINETIC_ENERGY;
         const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
         const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);

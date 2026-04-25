@@ -34,7 +34,7 @@ const CONFIG = {
 // these tests independent of the browser environment, matching the pattern of the
 // old spin-physics.test.mjs. It must be kept in sync with the hard-coded constant
 // in splitAsteroid() in AstervoidsWeb/wwwroot/index.html.
-const kappa = 0.15;  // fraction of E_b → parent rigid KE (hard-coded in splitAsteroid)
+const kappa = 0.02;  // fraction of E_b → parent rigid KE (hard-coded in splitAsteroid)
 
 /**
  * Core fragmentation math, extracted from splitAsteroid().
