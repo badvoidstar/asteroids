@@ -231,14 +231,14 @@
             {
                 key: 'DEFLECTION_KICK',
                 label: 'Deflection kick (head-on Δv_COM)',
-                min: 0, max: 5e-3, step: 1e-5, default: 6e-4,
+                min: 0, max: 5e-3, step: 1e-5, default: 1e-3,
                 fmt: v => v.toExponential(2),
                 help: 'Head-on parent COM Δv per bullet hit (refdim/s). Higher = more trajectory deflection and induced spin. Independent of separation: changes only how the parent body bends, never how far children fly apart.',
             },
             {
                 key: 'SEPARATION_ENERGY',
                 label: 'Separation energy (E_sep)',
-                min: 0, max: 1e-3, step: 1e-6, default: 6e-5,
+                min: 0, max: 1e-3, step: 1e-6, default: 1e-4,
                 fmt: v => v.toExponential(2),
                 help: 'Energy released into fragment separation per hit (refdim²/s²). Higher = children fly apart faster. Separation speed scales with √E_sep / √(ρR²). Independent of deflection.',
             },

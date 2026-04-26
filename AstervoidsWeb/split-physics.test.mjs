@@ -36,8 +36,8 @@ import assert from 'node:assert/strict';
 // Keep these constants and formulas in sync with AstervoidsWeb/wwwroot/index.html.
 
 const CONFIG = {
-    DEFLECTION_KICK: 6e-4,
-    SEPARATION_ENERGY: 6e-5,
+    DEFLECTION_KICK: 1e-3,
+    SEPARATION_ENERGY: 1e-4,
     MIN_SPLIT_RATIO: 0.1,
     MIN_ASTEROID_RADIUS: 0.025,
     INITIAL_ASTEROID_RADIUS: 0.083,
