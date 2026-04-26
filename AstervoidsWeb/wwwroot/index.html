@@ -1026,31 +1026,41 @@
         // Asteroid splitting
         SPLIT_COUNT: 2,             // Always split into 2 pieces
         MIN_SPLIT_RATIO: 0.1,       // Smallest piece is at least 10% of original (area fraction)
-        // Bullet kinetic energy delivered per hit, in (normalized reference-dim per second)².
-        // Single tunable controlling impact "punchiness". Total fragment KE = parent KE + this.
-        // Default chosen so a typical hit on a stationary medium asteroid (R≈0.05) gives each
-        // fragment a separation speed comparable to ASTEROID_BASE_SPEED (~0.15/s):
-        //   E ≈ R²·v_sep² ≈ 0.05²·0.15² ≈ 6e-5
-        BULLET_KINETIC_ENERGY: 6e-5,
-        // Asteroid disk density. Mass is M = ASTEROID_DENSITY · R². Density cancels in
-        // all conservation laws, so increasing it uniformly scales every velocity outcome
-        // of a split (separation, deflection, spin) by 1/√density. Useful for damping
-        // compounding speeds across successive splits without changing E_b.
+        // Parent COM deflection-velocity kick imparted by a bullet hit, in normalized
+        // reference-dim per second. The bullet impulse is J = M · DEFLECTION_KICK along
+        // the bullet direction, so a head-on hit changes the parent's COM velocity by
+        // exactly this amount independent of mass, density, or radius. A grazing hit
+        // delivers the same impulse but distributes it between linear deflection and
+        // induced spin via the lever arm (Δω = (r×J)/I), so |ΔvCOM| stays equal to
+        // DEFLECTION_KICK while |Δω| scales as ~1/R. Default tuned so head-on deflection
+        // matches the previous κ=1e-4 / E_b=6e-5 / ρ=5 / R=R_ref combination (~6e-4).
+        // Independent of SEPARATION_ENERGY: tuning this knob changes only how much the
+        // parent's trajectory bends, never how far the children fly apart.
+        DEFLECTION_KICK: 6e-4,
+        // Asteroid disk density. Mass is M = ASTEROID_DENSITY · R². With the
+        // independent-knob model, density still scales separation speed by 1/√density
+        // (since separation derives from a fixed energy released into a mass-dependent
+        // formula), but DEFLECTION_KICK is a velocity kick so deflection and induced
+        // spin are now density-INDEPENDENT. Useful for damping compounding separation
+        // speeds across successive splits without affecting deflection feel.
         ASTEROID_DENSITY: 5.0,
-        // Blend [0..1] between fixed and size-proportional bullet energy injection.
-        // Effective E_b = BULLET_KINETIC_ENERGY · ((1 − blend) + blend · (R/R_ref)²)
+        // Blend [0..1] between fixed and size-proportional separation-energy injection.
+        // Effective E_sep = SEPARATION_ENERGY · ((1 − blend) + blend · (R/R_ref)²)
         // where R_ref = INITIAL_ASTEROID_RADIUS. blend=0 reproduces the legacy
-        // "constant energy per hit" behaviour (which causes separation/spin to compound
+        // "constant energy per hit" behaviour (which causes separation to compound
         // as 1/R across splits). blend=1 makes injected energy proportional to parent
-        // cross-section (≈ mass), which yields generation-independent separation speed
-        // and tames child spin from 1/R² → 1/R.
-        BULLET_ENERGY_SIZE_BLEND: 0.0,
-        // Fraction of E_b that goes into parent rigid-body KE (deflection + spin);
-        // the remainder (1 − kappa) becomes fragment separation energy E_sep. Low
-        // values keep impact spin visually tame — torque/I grows as 1/R for a
-        // fixed-energy impulse. Lowering kappa reduces deflection and spin by
-        // √kappa while leaving fragment separation speed essentially unchanged.
-        SPLIT_KAPPA: 0.0001,
+        // cross-section (≈ mass), which yields generation-independent separation speed.
+        // Applies only to SEPARATION_ENERGY; DEFLECTION_KICK is a velocity scalar and
+        // is already invariant under R changes.
+        SEPARATION_ENERGY_SIZE_BLEND: 0.0,
+        // Fragment separation energy released per bullet hit, in (normalized
+        // reference-dim per second)². The two children fly apart along the impact-side
+        // normal with relative speed determined by s = √(2·E_sep·m_l/(m_s·M)).
+        // Because this is now decoupled from the bullet's impulse, the model no longer
+        // enforces "total injected KE = bullet KE"; it instead lets you tune deflection
+        // and separation independently. Default chosen so per-hit separation matches
+        // the previous κ=1e-4 / (1−κ)·E_b ≈ 6e-5 budget.
+        SEPARATION_ENERGY: 6e-5,
         // Weighting factor [0..1] applied to |offsetN| when computing the mass-split
         // ratio. With bias=1 the mass split follows the geometric formula
         //   fSmall = max(MIN_SPLIT_RATIO, 0.5·(1 − |offsetN|))
@@ -2600,9 +2610,9 @@
     // numeric tunables prevents stray messages from mutating arbitrary CONFIG fields.
     const DEBUG_OVERRIDABLE_KEYS = new Set([
         'ASTEROID_DENSITY',
-        'BULLET_KINETIC_ENERGY',
-        'BULLET_ENERGY_SIZE_BLEND',
-        'SPLIT_KAPPA',
+        'DEFLECTION_KICK',
+        'SEPARATION_ENERGY',
+        'SEPARATION_ENERGY_SIZE_BLEND',
         'MASS_SPLIT_BIAS',
     ]);
     debugChannel.onmessage = (event) => {
@@ -3532,14 +3542,20 @@
     }
 
     /**
-     * Split an asteroid using a closed-form rigid-body fragmentation model.
+     * Split an asteroid using a closed-form rigid-body fragmentation model with
+     * **independent** deflection and separation knobs (no shared energy budget).
      *
      * Conservation guarantees (in the parent's pre-impact rest frame):
      *   • Linear momentum:   Σ m_i v_i  = M v + J                      (exact)
      *   • Angular momentum:  Σ (m_i r_i×v_i + I_i ω_i) = I ω + r×J   (exact, parallel-axis)
-     *   • Energy:            Σ ½(m_i|v_i|² + I_i ω_i²) = ½M|v|² + ½Iω² + E_b  (exact)
+     *   • Energy:            NOT conserved as a single budget; instead the bullet
+     *     injects two independently-specified KE quantities into the system:
+     *       ΔKE_rigid = ½·M·v_kick²·(1 + 2b²/R²)   from the deflection impulse
+     *       E_sep     = SEPARATION_ENERGY · sizeMul   into fragment separation
      *
-     * Single configurable parameter: CONFIG.BULLET_KINETIC_ENERGY (E_b).
+     * Two configurable parameters (orthogonal):
+     *   • CONFIG.DEFLECTION_KICK    — head-on parent COM Δv (refdim/s); J = M·v_kick·d̂
+     *   • CONFIG.SEPARATION_ENERGY  — energy released into fragment separation (refdim²/s²)
      *
      * @param {Asteroid} asteroid
      * @param {string|null} childOwnerMemberId
@@ -3580,31 +3596,29 @@
         const rx  = rxD * dx + rxN * nx;
         const ry  = rxD * dy + rxN * ny;
 
-        // Bullet impulse magnitude from E_b via inelastic-collision identity:
-        //   ΔE_rigid = |J|²/(2M) · (1 + 2b²/R²)   for a disk
-        const kappa = Math.max(1e-6, Math.min(1, CONFIG.SPLIT_KAPPA));
-        // Effective bullet energy: blend between fixed and size-proportional. With blend=0
-        // E_b is constant per hit (legacy); with blend=1 E_b ∝ R² (injected energy scales
-        // with parent cross-section / mass, yielding generation-independent separation
-        // speed). R_ref = INITIAL_ASTEROID_RADIUS so a freshly-spawned asteroid receives
-        // exactly CONFIG.BULLET_KINETIC_ENERGY at any blend.
-        const blend = Math.max(0, Math.min(1, CONFIG.BULLET_ENERGY_SIZE_BLEND));
+        // Bullet impulse magnitude is set directly by the deflection-kick velocity
+        // scalar: J = M · v_kick. This makes head-on parent ΔvCOM = v_kick exactly,
+        // independent of M, ρ, and R. (Grazing hits redistribute J between linear and
+        // angular response via the lever arm but |J| is unchanged.)
+        const vKick = Math.max(0, CONFIG.DEFLECTION_KICK);
+        // Effective separation energy: blend between fixed and size-proportional.
+        // With blend=0 E_sep is constant per hit (legacy); with blend=1 E_sep ∝ R²
+        // (injected energy scales with parent cross-section / mass, yielding
+        // generation-independent separation speed). R_ref = INITIAL_ASTEROID_RADIUS so
+        // a freshly-spawned asteroid receives exactly CONFIG.SEPARATION_ENERGY at any
+        // blend.
+        const blend = Math.max(0, Math.min(1, CONFIG.SEPARATION_ENERGY_SIZE_BLEND));
         const Rref  = CONFIG.INITIAL_ASTEROID_RADIUS;
         const sizeMul = (1 - blend) + blend * (R / Rref) * (R / Rref);
-        const E_b   = CONFIG.BULLET_KINETIC_ENERGY * sizeMul;
-        const leverFactor = 1 + 2 * (b * b) / (R * R);   // 1 head-on → 3 grazing
-        const Jmag  = Math.sqrt(2 * M * E_b * kappa / leverFactor);
-        const Jx    = Jmag * dx, Jy = Jmag * dy;
+        const E_sep   = Math.max(0, CONFIG.SEPARATION_ENERGY) * sizeMul;
+        const Jmag    = M * vKick;
+        const Jx      = Jmag * dx, Jy = Jmag * dy;
 
         // Post-impulse parent state.
         const vxP    = asteroid.velocityX + Jx / M;
         const vyP    = asteroid.velocityY + Jy / M;
         const torque = rx * Jy - ry * Jx;                // r × J  (scalar in 2D)
         const omegaP = (asteroid.rotationSpeed || 0) + torque / I;
-
-        // Energy left for fragment separation.
-        const dE_rigid = (Jmag * Jmag) / (2 * M) * leverFactor;
-        const E_sep    = Math.max(0, E_b - dE_rigid);
 
         // Mass split: bias=1 → 50/50 head-on, skewed for glancing; bias=0 → always 50/50.
         const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
