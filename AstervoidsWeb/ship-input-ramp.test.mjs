@@ -25,8 +25,8 @@ test('returns target immediately when current === target', () => {
     assert.equal(rampInputToward(-1, -1, 0.5, 0.5, FRAME_60), -1);
 });
 
-test('zero accel/decel time snaps instantly (default thrust mirrors prior behavior)', () => {
-    // Default thrust ramp times are 0 → behavior must be identical to a binary toggle.
+test('zero accel/decel time snaps instantly (legacy behavior)', () => {
+    // time = 0 → behavior identical to a binary toggle.
     assert.equal(rampInputToward(0, 1, 0, 0, FRAME_60), 1);
     assert.equal(rampInputToward(1, 0, 0, 0, FRAME_60), 0);
     assert.equal(rampInputToward(0.4, 1, 0, 0, FRAME_60), 1);

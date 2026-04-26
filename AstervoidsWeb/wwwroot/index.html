@@ -1001,12 +1001,11 @@
         SHIP_FRICTION: 0.99,        // Velocity decay (1 = no friction)
         SHIP_TURN_SPEED: 0.08,      // Rotation speed in radians per frame
         SHIP_MAX_SPEED: 0.8,        // Maximum velocity per second (normalized)
-        // Input ramping: time in seconds for the input scalar (0..1) driving rotation/thrust
-        // to ramp up to or down from full magnitude. 0 = instantaneous.
-        SHIP_TURN_ACCEL_TIME: 0.5,  // Seconds to ramp turn input from 0 -> ±1
-        SHIP_TURN_DECEL_TIME: 0.5,  // Seconds to ramp turn input from ±1 -> 0
-        SHIP_THRUST_ACCEL_TIME: 0,  // Seconds to ramp thrust input from 0 -> 1 (default mirrors prior instant behavior)
-        SHIP_THRUST_DECEL_TIME: 0,  // Seconds to ramp thrust input from 1 -> 0 (default mirrors prior instant behavior)
+        // Turning input ramping: time in seconds for the ship's angular speed to
+        // ramp up from 0 to ±SHIP_TURN_SPEED (accel) or back down to 0 (decel).
+        // 0 = instantaneous (legacy behavior).
+        SHIP_TURN_ACCEL_TIME: 0.5,  // Seconds for rotation speed: 0 -> ±SHIP_TURN_SPEED
+        SHIP_TURN_DECEL_TIME: 0.5,  // Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
         
         // Bullet settings (normalized)
         BULLET_SPEED: 1.0,          // Bullet speed per second (normalized)
@@ -1921,13 +1920,13 @@
             this.velocityX = 0;            // Normalized horizontal velocity (per second)
             this.velocityY = 0;            // Normalized vertical velocity (per second)
             this.rotationSpeed = 0;        // Current rotation speed (radians per frame at 60fps)
-            this.thrusting = false;        // Is thrust active? (derived from thrustInput > 0)
-            // Input ramping state. Targets are set by handleInput each frame; the *Input
-            // values ramp toward them in update() according to CONFIG.SHIP_*_ACCEL/DECEL_TIME.
+            this.thrusting = false;        // Is thrust active?
+            // Turn-input ramping: handleInput sets turnTarget ∈ {-1, 0, +1}; Ship.update
+            // ramps turnInput toward it over CONFIG.SHIP_TURN_ACCEL/DECEL_TIME, then sets
+            // rotationSpeed = SHIP_TURN_SPEED * turnInput. Thrust is intentionally NOT ramped:
+            // it remains a binary on/off applying constant linear acceleration when active.
             this.turnTarget = 0;           // Desired turn input: -1 (left), 0, or +1 (right)
             this.turnInput = 0;            // Current ramped turn input in [-1, 1]
-            this.thrustTarget = 0;         // Desired thrust input: 0 or 1
-            this.thrustInput = 0;          // Current ramped thrust input in [0, 1]
             this.invulnerable = 0;         // Invulnerability frames remaining
             this.shootCooldown = 0;        // Frames until can shoot again
             this.colorIndex = colorIndex;  // Player color index (0-3)
@@ -2013,11 +2012,8 @@
         resetControls() {
             this.turnTarget = 0;
             this.turnInput = 0;
-            this.thrustTarget = 0;
-            this.thrustInput = 0;
             this.rotationSpeed = 0;
             this.thrusting = false;
-            this._wasThrustPressed = false;
         }
 
         /**
@@ -2026,7 +2022,7 @@
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
         update(dt = 1) {
-            // Ramp input scalars toward their targets so rotation/thrust ease in & out.
+            // Ramp turn input toward its target so angular speed eases in & out.
             // dt is in 60fps frames; convert to seconds for the configured ramp times.
             const dtSec = dt / CONFIG.TARGET_FPS;
             this.turnInput = rampInputToward(
@@ -2034,29 +2030,20 @@
                 CONFIG.SHIP_TURN_ACCEL_TIME, CONFIG.SHIP_TURN_DECEL_TIME,
                 dtSec
             );
-            this.thrustInput = rampInputToward(
-                this.thrustInput, this.thrustTarget,
-                CONFIG.SHIP_THRUST_ACCEL_TIME, CONFIG.SHIP_THRUST_DECEL_TIME,
-                dtSec
-            );
 
             // Apply rotation from ramped turn input
             this.rotationSpeed = CONFIG.SHIP_TURN_SPEED * this.turnInput;
             this.angle += this.rotationSpeed * dt;
-
-            // Derive thrusting flag for visuals/audio/sync from ramped thrust input
-            this.thrusting = this.thrustInput > 0;
 
             // Apply friction to slow down gradually (adjust for delta time)
             const friction = Math.pow(CONFIG.SHIP_FRICTION, dt);
             this.velocityX *= friction;
             this.velocityY *= friction;
 
-            // Apply thrust in facing direction (normalized acceleration), scaled by ramped input
-            if (this.thrustInput > 0) {
-                const t = CONFIG.SHIP_THRUST * this.thrustInput * dt;
-                this.velocityX += Math.cos(this.angle) * t;
-                this.velocityY += Math.sin(this.angle) * t;
+            // Apply thrust in facing direction (normalized acceleration) — instantaneous on/off
+            if (this.thrusting) {
+                this.velocityX += Math.cos(this.angle) * CONFIG.SHIP_THRUST * dt;
+                this.velocityY += Math.sin(this.angle) * CONFIG.SHIP_THRUST * dt;
             }
             
             // Limit to max speed (in reference-dimension per second).
@@ -3777,17 +3764,14 @@
             game.ship.turnTarget = 0;
         }
 
-        // Thrust target. Ship.update() ramps thrustInput and derives `thrusting` (visuals/sync).
-        const thrustPressed = input.thrust();
-        const wasThrustPressed = game.ship._wasThrustPressed === true;
-        game.ship.thrustTarget = thrustPressed ? 1 : 0;
-        game.ship._wasThrustPressed = thrustPressed;
+        // Thrust — instantaneous on/off (unchanged from original behavior)
+        const wasThrusting = game.ship.thrusting;
+        game.ship.thrusting = input.thrust();
 
-        // Handle thrust sound — keyed off the input button so audio matches user action
-        // exactly regardless of any thrust accel/decel ramp configuration.
-        if (thrustPressed && !wasThrustPressed) {
+        // Handle thrust sound
+        if (game.ship.thrusting && !wasThrusting) {
             AudioSystem.thrustSound.start();
-        } else if (!thrustPressed && wasThrustPressed) {
+        } else if (!game.ship.thrusting && wasThrusting) {
             AudioSystem.thrustSound.stop();
         }
         
