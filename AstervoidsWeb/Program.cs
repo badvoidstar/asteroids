@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using AstervoidsWeb.Configuration;
 using AstervoidsWeb.Formatters;
 using AstervoidsWeb.Hubs;
@@ -77,6 +78,57 @@ var app = builder.Build();
 
 app.UseResponseCompression();
 app.UseDefaultFiles();
+
+// Build a content-hash ETag table once at startup.
+// SHA-256 of each file's bytes → first 16 bytes hex-encoded → stable ETag.
+// Unlike ASP.NET Core's default mtime-derived ETag, this is unchanged across deploys
+// when the file content hasn't changed (mtime is reset by `dotnet publish` / COPY).
+var webRoot = app.Environment.WebRootPath;
+var etags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+if (!string.IsNullOrEmpty(webRoot) && Directory.Exists(webRoot))
+{
+    foreach (var filePath in Directory.EnumerateFiles(webRoot, "*", SearchOption.AllDirectories))
+    {
+        using var fs = File.OpenRead(filePath);
+        var hash = SHA256.HashData(fs);
+        var rel = "/" + Path.GetRelativePath(webRoot, filePath).Replace('\\', '/');
+        etags[rel] = "\"" + Convert.ToHexString(hash, 0, 16).ToLowerInvariant() + "\"";
+    }
+}
+
+// ETag + Cache-Control middleware.
+// Placed after UseDefaultFiles (so "/" is already rewritten to "/index.html")
+// and before UseStaticFiles (which serves the body on 200 responses).
+// - Sets Cache-Control: no-cache so the browser revalidates on every launch.
+// - Returns 304 when If-None-Match matches the content-hash ETag (no body transfer).
+// - Non-static paths (SignalR, API) are not in the etags table and pass through unchanged.
+app.Use(async (context, next) =>
+{
+    var method = context.Request.Method;
+    if ((method == HttpMethods.Get || method == HttpMethods.Head)
+        && etags.TryGetValue(context.Request.Path.Value ?? "", out var etag))
+    {
+        context.Response.Headers.ETag = etag;
+        context.Response.Headers.CacheControl = "no-cache";
+
+        var ifNoneMatch = context.Request.Headers.IfNoneMatch.ToString();
+        if (!string.IsNullOrEmpty(ifNoneMatch))
+        {
+            // If-None-Match may contain a comma-separated list of ETags (RFC 9110 §13.1.2).
+            // Return 304 if any supplied tag matches our content-hash ETag.
+            var clientTags = ifNoneMatch.Split(',',
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (clientTags.Any(t => t == etag))
+            {
+                context.Response.StatusCode = StatusCodes.Status304NotModified;
+                context.Response.Headers.Remove("Content-Type");
+                return;
+            }
+        }
+    }
+    await next(context);
+});
+
 app.UseStaticFiles();
 
 // Map SignalR hub
@@ -87,3 +139,6 @@ app.MapGet("/api/srvmon", (ServerMetricsService metrics, ISessionService session
     Results.Ok(metrics.GetSnapshot(sessionService)));
 
 app.Run();
+
+// Make Program accessible to integration tests (WebApplicationFactory<Program>).
+public partial class Program { }
