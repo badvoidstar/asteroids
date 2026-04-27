@@ -1036,7 +1036,7 @@
         // matches the previous κ=1e-4 / E_b=6e-5 / ρ=5 / R=R_ref combination (~6e-4).
         // Independent of SEPARATION_ENERGY: tuning this knob changes only how much the
         // parent's trajectory bends, never how far the children fly apart.
-        DEFLECTION_KICK: 1e-3,
+        DEFLECTION_KICK: 2.00e-3,
         // Asteroid disk density. Mass is M = ASTEROID_DENSITY · R². With the
         // independent-knob model, density still scales separation speed by 1/√density
         // (since separation derives from a fixed energy released into a mass-dependent
@@ -1060,7 +1060,7 @@
         // enforces "total injected KE = bullet KE"; it instead lets you tune deflection
         // and separation independently. Default chosen so per-hit separation matches
         // the previous κ=1e-4 / (1−κ)·E_b ≈ 6e-5 budget.
-        SEPARATION_ENERGY: 3.00e-4,
+        SEPARATION_ENERGY: 2.00e-4,
         // Weighting factor [0..1] applied to |offsetN| when computing the mass-split
         // ratio. With bias=1 the mass split follows the geometric formula
         //   fSmall = max(MIN_SPLIT_RATIO, 0.5·(1 − |offsetN|))
