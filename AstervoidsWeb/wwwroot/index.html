@@ -1004,8 +1004,8 @@
         // Turning input ramping: time in seconds for the ship's angular speed to
         // ramp up from 0 to ±SHIP_TURN_SPEED (accel) or back down to 0 (decel).
         // 0 = instantaneous (legacy behavior).
-        SHIP_TURN_ACCEL_TIME: 0.125,// Seconds for rotation speed: 0 -> ±SHIP_TURN_SPEED
-        SHIP_TURN_DECEL_TIME: 0.25, // Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
+        SHIP_TURN_ACCEL_TIME: 0.0,  // Seconds for rotation speed: 0 -> ±SHIP_TURN_SPEED
+        SHIP_TURN_DECEL_TIME: 0.125,// Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
         
         // Bullet settings (normalized)
         BULLET_SPEED: 1.0,          // Bullet speed per second (normalized)
@@ -1052,7 +1052,7 @@
         // cross-section (≈ mass), which yields generation-independent separation speed.
         // Applies only to SEPARATION_ENERGY; DEFLECTION_KICK is a velocity scalar and
         // is already invariant under R changes.
-        SEPARATION_ENERGY_SIZE_BLEND: 0.0,
+        SEPARATION_ENERGY_SIZE_BLEND: 1.0,
         // Fragment separation energy released per bullet hit, in (normalized
         // reference-dim per second)². The two children fly apart along the impact-side
         // normal with relative speed determined by s = √(2·E_sep·m_l/(m_s·M)).
@@ -1060,7 +1060,7 @@
         // enforces "total injected KE = bullet KE"; it instead lets you tune deflection
         // and separation independently. Default chosen so per-hit separation matches
         // the previous κ=1e-4 / (1−κ)·E_b ≈ 6e-5 budget.
-        SEPARATION_ENERGY: 1e-4,
+        SEPARATION_ENERGY: 3.00e-4,
         // Weighting factor [0..1] applied to |offsetN| when computing the mass-split
         // ratio. With bias=1 the mass split follows the geometric formula
         //   fSmall = max(MIN_SPLIT_RATIO, 0.5·(1 − |offsetN|))
@@ -1094,7 +1094,7 @@
         // wrapping. Solo mode uses game.ship; multiplayer resolves the shooter
         // by memberId across the local ship and remoteShips.
         DEFLECTION_TIME_LIMIT: 0.5,
-        DEFLECTION_SCALE: 1.0,
+        DEFLECTION_SCALE: 1.2,
 
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
