@@ -82,22 +82,67 @@
             font-style: italic;
             font-size: 0.9rem;
         }
+
+        .config-control {
+            margin-bottom: 14px;
+        }
+
+        .config-control label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9rem;
+            color: #ccc;
+            margin-bottom: 4px;
+        }
+
+        .config-control .config-value {
+            color: #00ff00;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .config-control input[type=range] {
+            width: 100%;
+            accent-color: #00ff00;
+        }
+
+        .config-control .config-help {
+            font-size: 0.75rem;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        button.config-reset {
+            background: transparent;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 4px 10px;
+            font-family: inherit;
+            font-size: 0.85rem;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+
+        button.config-reset:hover {
+            background: #00ff0022;
+        }
     </style>
 </head>
 <body>
     <h1>Astervoids Debug</h1>
     <div id="session-label"></div>
-    <div id="no-data">Waiting for game data…</div>
 
-    <div class="columns" id="columns" style="display: none;">
+    <div class="columns" id="columns">
         <div class="column" id="runtime-column">
             <h2>Runtime Metrics</h2>
+            <div id="no-data" class="placeholder-text">Waiting for game data…</div>
             <ul class="metric-list" id="core-metrics"></ul>
             <div id="member-section"></div>
         </div>
         <div class="column">
             <h2>Configuration</h2>
-            <p class="placeholder-text">Editable values will appear here in a future update.</p>
+            <div id="config-panel"></div>
+            <button class="config-reset" id="config-reset" type="button">Reset to defaults</button>
+            <p class="config-help" style="margin-top:8px;">Overrides apply live and persist in this browser. They take effect on the next asteroid split.</p>
         </div>
     </div>
 
@@ -164,13 +209,139 @@
         channel.onmessage = (event) => {
             const data = event.data;
             noDataEl.style.display = 'none';
-            columnsEl.style.display = '';
             if (data.sessionName) {
                 sessionLabelEl.textContent = `Session: ${data.sessionName}`;
             }
             renderCoreMetrics(data);
             renderMemberMetrics(data.members || {}, data.myMemberId || '');
         };
+
+        // ─── Configuration overrides ────────────────────────────────────────
+        // Sliders push { type:'config-update', key, value } to the game over the
+        // same BroadcastChannel. Values persist in localStorage and are re-broadcast
+        // on load so a page refresh (game or debug) doesn't drop the user's tuning.
+        const CONFIG_DEFS = [
+            {
+                key: 'ASTEROID_DENSITY',
+                label: 'Asteroid density',
+                min: 0.1, max: 20, step: 0.1, default: 5.0,
+                fmt: v => v.toFixed(1),
+                help: 'M = density · R². With independent deflection/separation knobs, density damps only separation by 1/√density (deflection and spin are velocity-driven and density-independent).',
+            },
+            {
+                key: 'DEFLECTION_KICK',
+                label: 'Deflection kick (head-on Δv_COM)',
+                min: 0, max: 5e-3, step: 1e-5, default: 1e-3,
+                fmt: v => v.toExponential(2),
+                help: 'Head-on parent COM Δv per bullet hit (refdim/s). Higher = more trajectory deflection and induced spin. Independent of separation: changes only how the parent body bends, never how far children fly apart.',
+            },
+            {
+                key: 'SEPARATION_ENERGY',
+                label: 'Separation energy (E_sep)',
+                min: 0, max: 1e-3, step: 1e-6, default: 3.00e-4,
+                fmt: v => v.toExponential(2),
+                help: 'Energy released into fragment separation per hit (refdim²/s²). Higher = children fly apart faster. Separation speed scales with √E_sep / √(ρR²). Independent of deflection.',
+            },
+            {
+                key: 'SEPARATION_ENERGY_SIZE_BLEND',
+                label: 'Separation energy size blend',
+                min: 0, max: 1, step: 0.01, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: '0 = fixed E_sep per hit (legacy, separation compounds across splits). 1 = E_sep ∝ R² (generation-independent separation speed).',
+            },
+            {
+                key: 'MASS_SPLIT_BIAS',
+                label: 'Mass split bias (offset → asymmetry)',
+                min: 0, max: 1, step: 0.01, default: 0.75,
+                fmt: v => v.toFixed(2),
+                help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
+            },
+            {
+                key: 'DEFLECTION_TIME_LIMIT',
+                label: 'Shooter-deflection time limit (s)',
+                min: 0.05, max: 5, step: 0.05, default: 0.5,
+                fmt: v => `${v.toFixed(2)} s`,
+                help: 'Time horizon over which a fragment must be steered off a collision course with the ship that fired the destroying shot. Required Δv = (target_miss − d_close) / max(t_close, T) — larger T tightens the impulse cap (gentler max deflection); smaller T allows larger impulses for imminent collisions.',
+            },
+            {
+                key: 'DEFLECTION_SCALE',
+                label: 'Shooter-deflection scale',
+                min: 0, max: 3, step: 0.05, default: 1.2,
+                fmt: v => v.toFixed(2),
+                help: '0 = feature disabled (no extra impulse). 1 = just enough to graze the ship\'s collision radius. >1 = miss by extra margin (target miss = scale · R_sum).',
+            },
+        ];
+
+        const STORAGE_KEY = 'astervoids-debug-config';
+        const overrides = (() => {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                return raw ? JSON.parse(raw) : {};
+            } catch { return {}; }
+        })();
+
+        function persistOverrides() {
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides)); } catch { /* ignore */ }
+        }
+
+        function broadcastOverride(key, value) {
+            channel.postMessage({ type: 'config-update', key, value });
+        }
+
+        function buildConfigPanel() {
+            const panel = document.getElementById('config-panel');
+            panel.innerHTML = '';
+            for (const def of CONFIG_DEFS) {
+                const initial = overrides[def.key] ?? def.default;
+                const wrap = document.createElement('div');
+                wrap.className = 'config-control';
+                wrap.innerHTML = `
+                    <label for="cfg-${def.key}">
+                        <span>${def.label}</span>
+                        <span class="config-value" id="cfg-val-${def.key}">${def.fmt(initial)}</span>
+                    </label>
+                    <input type="range" id="cfg-${def.key}"
+                           min="${def.min}" max="${def.max}" step="${def.step}" value="${initial}">
+                    <div class="config-help">${def.help}</div>
+                `;
+                panel.appendChild(wrap);
+                const input = wrap.querySelector('input');
+                const valEl = wrap.querySelector('.config-value');
+                input.addEventListener('input', () => {
+                    const v = Number(input.value);
+                    valEl.textContent = def.fmt(v);
+                    overrides[def.key] = v;
+                    persistOverrides();
+                    broadcastOverride(def.key, v);
+                });
+            }
+        }
+
+        function pushAllOverrides() {
+            for (const def of CONFIG_DEFS) {
+                const v = overrides[def.key] ?? def.default;
+                broadcastOverride(def.key, v);
+            }
+        }
+
+        document.getElementById('config-reset').addEventListener('click', () => {
+            for (const def of CONFIG_DEFS) {
+                overrides[def.key] = def.default;
+                const input = document.getElementById(`cfg-${def.key}`);
+                const valEl = document.getElementById(`cfg-val-${def.key}`);
+                if (input) input.value = String(def.default);
+                if (valEl) valEl.textContent = def.fmt(def.default);
+                broadcastOverride(def.key, def.default);
+            }
+            persistOverrides();
+        });
+
+        buildConfigPanel();
+        // Push current values immediately so the game picks them up even if it
+        // started before the debug page was opened.
+        pushAllOverrides();
+        // Re-push periodically alongside heartbeats so a game reload re-applies them.
+        setInterval(pushAllOverrides, 2000);
     </script>
 </body>
 </html>
