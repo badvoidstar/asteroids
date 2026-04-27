@@ -1069,7 +1069,33 @@
         // is moot at 0.5). Intermediate values smoothly interpolate. Independent of
         // impulse/torque physics — only the mass partition is affected.
         MASS_SPLIT_BIAS: 0.75,
-        
+
+        // ─── Post-split shooter-deflection ──────────────────────────────────
+        // After splitAsteroid computes child velocities, any child that is on a
+        // direct collision course with the ship that fired the destroying shot
+        // receives an *additional* linear impulse (no angular change) that bends
+        // its trajectory just enough to miss the ship. Two knobs:
+        //
+        //   • DEFLECTION_TIME_LIMIT — Time horizon (in seconds) over which the
+        //     deflection must take effect. The required perpendicular Δv is
+        //     (target_miss − d_close) / max(t_close, T). Smaller T allows larger
+        //     impulses (cap = scale·R_sum / T at imminent collision); larger T
+        //     forces gentler deflections. T effectively bounds the maximum
+        //     additional impulse per fragment.
+        //
+        //   • DEFLECTION_SCALE — Multiplier on the target miss distance.
+        //       0.0 → no additional impulse at all (feature disabled per child)
+        //       1.0 → just enough impulse to graze the ship's collision radius
+        //       >1.0 → miss by extra margin (target_miss = scale · R_sum)
+        //
+        // Detection runs in the parent's pre-impulse rest frame using the
+        // straight-line relative trajectory between the new fragment COM and
+        // the shooter ship; world wrap is accounted for by shortest-path
+        // wrapping. Solo mode uses game.ship; multiplayer resolves the shooter
+        // by memberId across the local ship and remoteShips.
+        DEFLECTION_TIME_LIMIT: 0.5,
+        DEFLECTION_SCALE: 1.0,
+
         // Scoring (points awarded based on asteroid size - thresholds normalized)
         POINTS_LARGE: 20,           // Points for large astervoids
         POINTS_MEDIUM: 50,          // Points for medium astervoids
@@ -2614,6 +2640,8 @@
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
         'MASS_SPLIT_BIAS',
+        'DEFLECTION_TIME_LIMIT',
+        'DEFLECTION_SCALE',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -3542,6 +3570,94 @@
     }
 
     /**
+     * Compute the minimum-magnitude *linear* deflection impulse (Δv) that bends
+     * a fragment's straight-line trajectory off a direct collision course with
+     * the ship that fired the destroying shot.
+     *
+     * All inputs are in a single isotropic spatial unit (use ref-dim units for
+     * positions/sizes paired with ref-dim/s velocities, as splitAsteroid does).
+     *
+     * Geometry:
+     *   • r0 = (rx, ry)  — fragment position relative to ship at t=0
+     *   • v0 = (vx, vy)  — fragment velocity relative to ship at t=0
+     *   • R_sum          — combined collision radii (asteroid + ship)
+     *   • t_close = -(r0·v0)/|v0|²  — time of closest approach (only > 0 if approaching)
+     *   • d_close = |r0 + v0·t_close| — closest-approach distance
+     *
+     * Decision: a deflection is needed iff |v0| > 0, t_close > 0 and
+     * d_close < target_miss := scale·R_sum (i.e. on a collision course AND the
+     * scale-target is not already met).
+     *
+     * Direction: a perpendicular kick (⊥ to v0) is the cheapest way to displace
+     * the trajectory laterally. To 1st order in Δv it leaves t_close unchanged
+     * and shifts the closest-approach distance by Δv·t_close. We push along the
+     * outward normal at the closest approach point, ĉ = (cx, cy)/d_close (or any
+     * v0-perpendicular direction when d_close ≈ 0, e.g. a perfect head-on shot).
+     *
+     * Magnitude: |Δv| = (target_miss − d_close) / max(t_close, T). The denominator
+     * means T acts as a cap on the maximum impulse delivered — for an imminent
+     * collision (small t_close), |Δv| is bounded by (target_miss)/T. Larger T
+     * tightens this cap (gentler maximum deflection); smaller T loosens it.
+     *
+     * Returns {dvx, dvy} in the same units as v0; both 0 if no deflection needed.
+     *
+     * @param {number} rx fragment − ship X (ref-dim)
+     * @param {number} ry fragment − ship Y (ref-dim)
+     * @param {number} vx fragment − ship Vx (ref-dim/s)
+     * @param {number} vy fragment − ship Vy (ref-dim/s)
+     * @param {number} R_sum combined collision radii (ref-dim)
+     * @param {number} T deflection time horizon (s); must be > 0
+     * @param {number} scale target-miss multiplier; <=0 disables (returns zero)
+     */
+    function computeDeflectionImpulse(rx, ry, vx, vy, R_sum, T, scale) {
+        if (!(scale > 0) || !(T > 0) || !(R_sum > 0)) return { dvx: 0, dvy: 0 };
+        const v2 = vx * vx + vy * vy;
+        if (v2 < 1e-18) return { dvx: 0, dvy: 0 };          // no relative motion
+        const tClose = -(rx * vx + ry * vy) / v2;
+        if (tClose <= 0) return { dvx: 0, dvy: 0 };          // already past / receding
+        const cx = rx + vx * tClose;
+        const cy = ry + vy * tClose;
+        const dClose = Math.hypot(cx, cy);
+        const targetMiss = scale * R_sum;
+        if (dClose >= targetMiss) return { dvx: 0, dvy: 0 }; // already misses by enough
+
+        // Outward normal at closest approach. For a near-perfect head-on hit
+        // (dClose ≈ 0) any v0-perpendicular direction is equally minimal; pick
+        // the left perpendicular (-vy, vx)/|v0| for determinism.
+        let nx, ny;
+        if (dClose > 1e-12) {
+            nx = cx / dClose;
+            ny = cy / dClose;
+        } else {
+            const vMag = Math.sqrt(v2);
+            nx = -vy / vMag;
+            ny =  vx / vMag;
+        }
+        const tEff = Math.max(tClose, T);
+        const dvMag = (targetMiss - dClose) / tEff;
+        return { dvx: dvMag * nx, dvy: dvMag * ny };
+    }
+
+    /**
+     * Resolve the Ship instance for a session member id, including the local
+     * player's ship and any remote ships in `game.multiplayer.remoteShips`.
+     * Returns null in solo mode (no member ids) or if no match is found —
+     * callers should fall back to `game.ship` when appropriate.
+     * @param {string|null|undefined} memberId
+     * @returns {Ship|null}
+     */
+    function getShipByMemberId(memberId) {
+        if (!memberId) return null;
+        if (game.ship && game.ship.memberId === memberId) return game.ship;
+        if (game.multiplayer && game.multiplayer.remoteShips) {
+            for (const ship of game.multiplayer.remoteShips.values()) {
+                if (ship && ship.memberId === memberId) return ship;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Split an asteroid using a closed-form rigid-body fragmentation model with
      * **independent** deflection and separation knobs (no shared energy budget).
      *
@@ -3557,11 +3673,18 @@
      *   • CONFIG.DEFLECTION_KICK    — head-on parent COM Δv (refdim/s); J = M·v_kick·d̂
      *   • CONFIG.SEPARATION_ENERGY  — energy released into fragment separation (refdim²/s²)
      *
+     * After the rigid-body math, surviving children are checked for a direct
+     * collision course with `shooterShip` (the ship that fired the destroying
+     * shot). Any such child receives an extra linear-only impulse (no angular
+     * change) computed by `computeDeflectionImpulse`, governed by
+     * CONFIG.DEFLECTION_TIME_LIMIT and CONFIG.DEFLECTION_SCALE.
+     *
      * @param {Asteroid} asteroid
      * @param {string|null} childOwnerMemberId
      * @param {{bulletAngle:number, offsetN:number, impactTorque:number}|null} impact
+     * @param {Ship|null} shooterShip ship that fired the destroying shot; null skips deflection
      */
-    function splitAsteroid(asteroid, childOwnerMemberId = null, impact = null) {
+    function splitAsteroid(asteroid, childOwnerMemberId = null, impact = null, shooterShip = null) {
         if (asteroid.radius <= CONFIG.MIN_ASTEROID_RADIUS) {
             if (isSessionMode() && asteroid.syncObjectId) {
                 deleteSyncedAsteroid(asteroid);
@@ -3664,6 +3787,44 @@
                 r: rLarge, m: mLarge, posOff: dLarge,
                 vx: vL.vx - s * sx * (mSmall / mLarge),  vy: vL.vy - s * sy * (mSmall / mLarge),  omega: omegaP,
             });
+        }
+
+        // ─── Shooter-deflection (linear-only) ──────────────────────────────
+        // After fragment kinematics are settled, nudge any surviving child off a
+        // direct collision course with the ship that fired the destroying shot.
+        // Computed in the parent's pre-impulse rest frame using ref-dim units so
+        // positions, sizes and velocities share one isotropic spatial unit.
+        if (shooterShip
+            && CONFIG.DEFLECTION_SCALE > 0
+            && CONFIG.DEFLECTION_TIME_LIMIT > 0
+            && children.length > 0) {
+            const refDimD   = getReferenceDimension();
+            const worldRefW = getGameWidth()  / refDimD;
+            const worldRefH = getGameHeight() / refDimD;
+            const parentRefX = asteroid.x      * worldRefW;
+            const parentRefY = asteroid.y      * worldRefH;
+            const shipRefX   = shooterShip.x   * worldRefW;
+            const shipRefY   = shooterShip.y   * worldRefH;
+            const shipVx     = shooterShip.velocityX || 0;
+            const shipVy     = shooterShip.velocityY || 0;
+            const shipR      = CONFIG.SHIP_SIZE;
+            // Shortest-wrap delta around a toroidal world span.
+            const wrapDelta = (d, span) => span > 0 ? d - Math.round(d / span) * span : d;
+
+            for (const c of children) {
+                const childRefX = parentRefX + c.posOff * sx;
+                const childRefY = parentRefY + c.posOff * sy;
+                const rx = wrapDelta(childRefX - shipRefX, worldRefW);
+                const ry = wrapDelta(childRefY - shipRefY, worldRefH);
+                const { dvx, dvy } = computeDeflectionImpulse(
+                    rx, ry,
+                    c.vx - shipVx, c.vy - shipVy,
+                    c.r + shipR,
+                    CONFIG.DEFLECTION_TIME_LIMIT, CONFIG.DEFLECTION_SCALE,
+                );
+                c.vx += dvx;
+                c.vy += dvy;
+            }
         }
 
         // Materialise: posOff is in reference-dim units; convert to normalized x/y.
@@ -3866,7 +4027,7 @@
                             const relVelY = bullet.velocityY - asteroid.velocityY;
                             const impact = computeBulletImpact(asteroid.radius, offsetX, offsetY, relVelX, relVelY);
                             // Split sends to server — OnObjectReplaced handles asteroid state for all clients
-                            splitAsteroid(asteroid, null, impact);
+                            splitAsteroid(asteroid, null, impact, game.ship);
                             // Self-award score on own ship
                             if (game.ship) {
                                 game.ship.score = (game.ship.score || 0) + points;
@@ -3901,7 +4062,7 @@
                         const relVelX = bullet.velocityX - asteroid.velocityX;
                         const relVelY = bullet.velocityY - asteroid.velocityY;
                         const impact = computeBulletImpact(asteroid.radius, offsetX, offsetY, relVelX, relVelY);
-                        splitAsteroid(asteroid, null, impact);
+                        splitAsteroid(asteroid, null, impact, game.ship);
                     }
                     
                     break;  // Bullet can only hit one asteroid
@@ -3941,7 +4102,7 @@
                     offsetN: bulletObj.data.hitOffsetN || 0,
                     impactTorque: bulletObj.data.hitImpactTorque || 0
                 };
-                splitAsteroid(asteroid, bulletObj.data.ownerMemberId, impact);
+                splitAsteroid(asteroid, bulletObj.data.ownerMemberId, impact, getShipByMemberId(bulletObj.data.ownerMemberId));
             }
             
             // Clean up processed bullets that no longer exist

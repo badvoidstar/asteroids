@@ -256,6 +256,20 @@
                 fmt: v => v.toFixed(2),
                 help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
             },
+            {
+                key: 'DEFLECTION_TIME_LIMIT',
+                label: 'Shooter-deflection time limit (s)',
+                min: 0.05, max: 5, step: 0.05, default: 0.5,
+                fmt: v => `${v.toFixed(2)} s`,
+                help: 'Time horizon over which a fragment must be steered off a collision course with the ship that fired the destroying shot. Required Δv = (target_miss − d_close) / max(t_close, T) — larger T tightens the impulse cap (gentler max deflection); smaller T allows larger impulses for imminent collisions.',
+            },
+            {
+                key: 'DEFLECTION_SCALE',
+                label: 'Shooter-deflection scale',
+                min: 0, max: 3, step: 0.05, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: '0 = feature disabled (no extra impulse). 1 = just enough to graze the ship\'s collision radius. >1 = miss by extra margin (target miss = scale · R_sum).',
+            },
         ];
 
         const STORAGE_KEY = 'astervoids-debug-config';
