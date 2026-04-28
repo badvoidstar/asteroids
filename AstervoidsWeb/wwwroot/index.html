@@ -1073,12 +1073,14 @@
         // ─── Fracture geometry (visual + clip) ──────────────────────────────
         // Children of a split inherit their parent's outer silhouette on their
         // side of the impact, and a jagged FRACTURE polyline closes the cut.
-        // FRACTURE_VERTICES is the number of intermediate jag-points placed
-        // between the chord's two boundary intersections (entry/exit). 0 yields
-        // a straight chord; higher values give a more granular fracture.
+        // The number of intermediate jag-points along the fracture chord is
+        // derived from the chord length so the spacing along the fracture
+        // matches the parent's perimeter vertex spacing (~ 2πR / N), then
+        // multiplied by FRACTURE_VERTEX_DENSITY (1 = match parent spacing,
+        // higher = more jag points, 0 = straight chord).
         // FRACTURE_JAGGEDNESS is the maximum perpendicular displacement of each
         // intermediate point, expressed as a fraction of the parent's radius.
-        FRACTURE_VERTICES: 6,
+        FRACTURE_VERTEX_DENSITY: 1.0,
         FRACTURE_JAGGEDNESS: 0.35,
 
         // ─── Post-split shooter-deflection ──────────────────────────────────
@@ -2431,6 +2433,13 @@
             // them verbatim; otherwise generate the classic seeded jagged polygon.
             this.vertices = vertices ? vertices.map(v => ({ angle: v.angle, distance: v.distance }))
                                      : this.generateShape();
+            // True bounding radius for broad-phase collision: max distance from
+            // the asteroid's center to any vertex. For seeded jagged spawns
+            // this is roughly radius × (1 + ASTEROID_JAGGEDNESS); for fracture
+            // shards (where `radius` is an area-equivalent disk radius) the
+            // polygon can extend much farther — a long sliver can have small
+            // area but large linear extent. Cache the actual maximum.
+            this.boundRadius = this.vertices.reduce((m, v) => v.distance > m ? v.distance : m, 0);
             this.syncObjectId = null;      // ObjectSync ID when in session
         }
 
@@ -2821,7 +2830,7 @@
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
         'MASS_SPLIT_BIAS',
-        'FRACTURE_VERTICES',
+        'FRACTURE_VERTEX_DENSITY',
         'FRACTURE_JAGGEDNESS',
         'DEFLECTION_TIME_LIMIT',
         'DEFLECTION_SCALE',
@@ -3949,7 +3958,15 @@
         // the chord cleanly cuts the polygon.
         const probe = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, []);
         if (probe) {
-            const jagCount = Math.max(0, Math.floor(CONFIG.FRACTURE_VERTICES));
+            // Match the parent's perimeter vertex spacing (~ 2πR / N) along
+            // the chord, scaled by FRACTURE_VERTEX_DENSITY.
+            const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
+                                        probe.exit.y - probe.entry.y);
+            const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentPoly.length);
+            const density = Math.max(0, CONFIG.FRACTURE_VERTEX_DENSITY);
+            const jagCount = parentSpacing > 0
+                ? Math.max(0, Math.floor((chordLen / parentSpacing) * density))
+                : 0;
             const jagAmplitude = Math.max(0, CONFIG.FRACTURE_JAGGEDNESS) * R;
             // Deterministic seed so independent regenerations agree.
             const seedFrac = ((asteroid.seed || 0) * 0x100000000) >>> 0;
@@ -4291,13 +4308,14 @@
                 const bulletPxY = fromNormalizedY(bullet.y);
                 const bulletPxRadius = fromNormalizedSize(CONFIG.BULLET_RADIUS);
 
-                // Broad phase: circle-vs-circle on bounding radii.
-                // Asteroid vertices are jagged and can extend up to
-                // radius × (1 + JAGGEDNESS) from center (see generateShape).
-                // Use that conservative bound so grazing hits aren't missed.
+                // Broad phase: circle-vs-circle on bounding radii. Use the
+                // asteroid's true `boundRadius` (max vertex distance) so
+                // fracture shards — where `radius` is an area-equivalent disk
+                // radius and the polygon may extend much farther — aren't
+                // missed.
                 const asteroidPxX = fromNormalizedX(asteroid.x);
                 const asteroidPxY = fromNormalizedY(asteroid.y);
-                const asteroidPxBound = fromNormalizedSize(asteroid.radius) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+                const asteroidPxBound = fromNormalizedSize(asteroid.boundRadius);
                 const dx = bulletPxX - asteroidPxX;
                 const dy = bulletPxY - asteroidPxY;
                 const reach = bulletPxRadius + asteroidPxBound;
@@ -4452,7 +4470,7 @@
             // Asteroid jagged vertices can extend up to radius × (1 + JAGGEDNESS).
             const astPxX = fromNormalizedX(asteroid.x);
             const astPxY = fromNormalizedY(asteroid.y);
-            const astPxBound = fromNormalizedSize(asteroid.radius) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+            const astPxBound = fromNormalizedSize(asteroid.boundRadius);
             const dx = shipPxX - astPxX;
             const dy = shipPxY - astPxY;
             const reach = shipPxRadius + astPxBound;

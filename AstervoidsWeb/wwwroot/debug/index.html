@@ -257,11 +257,11 @@
                 help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
             },
             {
-                key: 'FRACTURE_VERTICES',
-                label: 'Fracture vertices (jag points)',
-                min: 0, max: 12, step: 1, default: 6,
-                fmt: v => `${v|0}`,
-                help: 'Number of intermediate jag points along the fracture polyline between the two chord/boundary intersections. 0 = straight chord.',
+                key: 'FRACTURE_VERTEX_DENSITY',
+                label: 'Fracture vertex density (× parent spacing)',
+                min: 0, max: 3, step: 0.05, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: 'Multiplier on the chord-length-derived jag count. 1 = match parent perimeter vertex spacing; 0 = straight chord; >1 = more jag points along the fracture.',
             },
             {
                 key: 'FRACTURE_JAGGEDNESS',

@@ -284,7 +284,7 @@ const CONFIG = {
     INITIAL_ASTEROID_RADIUS: 0.083,
     ASTEROID_DENSITY: 5.0,
     SEPARATION_ENERGY_SIZE_BLEND: 1.0,
-    FRACTURE_VERTICES: 6,
+    FRACTURE_VERTEX_DENSITY: 1.0,
     FRACTURE_JAGGEDNESS: 0.35,
 };
 
@@ -315,8 +315,15 @@ function fragmentPolygon(parentVerts, R, vx, vy, omega, offsetN, bulletAngle, cf
     const pi_eff = A_parent / (R * R);
     const probe = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, []);
     if (!probe) return null;
+    const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
+                                probe.exit.y - probe.entry.y);
+    const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentVerts.length);
+    const fracDensity = Math.max(0, cfg.FRACTURE_VERTEX_DENSITY);
+    const jagCount = parentSpacing > 0
+        ? Math.max(0, Math.floor((chordLen / parentSpacing) * fracDensity))
+        : 0;
     const jag = buildFracturePolyline(probe.entry, probe.exit,
-        cfg.FRACTURE_VERTICES, cfg.FRACTURE_JAGGEDNESS * R, makeSeededRandom(1));
+        jagCount, cfg.FRACTURE_JAGGEDNESS * R, makeSeededRandom(1));
     const split = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, jag);
     if (!split) return null;
     const A_pos = Math.abs(polygonArea(split.positive));
@@ -403,4 +410,69 @@ test('end-to-end: 1-child branch when small piece below MIN_ASTEROID_RADIUS', ()
     assert.equal(out.children.length, 1);
     // The surviving piece's mass should be the larger area's share.
     assert.ok(out.children[0].m > 0.5 * out.M);
+});
+
+test('chord-derived jag count: head-on chord on 10-gon ≈ N/π jag points', () => {
+    // For a head-on chord (b=0) through a regular N-gon of radius R, chord
+    // length = 2R, parent spacing = 2πR/N, so jagCount = floor(N/π) at
+    // density=1.
+    const R = 0.083, N = 10;
+    const parent = regularPolygon(R, N);
+    const probe = fractureSplitPolygon(parent, { x: 0, y: 1 }, 0, []);
+    const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
+                                probe.exit.y - probe.entry.y);
+    const parentSpacing = (2 * Math.PI * R) / N;
+    const jagCount = Math.floor(chordLen / parentSpacing);
+    // Head-on chord ≈ 2R; expected = floor(N/π) = floor(3.18) = 3.
+    assert.equal(jagCount, 3);
+});
+
+test('chord-derived jag count: short chord ⇒ fewer jag points than long chord', () => {
+    const R = 0.083;
+    const parent = regularPolygon(R, 10);
+    const headOn = fractureSplitPolygon(parent, { x: 0, y: 1 }, 0, []);
+    const offset = fractureSplitPolygon(parent, { x: 0, y: 1 }, 0.06, []);
+    const headOnLen = Math.hypot(headOn.exit.x - headOn.entry.x,
+                                 headOn.exit.y - headOn.entry.y);
+    const offsetLen = Math.hypot(offset.exit.x - offset.entry.x,
+                                 offset.exit.y - offset.entry.y);
+    assert.ok(offsetLen < headOnLen,
+        `offset chord (${offsetLen}) should be shorter than head-on (${headOnLen})`);
+});
+
+// ─── Bound radius (broad-phase fix) ─────────────────────────────────────────
+
+function boundRadius(verts) {
+    // verts in {angle, distance} polar form (matches Asteroid.vertices).
+    return verts.reduce((m, v) => v.distance > m ? v.distance : m, 0);
+}
+
+test('boundRadius: regular jagged spawn ≈ R·(1+JAGGEDNESS)', () => {
+    // Mimic generateShape's variance pattern: distance = R · uniform(1-J, 1+J).
+    const R = 0.083, J = 0.4;
+    const verts = [];
+    for (let i = 0; i < 10; i++) {
+        const u = (i + 1) / 11; // deterministic spread of "random" values
+        const variance = 1 - J + u * J * 2;
+        verts.push({ angle: (i / 10) * Math.PI * 2, distance: R * variance });
+    }
+    const br = boundRadius(verts);
+    assert.ok(br <= R * (1 + J) + 1e-12);
+    assert.ok(br > R * (1 - J));
+});
+
+test('boundRadius: thin sliver shard exceeds area-equivalent disk radius', () => {
+    // Long thin sliver: extends from x=-1 to x=+1 with tiny y-thickness.
+    // Area = 2 · 0.04 = 0.08 → R_disk = sqrt(0.08/π) ≈ 0.16. boundRadius ≈ 1.0.
+    const sliverXY = [
+        { x: -1, y: -0.02 }, { x: 1, y: -0.02 },
+        { x: 1, y:  0.02 }, { x: -1, y:  0.02 },
+    ];
+    const sliverPolar = verticesFromXY(sliverXY);
+    const A = Math.abs(polygonArea(sliverXY));
+    const Rdisk = Math.sqrt(A / Math.PI);
+    const br = boundRadius(sliverPolar);
+    assert.ok(br > 5 * Rdisk,
+        `sliver bound (${br}) should be much larger than disk radius (${Rdisk})`);
+    assert.ok(br > 0.99 && br < 1.001, `sliver bound should be ~1, got ${br}`);
 });
