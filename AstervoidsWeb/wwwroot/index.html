@@ -1432,15 +1432,16 @@
                     const timeDiff = curr.time - prev.time;
                     if (timeDiff <= 0) return curr.data;
 
-                    // Burst-arrival guard: when two snapshots arrive almost
-                    // simultaneously (timeDiff << delay), interpolating between
-                    // them is meaningless — snap to the newer snapshot instead.
-                    // The previous implementation inflated timeDiff to delay*0.5,
-                    // which made t artificially small and caused the render to
-                    // linger near prev even after targetTime had advanced past curr.
-                    if (timeDiff < delay * 0.5) return curr.data;
-
-                    const t = (targetTime - prev.time) / timeDiff;
+                    // Burst-arrival smoothing: when timeDiff is very small
+                    // (snapshots arriving in bursts), inflate the divisor to
+                    // delay*0.5 so `t` advances at the expected playback
+                    // cadence instead of jumping to ~1 immediately. The
+                    // PR #77 "fix" that replaced this with a snap-to-curr
+                    // caused visibly choppier remote motion under bursty
+                    // delivery, so it has been reverted.
+                    const minTimeDiff = delay * 0.5;
+                    const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
+                    const t = (targetTime - prev.time) / effectiveTimeDiff;
 
                     if (this.shouldSnap(prev.data, curr.data)) {
                         return curr.data;
@@ -1454,7 +1455,7 @@
                         velocity: curr.velocity,
                         rotationSpeed: curr.rotationSpeed
                     };
-                    return this.hermite(pseudoState, Math.min(t, 1), timeDiff);
+                    return this.hermite(pseudoState, Math.min(t, 1), effectiveTimeDiff);
                 }
             }
 
