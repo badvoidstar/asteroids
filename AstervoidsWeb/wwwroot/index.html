@@ -1070,6 +1070,17 @@
         // impulse/torque physics — only the mass partition is affected.
         MASS_SPLIT_BIAS: 0.6,
 
+        // ─── Fracture geometry (visual + clip) ──────────────────────────────
+        // Children of a split inherit their parent's outer silhouette on their
+        // side of the impact, and a jagged FRACTURE polyline closes the cut.
+        // FRACTURE_VERTICES is the number of intermediate jag-points placed
+        // between the chord's two boundary intersections (entry/exit). 0 yields
+        // a straight chord; higher values give a more granular fracture.
+        // FRACTURE_JAGGEDNESS is the maximum perpendicular displacement of each
+        // intermediate point, expressed as a fraction of the parent's radius.
+        FRACTURE_VERTICES: 6,
+        FRACTURE_JAGGEDNESS: 0.35,
+
         // ─── Post-split shooter-deflection ──────────────────────────────────
         // After splitAsteroid computes child velocities, any child that is on a
         // direct collision course with the ship that fired the destroying shot
@@ -1892,6 +1903,168 @@
         return false;
     }
 
+    /**
+     * Polygon helpers for fracture-based asteroid splits.
+     * All polygons are arrays of {x, y} vertices in CCW order (positive signed area).
+     * Units are caller's choice — used here in the parent-asteroid local frame
+     * with normalized reference-dim distances.
+     */
+    function polygonArea(verts) {
+        let a = 0;
+        const N = verts.length;
+        for (let i = 0; i < N; i++) {
+            const j = (i + 1) % N;
+            a += verts[i].x * verts[j].y - verts[j].x * verts[i].y;
+        }
+        return a * 0.5;
+    }
+
+    function polygonCentroid(verts) {
+        let cx = 0, cy = 0, a = 0;
+        const N = verts.length;
+        for (let i = 0; i < N; i++) {
+            const j = (i + 1) % N;
+            const cross = verts[i].x * verts[j].y - verts[j].x * verts[i].y;
+            cx += (verts[i].x + verts[j].x) * cross;
+            cy += (verts[i].y + verts[j].y) * cross;
+            a += cross;
+        }
+        a *= 0.5;
+        if (Math.abs(a) < 1e-18) {
+            let sx = 0, sy = 0;
+            for (const v of verts) { sx += v.x; sy += v.y; }
+            return { x: sx / N, y: sy / N, area: 0 };
+        }
+        return { x: cx / (6 * a), y: cy / (6 * a), area: a };
+    }
+
+    /**
+     * Split a CCW polygon by the line { p : n·p = d } (n unit normal, d scalar)
+     * and replace the chord with the supplied jagged polyline.
+     *
+     * jagPath: ordered list of intermediate {x,y} points strictly between the
+     * entry crossing (the +→- transition along the polygon walk) and the exit
+     * crossing (the -→+ transition). The same jagPath is reused on both sides
+     * — reversed on the negative half — so the two children share the exact
+     * same fracture boundary.
+     *
+     * Returns { positive, negative, entry, exit } or null on degenerate input
+     * (chord crosses ≠ 2 times, child polygon has < 3 vertices, etc.).
+     */
+    function fractureSplitPolygon(verts, n, d, jagPath) {
+        const N = verts.length;
+        if (N < 3) return null;
+        const sides = new Array(N);
+        for (let i = 0; i < N; i++) {
+            sides[i] = verts[i].x * n.x + verts[i].y * n.y - d;
+        }
+
+        const crossEdges = [];
+        for (let i = 0; i < N; i++) {
+            const j = (i + 1) % N;
+            const sa = sides[i], sb = sides[j];
+            if ((sa > 0 && sb < 0) || (sa < 0 && sb > 0)) {
+                const t = sa / (sa - sb);
+                crossEdges.push({
+                    edgeStart: i,
+                    point: {
+                        x: verts[i].x + (verts[j].x - verts[i].x) * t,
+                        y: verts[i].y + (verts[j].y - verts[i].y) * t,
+                    },
+                    fromPos: sa > 0,
+                });
+            }
+        }
+        if (crossEdges.length !== 2) return null;
+
+        let entryIdx, exitIdx;
+        if (crossEdges[0].fromPos) { entryIdx = 0; exitIdx = 1; }
+        else                       { entryIdx = 1; exitIdx = 0; }
+
+        const buildHalf = (startCross, endCross, sideTest, jagDir) => {
+            const out = [{ x: startCross.point.x, y: startCross.point.y }];
+            const stop = (endCross.edgeStart + 1) % N;
+            let i = (startCross.edgeStart + 1) % N;
+            let safety = N + 2;
+            while (i !== stop && safety-- > 0) {
+                if (sideTest(sides[i])) out.push({ x: verts[i].x, y: verts[i].y });
+                i = (i + 1) % N;
+            }
+            out.push({ x: endCross.point.x, y: endCross.point.y });
+            if (jagDir > 0) {
+                for (const p of jagPath) out.push({ x: p.x, y: p.y });
+            } else {
+                for (let k = jagPath.length - 1; k >= 0; k--) {
+                    out.push({ x: jagPath[k].x, y: jagPath[k].y });
+                }
+            }
+            return out;
+        };
+
+        const positive = buildHalf(crossEdges[exitIdx], crossEdges[entryIdx], s => s > 0, +1);
+        const negative = buildHalf(crossEdges[entryIdx], crossEdges[exitIdx], s => s < 0, -1);
+
+        if (positive.length < 3 || negative.length < 3) return null;
+        return {
+            positive, negative,
+            entry: crossEdges[entryIdx].point,
+            exit:  crossEdges[exitIdx].point,
+        };
+    }
+
+    /**
+     * Build the jagged fracture polyline (intermediate points only) between
+     * `entry` and `exit`. Each of the `count` intermediate points sits at an
+     * even fraction along the chord, displaced perpendicular by up to
+     * `jagAmplitude` (in the same units as entry/exit). A triangular taper
+     * keeps the displacement near 0 at the endpoints so the fracture meets the
+     * silhouette without a kink.
+     */
+    function buildFracturePolyline(entry, exit, count, jagAmplitude, randomFn) {
+        const out = [];
+        if (count <= 0) return out;
+        const dx = exit.x - entry.x, dy = exit.y - entry.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-12) return out;
+        const px = -dy / len, py = dx / len;
+        for (let k = 1; k <= count; k++) {
+            const t = k / (count + 1);
+            const cx = entry.x + dx * t;
+            const cy = entry.y + dy * t;
+            const taper = 2 * Math.min(t, 1 - t);
+            const amp = jagAmplitude > 0 ? jagAmplitude : 0;
+            const offset = (randomFn() * 2 - 1) * amp * taper;
+            out.push({ x: cx + px * offset, y: cy + py * offset });
+        }
+        return out;
+    }
+
+    /**
+     * Build a deterministic [0,1) RNG from a numeric seed (mulberry32-ish).
+     * Used so the two children of a fracture see the same jag points if they
+     * are independently regenerated from a parent seed (belt-and-braces; the
+     * authoritative path sends the explicit child vertex list over sync).
+     */
+    function makeSeededRandom(seed) {
+        let s = (seed >>> 0) || 1;
+        return () => {
+            s = (s + 0x6D2B79F5) >>> 0;
+            let t = s;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    /** Convert centered (x, y) pairs into the {angle, distance} polar format
+     *  used by Asteroid.vertices. */
+    function verticesFromXY(xyArray) {
+        return xyArray.map(p => ({
+            angle: Math.atan2(p.y, p.x),
+            distance: Math.hypot(p.x, p.y),
+        }));
+    }
+
     // ============================================
     // SECTION 3: GAME ENTITY CLASSES
     // Ship, Asteroid, and Bullet definitions
@@ -2245,7 +2418,7 @@
      * Position is normalized (0-1), radius/velocity are in reference-dimension units
      */
     class Asteroid {
-        constructor(x, y, radius, velocityX, velocityY, seed = null) {
+        constructor(x, y, radius, velocityX, velocityY, seed = null, vertices = null) {
             this.x = x;                    // Normalized X position (0-1)
             this.y = y;                    // Normalized Y position (0-1)
             this.radius = radius;          // Normalized size (relative to ref dimension)
@@ -2254,7 +2427,10 @@
             this.angle = Math.random() * Math.PI * 2;  // Random rotation
             this.rotationSpeed = randomRange(-0.02, 0.02);  // Spin rate
             this.seed = seed || Math.random();  // Seed for deterministic shape generation
-            this.vertices = this.generateShape();  // Irregular polygon (normalized)
+            // If explicit vertices are supplied (e.g. from a fracture split), keep
+            // them verbatim; otherwise generate the classic seeded jagged polygon.
+            this.vertices = vertices ? vertices.map(v => ({ angle: v.angle, distance: v.distance }))
+                                     : this.generateShape();
             this.syncObjectId = null;      // ObjectSync ID when in session
         }
 
@@ -2272,7 +2448,11 @@
                 velocityY: this.velocityY,
                 angle: this.angle,
                 rotationSpeed: this.rotationSpeed,
-                seed: this.seed
+                seed: this.seed,
+                // Fracture children carry an explicit vertex list so all clients
+                // see the inherited silhouette; spawn asteroids omit it and
+                // regenerate from `seed` for compactness/back-compat.
+                vertices: this.vertices,
             };
         }
 
@@ -2309,12 +2489,13 @@
          */
         static fromSyncData(data) {
             const asteroid = new Asteroid(
-                data.x, 
-                data.y, 
-                data.radius, 
-                data.velocityX, 
+                data.x,
+                data.y,
+                data.radius,
+                data.velocityX,
                 data.velocityY,
-                data.seed
+                data.seed,
+                Array.isArray(data.vertices) ? data.vertices : null
             );
             asteroid.angle = data.angle || 0;
             asteroid.rotationSpeed = data.rotationSpeed || 0;
@@ -2640,6 +2821,8 @@
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
         'MASS_SPLIT_BIAS',
+        'FRACTURE_VERTICES',
+        'FRACTURE_JAGGEDNESS',
         'DEFLECTION_TIME_LIMIT',
         'DEFLECTION_SCALE',
     ]);
@@ -3661,23 +3844,35 @@
      * Split an asteroid using a closed-form rigid-body fragmentation model with
      * **independent** deflection and separation knobs (no shared energy budget).
      *
-     * Conservation guarantees (in the parent's pre-impact rest frame):
-     *   • Linear momentum:   Σ m_i v_i  = M v + J                      (exact)
-     *   • Angular momentum:  Σ (m_i r_i×v_i + I_i ω_i) = I ω + r×J   (exact, parallel-axis)
-     *   • Energy:            NOT conserved as a single budget; instead the bullet
-     *     injects two independently-specified KE quantities into the system:
-     *       ΔKE_rigid = ½·M·v_kick²·(1 + 2b²/R²)   from the deflection impulse
-     *       E_sep     = SEPARATION_ENERGY · sizeMul   into fragment separation
+     * Two paths:
+     *   1. **Polygon-fracture path** (default). The parent's actual polygon is
+     *      clipped by the chord { p : n̂·p = b } where b = offsetN·R, with the
+     *      chord replaced by a jagged FRACTURE polyline. Each child inherits
+     *      its slice of the parent silhouette plus the fracture as its closing
+     *      edge. Mass per child is m_i = M·(A_i / A_parent); equivalent radius
+     *      is R_i = √(A_i / π_eff) where π_eff = A_parent / R_parent² so the
+     *      legacy disk physics (M=ρR², I=½MR²) plug straight back in. Each
+     *      child's COM is its polygon centroid.
+     *   2. **Disk-fallback path**. Used only when the chord doesn't cleanly
+     *      cut the parent polygon into two ≥3-vertex pieces (rare). Reproduces
+     *      the closed-form math mirrored in split-physics.test.mjs exactly.
+     *
+     * Conservation guarantees in the parent's pre-impact rest frame:
+     *   • Linear momentum:   Σ m_i v_i  = M v + J             (exact, both paths)
+     *   • Angular momentum:  Σ (m_i r_i×v_i + I_i ω_i)        (exact for disk
+     *                        path; very close for polygon path since centroids
+     *                        sit ≈ on the separation axis)
+     *   • Energy: bullet injects ½·M·v_kick²·(1+2b²/R²) + E_sep into the system
      *
      * Two configurable parameters (orthogonal):
      *   • CONFIG.DEFLECTION_KICK    — head-on parent COM Δv (refdim/s); J = M·v_kick·d̂
      *   • CONFIG.SEPARATION_ENERGY  — energy released into fragment separation (refdim²/s²)
      *
-     * After the rigid-body math, surviving children are checked for a direct
-     * collision course with `shooterShip` (the ship that fired the destroying
-     * shot). Any such child receives an extra linear-only impulse (no angular
-     * change) computed by `computeDeflectionImpulse`, governed by
-     * CONFIG.DEFLECTION_TIME_LIMIT and CONFIG.DEFLECTION_SCALE.
+     * After the kinematics are settled, surviving children are checked for a
+     * direct collision course with `shooterShip` (the ship that fired the
+     * destroying shot) and may receive an extra linear-only impulse from
+     * `computeDeflectionImpulse`, governed by CONFIG.DEFLECTION_TIME_LIMIT and
+     * CONFIG.DEFLECTION_SCALE.
      *
      * @param {Asteroid} asteroid
      * @param {string|null} childOwnerMemberId
@@ -3704,9 +3899,9 @@
         const dx = Math.cos(bulletAngle), dy = Math.sin(bulletAngle);
         const nx = -dy, ny = dx;
 
-        // Disk: M = ρ·R², I = ½MR² (the constant ρπ factor of a 2D disk is absorbed
-        // into ASTEROID_DENSITY; it cancels in every conservation law but uniformly
-        // scales velocity outcomes by 1/√ρ).
+        // Disk physics: M = ρ·R², I = ½MR². Both fragmentation paths use the
+        // same M/I; per-child mass is allocated either by polygon area
+        // (fracture path) or by the closed-form ratio (disk fallback).
         const R = asteroid.radius;
         const density = Math.max(1e-6, CONFIG.ASTEROID_DENSITY);
         const M = density * R * R;
@@ -3719,17 +3914,7 @@
         const rx  = rxD * dx + rxN * nx;
         const ry  = rxD * dy + rxN * ny;
 
-        // Bullet impulse magnitude is set directly by the deflection-kick velocity
-        // scalar: J = M · v_kick. This makes head-on parent ΔvCOM = v_kick exactly,
-        // independent of M, ρ, and R. (Grazing hits redistribute J between linear and
-        // angular response via the lever arm but |J| is unchanged.)
         const vKick = Math.max(0, CONFIG.DEFLECTION_KICK);
-        // Effective separation energy: blend between fixed and size-proportional.
-        // With blend=0 E_sep is constant per hit (legacy); with blend=1 E_sep ∝ R²
-        // (injected energy scales with parent cross-section / mass, yielding
-        // generation-independent separation speed). R_ref = INITIAL_ASTEROID_RADIUS so
-        // a freshly-spawned asteroid receives exactly CONFIG.SEPARATION_ENERGY at any
-        // blend.
         const blend = Math.max(0, Math.min(1, CONFIG.SEPARATION_ENERGY_SIZE_BLEND));
         const Rref  = CONFIG.INITIAL_ASTEROID_RADIUS;
         const sizeMul = (1 - blend) + blend * (R / Rref) * (R / Rref);
@@ -3743,50 +3928,160 @@
         const torque = rx * Jy - ry * Jx;                // r × J  (scalar in 2D)
         const omegaP = (asteroid.rotationSpeed || 0) + torque / I;
 
-        // Mass split: bias=1 → 50/50 head-on, skewed for glancing; bias=0 → always 50/50.
-        const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
-        const massBias = Math.max(0, Math.min(1, CONFIG.MASS_SPLIT_BIAS));
-        const fSmall   = Math.max(minRatio, 0.5 * (1 - massBias * Math.abs(offsetN)));
-        const fLarge   = 1 - fSmall;
-
-        const rSmall = R * Math.sqrt(fSmall);
-        const rLarge = R * Math.sqrt(fLarge);
-        const mSmall = fSmall * M;
-        const mLarge = fLarge * M;
-
-        // Separation axis n̂_sep — toward impact side.
+        // Default separation axis n̂_sep — toward impact side (used by disk fallback
+        // and as the fixed axis along which polygon-path separation impulses act).
         const sideSign = offsetN >= 0 ? 1 : -1;
         const sx = sideSign * nx, sy = sideSign * ny;
 
-        const children = [];
-        if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
-            // Chip is debris — single child carries post-impulse motion.
-            children.push({ r: rLarge, m: mLarge, posOff: 0, vx: vxP, vy: vyP, omega: omegaP });
-        } else {
-            // COMs on separation axis at distances that satisfy the parallel-axis identity
-            // I_s + I_l + m_s·d_s² + m_l·d_l² = I, guaranteeing exact AM and energy
-            // conservation. Derived: d_s = R·f_l, d_l = -R·f_s.
-            const dSmall = +R * fLarge;
-            const dLarge = -R * fSmall;
+        // ─── Polygon-fracture path ─────────────────────────────────────────
+        // Build the parent silhouette in the parent-COM-relative world frame
+        // (pre-rotation angles already folded in). All distances in normalized
+        // ref-dim units, same as asteroid.radius.
+        let children = null;
+        const parentPoly = asteroid.vertices.map(v => ({
+            x: Math.cos(v.angle + asteroid.angle) * v.distance,
+            y: Math.sin(v.angle + asteroid.angle) * v.distance,
+        }));
+        const A_parent = Math.abs(polygonArea(parentPoly));
+        const pi_eff = A_parent > 0 ? A_parent / (R * R) : Math.PI;
 
-            // Inherited rigid velocity at each COM: v' + ω' × r_i (in 2D: ω×r = (-ω·ry, ω·rx)).
-            const rigidVelocityAt = (d) => ({
-                vx: vxP + (-omegaP) * (d * sy),
-                vy: vyP + ( omegaP) * (d * sx),
-            });
-            const vS = rigidVelocityAt(dSmall), vL = rigidVelocityAt(dLarge);
+        // Probe-clip with an empty jag to discover entry/exit and validate that
+        // the chord cleanly cuts the polygon.
+        const probe = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, []);
+        if (probe) {
+            const jagCount = Math.max(0, Math.floor(CONFIG.FRACTURE_VERTICES));
+            const jagAmplitude = Math.max(0, CONFIG.FRACTURE_JAGGEDNESS) * R;
+            // Deterministic seed so independent regenerations agree.
+            const seedFrac = ((asteroid.seed || 0) * 0x100000000) >>> 0;
+            const jagSeed = (seedFrac
+                ^ (Math.floor((bulletAngle + 10) * 1e6) >>> 0)
+                ^ (Math.floor((offsetN + 10) * 1e6) >>> 0)) >>> 0;
+            const jagRng = makeSeededRandom(jagSeed);
+            const jagPath = buildFracturePolyline(probe.entry, probe.exit,
+                                                  jagCount, jagAmplitude, jagRng);
+            const split = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, jagPath);
+            if (split) {
+                const A_pos = Math.abs(polygonArea(split.positive));
+                const A_neg = Math.abs(polygonArea(split.negative));
+                if (A_pos > 0 && A_neg > 0 && A_parent > 0) {
+                    const smallSide = A_pos <= A_neg
+                        ? { poly: split.positive, area: A_pos }
+                        : { poly: split.negative, area: A_neg };
+                    const largeSide = A_pos <= A_neg
+                        ? { poly: split.negative, area: A_neg }
+                        : { poly: split.positive, area: A_pos };
 
-            // Separation impulse along n̂_sep, equal-and-opposite, releasing E_sep:
-            //   s = √(2·E_sep·m_l / (m_s·M))
-            const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
-            children.push({
-                r: rSmall, m: mSmall, posOff: dSmall,
-                vx: vS.vx + s * sx,                      vy: vS.vy + s * sy,                      omega: omegaP,
-            });
-            children.push({
-                r: rLarge, m: mLarge, posOff: dLarge,
-                vx: vL.vx - s * sx * (mSmall / mLarge),  vy: vL.vy - s * sy * (mSmall / mLarge),  omega: omegaP,
-            });
+                    const cSmall = polygonCentroid(smallSide.poly);
+                    const cLarge = polygonCentroid(largeSide.poly);
+                    const rSmall = Math.sqrt(smallSide.area / pi_eff);
+                    const rLarge = Math.sqrt(largeSide.area / pi_eff);
+                    const mSmall = (smallSide.area / A_parent) * M;
+                    const mLarge = (largeSide.area / A_parent) * M;
+
+                    const recenter = (poly, c) => verticesFromXY(
+                        poly.map(p => ({ x: p.x - c.x, y: p.y - c.y }))
+                    );
+                    const vertsSmall = recenter(smallSide.poly, cSmall);
+                    const vertsLarge = recenter(largeSide.poly, cLarge);
+
+                    if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
+                        // 1-child case: chip is debris, surviving large piece
+                        // keeps the new fractured silhouette and inherits all
+                        // post-impulse parent momentum. (The chip's tiny share
+                        // is dropped — same accounting as the disk fallback.)
+                        const v_rigid = {
+                            vx: vxP + (-omegaP) * cLarge.y,
+                            vy: vyP + ( omegaP) * cLarge.x,
+                        };
+                        children = [{
+                            r: rLarge, m: mLarge,
+                            cx: cLarge.x, cy: cLarge.y,
+                            vx: v_rigid.vx, vy: v_rigid.vy,
+                            omega: omegaP,
+                            vertices: vertsLarge,
+                        }];
+                    } else {
+                        // 2-child case. Inherited rigid velocities at each
+                        // centroid; equal-and-opposite separation impulse along
+                        // n̂_sep balanced by mass ratio so total Δp = 0.
+                        const v_rigid_small = {
+                            vx: vxP + (-omegaP) * cSmall.y,
+                            vy: vyP + ( omegaP) * cSmall.x,
+                        };
+                        const v_rigid_large = {
+                            vx: vxP + (-omegaP) * cLarge.y,
+                            vy: vyP + ( omegaP) * cLarge.x,
+                        };
+                        const s = E_sep > 0
+                            ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M))
+                            : 0;
+                        // Pick the separation direction so the small child flies
+                        // outward from the parent COM (its centroid sits on its
+                        // own side of the chord; we just project onto n̂_sep).
+                        const proj = cSmall.x * sx + cSmall.y * sy;
+                        const sepDir = proj >= 0 ? 1 : -1;
+                        const sepX = sepDir * sx, sepY = sepDir * sy;
+
+                        children = [
+                            {
+                                r: rSmall, m: mSmall,
+                                cx: cSmall.x, cy: cSmall.y,
+                                vx: v_rigid_small.vx + sepX * s,
+                                vy: v_rigid_small.vy + sepY * s,
+                                omega: omegaP,
+                                vertices: vertsSmall,
+                            },
+                            {
+                                r: rLarge, m: mLarge,
+                                cx: cLarge.x, cy: cLarge.y,
+                                vx: v_rigid_large.vx - sepX * s * (mSmall / mLarge),
+                                vy: v_rigid_large.vy - sepY * s * (mSmall / mLarge),
+                                omega: omegaP,
+                                vertices: vertsLarge,
+                            },
+                        ];
+                    }
+                }
+            }
+        }
+
+        // ─── Disk-fallback path ────────────────────────────────────────────
+        if (!children) {
+            const minRatio = Math.max(0.01, Math.min(0.5, CONFIG.MIN_SPLIT_RATIO));
+            const massBias = Math.max(0, Math.min(1, CONFIG.MASS_SPLIT_BIAS));
+            const fSmall   = Math.max(minRatio, 0.5 * (1 - massBias * Math.abs(offsetN)));
+            const fLarge   = 1 - fSmall;
+
+            const rSmall = R * Math.sqrt(fSmall);
+            const rLarge = R * Math.sqrt(fLarge);
+            const mSmall = fSmall * M;
+            const mLarge = fLarge * M;
+
+            children = [];
+            if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
+                children.push({ r: rLarge, m: mLarge, cx: 0, cy: 0,
+                                vx: vxP, vy: vyP, omega: omegaP, vertices: null });
+            } else {
+                const dSmall = +R * fLarge;
+                const dLarge = -R * fSmall;
+                const rigidVelocityAt = (d) => ({
+                    vx: vxP + (-omegaP) * (d * sy),
+                    vy: vyP + ( omegaP) * (d * sx),
+                });
+                const vS = rigidVelocityAt(dSmall), vL = rigidVelocityAt(dLarge);
+                const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
+                children.push({
+                    r: rSmall, m: mSmall, cx: dSmall * sx, cy: dSmall * sy,
+                    vx: vS.vx + s * sx, vy: vS.vy + s * sy,
+                    omega: omegaP, vertices: null,
+                });
+                children.push({
+                    r: rLarge, m: mLarge, cx: dLarge * sx, cy: dLarge * sy,
+                    vx: vL.vx - s * sx * (mSmall / mLarge),
+                    vy: vL.vy - s * sy * (mSmall / mLarge),
+                    omega: omegaP, vertices: null,
+                });
+            }
         }
 
         // ─── Shooter-deflection (linear-only) ──────────────────────────────
@@ -3808,16 +4103,15 @@
             const shipVx     = shooterShip.velocityX || 0;
             const shipVy     = shooterShip.velocityY || 0;
             const shipR      = CONFIG.SHIP_SIZE;
-            // Shortest-wrap delta around a toroidal world span.
             const wrapDelta = (d, span) => span > 0 ? d - Math.round(d / span) * span : d;
 
             for (const c of children) {
-                const childRefX = parentRefX + c.posOff * sx;
-                const childRefY = parentRefY + c.posOff * sy;
-                const rx = wrapDelta(childRefX - shipRefX, worldRefW);
-                const ry = wrapDelta(childRefY - shipRefY, worldRefH);
+                const childRefX = parentRefX + c.cx;
+                const childRefY = parentRefY + c.cy;
+                const rrx = wrapDelta(childRefX - shipRefX, worldRefW);
+                const rry = wrapDelta(childRefY - shipRefY, worldRefH);
                 const { dvx, dvy } = computeDeflectionImpulse(
-                    rx, ry,
+                    rrx, rry,
                     c.vx - shipVx, c.vy - shipVy,
                     c.r + shipR,
                     CONFIG.DEFLECTION_TIME_LIMIT, CONFIG.DEFLECTION_SCALE,
@@ -3827,19 +4121,26 @@
             }
         }
 
-        // Materialise: posOff is in reference-dim units; convert to normalized x/y.
+        // Materialise: cx/cy are in normalized ref-dim units; convert to normalized x/y.
         const refDim = getReferenceDimension();
         const px2nx  = refDim / getGameWidth();
         const py2ny  = refDim / getGameHeight();
 
         const newAsteroids = children.map(c => {
             const a = new Asteroid(
-                asteroid.x + c.posOff * sx * px2nx,
-                asteroid.y + c.posOff * sy * py2ny,
-                c.r, c.vx, c.vy
+                asteroid.x + c.cx * px2nx,
+                asteroid.y + c.cy * py2ny,
+                c.r, c.vx, c.vy,
+                null,
+                c.vertices
             );
             a.rotationSpeed = c.omega;
-            a.angle = asteroid.angle;
+            // Polygon-path children store vertices already in world-aligned
+            // frame (parent rotation pre-applied) → angle starts at 0 so they
+            // render exactly where they were clipped from. Disk-fallback
+            // children inherit parent.angle so their freshly-generated polygon
+            // visually orbits with the parent's motion (legacy behaviour).
+            a.angle = c.vertices ? 0 : asteroid.angle;
             return a;
         });
 

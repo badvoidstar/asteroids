@@ -257,6 +257,20 @@
                 help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
             },
             {
+                key: 'FRACTURE_VERTICES',
+                label: 'Fracture vertices (jag points)',
+                min: 0, max: 12, step: 1, default: 6,
+                fmt: v => `${v|0}`,
+                help: 'Number of intermediate jag points along the fracture polyline between the two chord/boundary intersections. 0 = straight chord.',
+            },
+            {
+                key: 'FRACTURE_JAGGEDNESS',
+                label: 'Fracture jaggedness (× R)',
+                min: 0, max: 1, step: 0.01, default: 0.35,
+                fmt: v => v.toFixed(2),
+                help: 'Maximum perpendicular displacement of each fracture jag point, as a fraction of the parent radius.',
+            },
+            {
                 key: 'DEFLECTION_TIME_LIMIT',
                 label: 'Shooter-deflection time limit (s)',
                 min: 0.05, max: 5, step: 0.05, default: 0.5,
