@@ -394,7 +394,34 @@ const ObjectSync = (function() {
     function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
-        
+
+        // Capture true wire-arrival time (performance.now() domain) so the
+        // first interpolation snapshot for this object is anchored to when
+        // the network delivered it, not to when the next game-loop frame
+        // happens to detect it (0–16ms later, jittery).
+        const nowPerf = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+        let arrivalTime = nowPerf;
+
+        // Fix 3: if the sender included a spawnTimestamp (wall-clock ms),
+        // back-date arrivalTime by the network/processing age so the first
+        // snapshot lands on the same timeline as future updates and
+        // extrapolation engages from frame 1 instead of the object freezing
+        // at its spawn position for one buffer-delay. Clamp to a sane range
+        // to absorb cross-machine clock skew (negative age → 0; runaway
+        // skew → MAX_BACKDATE_MS).
+        const spawnTimestamp = objectInfo.data ? objectInfo.data.spawnTimestamp : null;
+        if (spawnTimestamp) {
+            const MAX_BACKDATE_MS = 1000; // matches CONFIG.MAX_EXTRAPOLATION
+            const age = Math.max(0, Math.min(MAX_BACKDATE_MS, Date.now() - spawnTimestamp));
+            arrivalTime = nowPerf - age;
+            // The spawnTimestamp is a one-shot anchoring hint; strip it so it
+            // doesn't pollute downstream fromSyncData consumers or get echoed
+            // out via reconciliation snapshots.
+            delete objectInfo.data.spawnTimestamp;
+        }
+
         const existing = objects.get(objectInfo.id);
         if (existing) {
             // Backfill metadata from creation event (object was pre-created by update fallback)
@@ -405,6 +432,7 @@ const ObjectSync = (function() {
             if (objectInfo.version > existing.version) {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
+                existing.arrivalTime = arrivalTime;
             } else if (objectInfo.data) {
                 // Even when the existing object's version is ahead (because an
                 // update arrived first via the fallback path), we still need to
@@ -430,6 +458,10 @@ const ObjectSync = (function() {
         }
 
         const obj = registerObject(objectInfo);
+        // Stamp arrival time on the freshly-registered object so the next
+        // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
+        // call anchors the snapshot correctly (Fix 2 + Fix 3).
+        obj.arrivalTime = arrivalTime;
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);

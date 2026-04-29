@@ -1401,10 +1401,13 @@
                 return latest.data;
             }
 
-            // Single snapshot — no interpolation possible yet
-            if (snapshots.length === 1) {
-                return latest.data;
-            }
+            // Note: a single snapshot is no longer treated as a special case.
+            // Falling through lets the extrapolation branch below dead-reckon
+            // from snapshot[0] using its broadcast velocity, which is what
+            // freshly-spawned remote objects (e.g. asteroid split children)
+            // need so they don't freeze at the spawn position until a second
+            // update arrives. The bracket-search branch is naturally a no-op
+            // when there is only one snapshot.
 
             const delay = this.getDelayForMember(state.ownerMemberId);
             const targetTime = renderTime - delay;
@@ -2288,7 +2291,16 @@
                 velocityY: this.velocityY,
                 angle: this.angle,
                 rotationSpeed: this.rotationSpeed,
-                seed: this.seed
+                seed: this.seed,
+                // Wall-clock spawn time (ms since epoch). Receivers use this to
+                // back-date the first interpolation snapshot so dead-reckoning
+                // anchors to the moment the asteroid actually came into being
+                // on the authoritative client, rather than to the moment the
+                // OnObjectCreated/Replaced broadcast arrived (which lags spawn
+                // by one-way network delay + processing). Without this, freshly
+                // split children render frozen at their spawn position for one
+                // buffer-delay before extrapolation engages.
+                spawnTimestamp: Date.now()
             };
         }
 
@@ -5114,7 +5126,7 @@
                         velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',
                         thrusting: 'th', invulnerable: 'iv', colorIndex: 'ci',
                         memberId: 'mi', score: 'sc', hitCount: 'hc',
-                        radius: 'r', seed: 'sd',
+                        radius: 'r', seed: 'sd', spawnTimestamp: 'sp',
                         lifetime: 'lt', ownerMemberId: 'om',
                         pendingHit: 'ph', hitTargetId: 'ht', hitImpactTorque: 'hi',
                         hitBulletAngle: 'ha', hitOffsetN: 'hn',
