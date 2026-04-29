@@ -1141,6 +1141,15 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
+        // When a freshly-created remote object has only one snapshot, the
+        // interpolator runs at zero buffered delay (leading edge) so the
+        // object is dead-reckoned forward from its broadcast velocity/
+        // rotationSpeed instead of freezing on the spawn pixel for one
+        // buffer-delay. Once a second snapshot arrives, the buffered delay
+        // ramps from 0 back up to the per-member adaptive delay over this
+        // window. A linear ramp avoids the backward "rubber-band" snap that
+        // would happen with an instant transition.
+        SPAWN_CATCHUP_DURATION: 300,   // ms over which buffered delay re-engages after first→second snapshot
     };
 
     // ============================================
@@ -1247,6 +1256,16 @@
                 if (latest && snapshot.time < latest.time) {
                     snapshot.time = latest.time;
                 }
+                // When transitioning from 1→2 snapshots, mark the moment we
+                // re-engage the buffered-delay regime. getInterpolated linearly
+                // ramps the effective delay from 0 (leading-edge extrapolation,
+                // used for the single-snapshot phase) back up to the full
+                // adaptive delay over SPAWN_CATCHUP_DURATION ms. This avoids
+                // the visible backward snap that would occur if the delay
+                // jumped from 0 to ~baseDelay in a single frame.
+                if (existing.snapshots.length === 1 && existing.catchupStart == null) {
+                    existing.catchupStart = snapshot.time;
+                }
                 existing.snapshots.push(snapshot);
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
                     existing.snapshots.shift();
@@ -1254,7 +1273,8 @@
             } else {
                 this.states.set(objectId, {
                     ownerMemberId: ownerMemberId,
-                    snapshots: [snapshot]
+                    snapshots: [snapshot],
+                    catchupStart: null
                 });
             }
         },
@@ -1401,15 +1421,30 @@
                 return latest.data;
             }
 
-            // Note: a single snapshot is no longer treated as a special case.
-            // Falling through lets the extrapolation branch below dead-reckon
-            // from snapshot[0] using its broadcast velocity, which is what
-            // freshly-spawned remote objects (e.g. asteroid split children)
-            // need so they don't freeze at the spawn position until a second
-            // update arrives. The bracket-search branch is naturally a no-op
-            // when there is only one snapshot.
-
-            const delay = this.getDelayForMember(state.ownerMemberId);
+            // Effective buffered delay.
+            //   • Single snapshot   → delay = 0  (extrapolate from snapshot[0]
+            //     using its broadcast velocity/rotationSpeed; otherwise the
+            //     "before-oldest" clamp below would freeze the object on its
+            //     spawn pixel for one buffer-delay).
+            //   • After 2nd snapshot arrives → ramp delay linearly from 0 back
+            //     to the full per-member adaptive delay over
+            //     SPAWN_CATCHUP_DURATION ms. An instant jump would yank the
+            //     rendered position backward by ~delay; the ramp turns that
+            //     into a brief, smooth slowdown. Once progress reaches 1 we
+            //     drop the catchup marker so the steady-state path is a pure
+            //     read of getDelayForMember.
+            const baseDelay = this.getDelayForMember(state.ownerMemberId);
+            let delay;
+            if (snapshots.length === 1) {
+                delay = 0;
+            } else if (state.catchupStart != null) {
+                const elapsed = renderTime - state.catchupStart;
+                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
+                delay = baseDelay * progress;
+                if (progress >= 1) state.catchupStart = null;
+            } else {
+                delay = baseDelay;
+            }
             const targetTime = renderTime - delay;
 
             // Before the oldest snapshot: return oldest (clamped)
@@ -2016,7 +2051,11 @@
                 colorIndex: this.colorIndex,
                 memberId: this.memberId,
                 score: this.score || 0,
-                hitCount: this.hitCount || 0
+                hitCount: this.hitCount || 0,
+                // Wall-clock spawn time (ms since epoch). See Asteroid.toSyncData
+                // for rationale; receivers back-date the first interpolation
+                // snapshot so newly-joined remote ships dead-reckon from frame 1.
+                spawnTimestamp: Date.now()
             };
         }
 
@@ -2501,7 +2540,13 @@
                 hitTargetId: this.hitTargetId || null,
                 hitImpactTorque: this.hitImpactTorque || 0,
                 hitBulletAngle: this.hitBulletAngle || 0,
-                hitOffsetN: this.hitOffsetN || 0
+                hitOffsetN: this.hitOffsetN || 0,
+                // Wall-clock spawn time (ms since epoch). See Asteroid.toSyncData
+                // for rationale; bullets travel fast and are short-lived, so
+                // back-dating the first snapshot to the firing instant is the
+                // most visible win — without it the bullet appears to teleport
+                // from a stale position when its second snapshot arrives.
+                spawnTimestamp: Date.now()
             };
         }
 
