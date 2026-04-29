@@ -1435,14 +1435,15 @@
                     const timeDiff = curr.time - prev.time;
                     if (timeDiff <= 0) return curr.data;
 
-                    // When snapshots arrive in a burst (timeDiff very small),
-                    // inflate the divisor to delay*0.5 so the interpolation
-                    // parameter t doesn't blow up and cause a visible jitter.
-                    // (Snapping to curr.data here was tried in PR #77 but caused
-                    // networking smoothness issues, so we keep the inflation.)
-                    const minTimeDiff = delay * 0.5;
-                    const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
-                    const t = (targetTime - prev.time) / effectiveTimeDiff;
+                    // Burst-arrival guard: when two snapshots arrive almost
+                    // simultaneously (timeDiff << delay), interpolating between
+                    // them is meaningless — snap to the newer snapshot instead.
+                    // The previous implementation inflated timeDiff to delay*0.5,
+                    // which made t artificially small and caused the render to
+                    // linger near prev even after targetTime had advanced past curr.
+                    if (timeDiff < delay * 0.5) return curr.data;
+
+                    const t = (targetTime - prev.time) / timeDiff;
 
                     if (this.shouldSnap(prev.data, curr.data)) {
                         return curr.data;
@@ -1456,7 +1457,7 @@
                         velocity: curr.velocity,
                         rotationSpeed: curr.rotationSpeed
                     };
-                    return this.hermite(pseudoState, Math.min(t, 1), effectiveTimeDiff);
+                    return this.hermite(pseudoState, Math.min(t, 1), timeDiff);
                 }
             }
 
