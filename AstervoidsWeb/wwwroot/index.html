@@ -1133,7 +1133,7 @@
         ADAPTIVE_DELAY_ENABLED: true,   // Auto-tune interpolation delay based on jitter
         ADAPTIVE_DELAY_MIN: 1000/60,   // Auto-tune interpolation min delay (hard floor)
         ADAPTIVE_DELAY_JITTER_MULT: 2, // σ multiplier for jitter buffer (2 ≈ 95% coverage)
-        ADAPTIVE_DELAY_NET_FLOOR: 0.25, // Min network factor — bounds worst-case extrapolation to this fraction of send interval
+        ADAPTIVE_DELAY_NET_FLOOR: 0.8, // Min network factor — keeps interpolation delay near a full send interval so the renderer stays in the safe interpolation buffer (was 0.25, which left the renderer in the extrapolation zone ~70% of each send cycle and made it sensitive to small jitter-induced changes in computedDelay).
         ADAPTIVE_DELAY_NET_SCALE: 2,   // RTT-to-mean divisor for network factor: factor = floor + RTT / (scale × mean)
         ADAPTIVE_DELAY_SMOOTHING: 0.1, // EMA alpha for delay transitions (lower = smoother, 0.1 ≈ 10-sample convergence)
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
@@ -1218,9 +1218,16 @@
          * @param {string} objectId - Object ID
          * @param {object} data - New object data from ObjectSync
          * @param {string} ownerMemberId - Owner member ID (for per-member delay lookup)
+         * @param {number} [arrivalTime] - Wall-clock time the data actually arrived
+         *   from the network (performance.now()-domain). Defaults to now() if omitted,
+         *   but callers should pass the value captured by ObjectSync's network
+         *   handler so the snapshot is anchored to true arrival time and not to
+         *   the next game-loop frame's detection time. The latter introduces 0–16ms
+         *   of variable jitter that produces visible discontinuities at each
+         *   snapshot boundary during interpolation/extrapolation handoff.
          */
-        updateState(objectId, data, ownerMemberId) {
-            const now = performance.now();
+        updateState(objectId, data, ownerMemberId, arrivalTime) {
+            const now = (arrivalTime != null) ? arrivalTime : performance.now();
             const existing = this.states.get(objectId);
             const snapshot = {
                 data: { ...data },
@@ -1231,6 +1238,15 @@
             
             if (existing) {
                 existing.ownerMemberId = ownerMemberId;
+                // Keep snapshots strictly monotonic in time. If a caller passes
+                // an arrivalTime older than the most recent snapshot (e.g. due
+                // to clock skew between batches or out-of-order frame
+                // detection), advance to the latest known time so the bracket
+                // search stays valid.
+                const latest = existing.snapshots[existing.snapshots.length - 1];
+                if (latest && snapshot.time < latest.time) {
+                    snapshot.time = latest.time;
+                }
                 existing.snapshots.push(snapshot);
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
                     existing.snapshots.shift();
@@ -1419,14 +1435,15 @@
                     const timeDiff = curr.time - prev.time;
                     if (timeDiff <= 0) return curr.data;
 
-                    // When snapshots arrive in a burst (timeDiff very small),
-                    // inflate the divisor to delay*0.5 so the interpolation
-                    // parameter t doesn't blow up and cause a visible jitter.
-                    // (Snapping to curr.data here was tried in PR #77 but caused
-                    // networking smoothness issues, so we keep the inflation.)
-                    const minTimeDiff = delay * 0.5;
-                    const effectiveTimeDiff = Math.max(timeDiff, minTimeDiff);
-                    const t = (targetTime - prev.time) / effectiveTimeDiff;
+                    // Burst-arrival guard: when two snapshots arrive almost
+                    // simultaneously (timeDiff << delay), interpolating between
+                    // them is meaningless — snap to the newer snapshot instead.
+                    // The previous implementation inflated timeDiff to delay*0.5,
+                    // which made t artificially small and caused the render to
+                    // linger near prev even after targetTime had advanced past curr.
+                    if (timeDiff < delay * 0.5) return curr.data;
+
+                    const t = (targetTime - prev.time) / timeDiff;
 
                     if (this.shouldSnap(prev.data, curr.data)) {
                         return curr.data;
@@ -1440,7 +1457,7 @@
                         velocity: curr.velocity,
                         rotationSpeed: curr.rotationSpeed
                     };
-                    return this.hermite(pseudoState, Math.min(t, 1), effectiveTimeDiff);
+                    return this.hermite(pseudoState, Math.min(t, 1), timeDiff);
                 }
             }
 
@@ -2848,8 +2865,18 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // Reconciliation snapshots are stale by ~RTT and would
+                    // step the rendered position backward if pushed. Advance
+                    // the version cursor without snapshotting; the next live
+                    // OnObjectsUpdated broadcast (with proper arrival-time
+                    // anchoring) will resume normal interpolation.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Get or create remote ship instance
@@ -3012,8 +3039,15 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // See updateRemoteShips for rationale: skip pushing a
+                    // stale reconciliation snapshot into the interpolator.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Find existing asteroid by sync ID
@@ -3115,8 +3149,15 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // See updateRemoteShips for rationale: skip pushing a
+                    // stale reconciliation snapshot into the interpolator.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Find existing bullet by sync ID

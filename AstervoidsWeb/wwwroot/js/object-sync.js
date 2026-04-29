@@ -405,6 +405,26 @@ const ObjectSync = (function() {
             if (objectInfo.version > existing.version) {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
+            } else if (objectInfo.data) {
+                // Even when the existing object's version is ahead (because an
+                // update arrived first via the fallback path), we still need to
+                // backfill any STATIC fields that updates don't carry — most
+                // importantly velocityX/Y, rotationSpeed, radius, seed, type.
+                // Without this, remote-object extrapolation runs with velocity=0
+                // and the asteroid appears frozen between snapshots, then jumps
+                // each time a new update arrives. Only fill missing keys; never
+                // overwrite a value the (newer) update already provided.
+                let typeChanged = false;
+                const oldType = existing.data?.type;
+                for (const key in objectInfo.data) {
+                    if (existing.data[key] === undefined) {
+                        existing.data[key] = objectInfo.data[key];
+                        if (key === 'type') typeChanged = true;
+                    }
+                }
+                if (typeChanged) {
+                    updateTypeIndex(existing, oldType, existing.data.type);
+                }
             }
             return;
         }
@@ -421,7 +441,17 @@ const ObjectSync = (function() {
      */
     function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
         trackMemberSequence(senderMemberId, memberSequence);
-        
+
+        // Capture the actual network arrival time once per packet. Stamping each
+        // updated object with this value lets downstream interpolation anchor
+        // its snapshot timestamps to when the data really arrived, rather than
+        // to whenever the next game-loop frame happens to detect the version
+        // change (which can be 0–16ms later and is jittery, producing visible
+        // discontinuities at each snapshot handoff).
+        const arrivalTime = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
@@ -436,7 +466,8 @@ const ObjectSync = (function() {
                     const oldType = existing.data?.type;
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
-                    
+                    existing.arrivalTime = arrivalTime;
+
                     // Update type index if type changed (only when type is present in delta)
                     if (update.data?.type !== undefined) {
                         updateTypeIndex(existing, oldType, update.data.type);
@@ -455,7 +486,8 @@ const ObjectSync = (function() {
                     ownerMemberId: null,
                     scope: null,
                     data: update.data || {},
-                    version: update.version
+                    version: update.version,
+                    arrivalTime: arrivalTime
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -585,6 +617,19 @@ const ObjectSync = (function() {
                         existing.data = obj.data || {};
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
+                        // Mark this object as updated by reconciliation. The
+                        // snapshot data is stale by ~RTT (it was the server's
+                        // state at GetSessionState time, not now). If the
+                        // interpolator pushes this position into its ring
+                        // buffer timestamped at performance.now(), it would
+                        // step the rendered asteroid backward by ~RTT × velocity
+                        // and disrupt ongoing extrapolation. Consumers
+                        // (updateAstervoidsFromSync, updateRemoteShips,
+                        // updateBulletsFromSync) check this flag and skip the
+                        // updateState() push for one cycle, letting live
+                        // OnObjectsUpdated broadcasts (with proper arrivalTime
+                        // anchoring) drive the interpolator instead.
+                        existing.fromReconciliation = true;
                     }
                 } else if (pendingDeletes.has(obj.id)) {
                     // Locally deleted but server hasn't processed yet — do NOT
