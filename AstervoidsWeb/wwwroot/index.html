@@ -1141,15 +1141,17 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
-        // When a freshly-created remote object has only one snapshot, the
+        // When a freshly-created remote object has only one snapshot the
         // interpolator runs at zero buffered delay (leading edge) so the
         // object is dead-reckoned forward from its broadcast velocity/
         // rotationSpeed instead of freezing on the spawn pixel for one
-        // buffer-delay. Once a second snapshot arrives, the buffered delay
-        // ramps from 0 back up to the per-member adaptive delay over this
-        // window. A linear ramp avoids the backward "rubber-band" snap that
-        // would happen with an instant transition.
-        SPAWN_CATCHUP_DURATION: 300,   // ms over which buffered delay re-engages after first→second snapshot
+        // buffer-delay. The arrival of the 2nd snapshot then needs to switch
+        // to buffered (baseDelay-behind) output; doing so naively snaps the
+        // rendered position backward by ~v·(baseDelay + net_delay). Instead
+        // we capture that visual delta on the 1→2 transition and decay it
+        // linearly to zero over this window — output stays continuous across
+        // the transition and forward velocity quietly absorbs the offset.
+        SPAWN_CATCHUP_DURATION: 300,   // ms over which the renderError visual offset decays to zero
     };
 
     // ============================================
@@ -1256,15 +1258,41 @@
                 if (latest && snapshot.time < latest.time) {
                     snapshot.time = latest.time;
                 }
-                // When transitioning from 1→2 snapshots, mark the moment we
-                // re-engage the buffered-delay regime. getInterpolated linearly
-                // ramps the effective delay from 0 (leading-edge extrapolation,
-                // used for the single-snapshot phase) back up to the full
-                // adaptive delay over SPAWN_CATCHUP_DURATION ms. This avoids
-                // the visible backward snap that would occur if the delay
-                // jumped from 0 to ~baseDelay in a single frame.
-                if (existing.snapshots.length === 1 && existing.catchupStart == null) {
-                    existing.catchupStart = snapshot.time;
+                // On the 1→2 snapshot transition, the interpolator switches
+                // from leading-edge extrapolation (delay=0) to buffered output
+                // (delay=baseDelay). The instantaneous models disagree by
+                // ~v·(baseDelay + net_delay) and would yank the rendered
+                // position backward in a single frame. Capture that visual
+                // offset BEFORE pushing the new snapshot, then again AFTER,
+                // and store the delta on the state. getInterpolated decays it
+                // to zero over SPAWN_CATCHUP_DURATION so the rendered output
+                // remains continuous (no backward snap) while forward velocity
+                // smoothly absorbs the offset.
+                if (existing.snapshots.length === 1 && existing.renderError == null) {
+                    const prev = this.getInterpolated(objectId, snapshot.time);
+                    existing.snapshots.push(snapshot);
+                    if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
+                        existing.snapshots.shift();
+                    }
+                    const next = this.getInterpolated(objectId, snapshot.time);
+                    if (prev && next && prev.x !== undefined && next.x !== undefined) {
+                        const dx = prev.x - next.x;
+                        const dy = (prev.y || 0) - (next.y || 0);
+                        // Skip smoothing when the delta suggests a screen-wrap
+                        // teleport (normalized coords are in [0,1]; a real
+                        // motion-induced offset in 50ms is far below 0.5).
+                        // Smoothing across a wrap would slowly drag the object
+                        // back across the screen — far worse than just snapping.
+                        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+                            existing.renderError = {
+                                x: dx,
+                                y: dy,
+                                angle: (prev.angle || 0) - (next.angle || 0),
+                                startTime: snapshot.time
+                            };
+                        }
+                    }
+                    return;
                 }
                 existing.snapshots.push(snapshot);
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
@@ -1274,7 +1302,7 @@
                 this.states.set(objectId, {
                     ownerMemberId: ownerMemberId,
                     snapshots: [snapshot],
-                    catchupStart: null
+                    renderError: null
                 });
             }
         },
@@ -1414,6 +1442,40 @@
             const state = this.states.get(objectId);
             if (!state || state.snapshots.length === 0) return null;
 
+            const result = this._baseInterpolated(state, renderTime);
+
+            // Apply decaying render-error offset captured at the 1→2 snapshot
+            // transition (see updateState). At progress=0 the offset exactly
+            // cancels the model switch, keeping rendered position continuous;
+            // at progress=1 the offset is zero and we render the pure buffered
+            // interpolation. Forward velocity covers the offset over the
+            // window, so rendered motion is always forward (provided
+            // SPAWN_CATCHUP_DURATION ≥ baseDelay + net_delay, which holds for
+            // typical 100ms baseDelay and 100ms net_delay vs the 300ms window).
+            if (state.renderError && result) {
+                const elapsed = renderTime - state.renderError.startTime;
+                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
+                if (progress >= 1) {
+                    state.renderError = null;
+                } else {
+                    const w = 1 - progress;
+                    return {
+                        ...result,
+                        x: result.x + state.renderError.x * w,
+                        y: (result.y || 0) + state.renderError.y * w,
+                        angle: (result.angle || 0) + state.renderError.angle * w
+                    };
+                }
+            }
+            return result;
+        },
+
+        /**
+         * Base interpolation: snapshot bracket-search + Hermite blend, with
+         * leading-edge extrapolation for the single-snapshot case. The
+         * render-error smoothing layer in getInterpolated wraps this output.
+         */
+        _baseInterpolated(state, renderTime) {
             const snapshots = state.snapshots;
             const latest = snapshots[snapshots.length - 1];
 
@@ -1421,30 +1483,12 @@
                 return latest.data;
             }
 
-            // Effective buffered delay.
-            //   • Single snapshot   → delay = 0  (extrapolate from snapshot[0]
-            //     using its broadcast velocity/rotationSpeed; otherwise the
-            //     "before-oldest" clamp below would freeze the object on its
-            //     spawn pixel for one buffer-delay).
-            //   • After 2nd snapshot arrives → ramp delay linearly from 0 back
-            //     to the full per-member adaptive delay over
-            //     SPAWN_CATCHUP_DURATION ms. An instant jump would yank the
-            //     rendered position backward by ~delay; the ramp turns that
-            //     into a brief, smooth slowdown. Once progress reaches 1 we
-            //     drop the catchup marker so the steady-state path is a pure
-            //     read of getDelayForMember.
+            // Single snapshot → delay 0 (extrapolate from snapshot[0]).
+            // Otherwise → full per-member adaptive delay. The transition from
+            // 0 to baseDelay would normally yank position backward; the
+            // renderError smoothing layer in getInterpolated absorbs that.
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
-            let delay;
-            if (snapshots.length === 1) {
-                delay = 0;
-            } else if (state.catchupStart != null) {
-                const elapsed = renderTime - state.catchupStart;
-                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
-                delay = baseDelay * progress;
-                if (progress >= 1) state.catchupStart = null;
-            } else {
-                delay = baseDelay;
-            }
+            const delay = (snapshots.length === 1) ? 0 : baseDelay;
             const targetTime = renderTime - delay;
 
             // Before the oldest snapshot: return oldest (clamped)
@@ -2051,11 +2095,7 @@
                 colorIndex: this.colorIndex,
                 memberId: this.memberId,
                 score: this.score || 0,
-                hitCount: this.hitCount || 0,
-                // Wall-clock spawn time (ms since epoch). See Asteroid.toSyncData
-                // for rationale; receivers back-date the first interpolation
-                // snapshot so newly-joined remote ships dead-reckon from frame 1.
-                spawnTimestamp: Date.now()
+                hitCount: this.hitCount || 0
             };
         }
 
@@ -2330,16 +2370,7 @@
                 velocityY: this.velocityY,
                 angle: this.angle,
                 rotationSpeed: this.rotationSpeed,
-                seed: this.seed,
-                // Wall-clock spawn time (ms since epoch). Receivers use this to
-                // back-date the first interpolation snapshot so dead-reckoning
-                // anchors to the moment the asteroid actually came into being
-                // on the authoritative client, rather than to the moment the
-                // OnObjectCreated/Replaced broadcast arrived (which lags spawn
-                // by one-way network delay + processing). Without this, freshly
-                // split children render frozen at their spawn position for one
-                // buffer-delay before extrapolation engages.
-                spawnTimestamp: Date.now()
+                seed: this.seed
             };
         }
 
@@ -2540,13 +2571,7 @@
                 hitTargetId: this.hitTargetId || null,
                 hitImpactTorque: this.hitImpactTorque || 0,
                 hitBulletAngle: this.hitBulletAngle || 0,
-                hitOffsetN: this.hitOffsetN || 0,
-                // Wall-clock spawn time (ms since epoch). See Asteroid.toSyncData
-                // for rationale; bullets travel fast and are short-lived, so
-                // back-dating the first snapshot to the firing instant is the
-                // most visible win — without it the bullet appears to teleport
-                // from a stale position when its second snapshot arrives.
-                spawnTimestamp: Date.now()
+                hitOffsetN: this.hitOffsetN || 0
             };
         }
 
