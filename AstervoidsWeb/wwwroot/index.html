@@ -1274,6 +1274,15 @@
                     if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
                         existing.snapshots.shift();
                     }
+                    // Install a zero-valued sentinel renderError so the base
+                    // interpolator uses the catchup-ramp model (effectiveDelay
+                    // = baseDelay·progress, which is 0 at progress=0 → leading
+                    // edge from the freshest snapshot) when computing `next`
+                    // below. Without this sentinel, the capture call would see
+                    // renderError=null and return the post-window bracket
+                    // value, causing the wrong offset to be captured.
+                    // Overwritten with real values immediately.
+                    existing.renderError = { x: 0, y: 0, angle: 0, startTime: snapshot.time };
                     const next = this.getInterpolated(objectId, snapshot.time);
                     if (prev && next && prev.x !== undefined && next.x !== undefined) {
                         const dx = prev.x - next.x;
@@ -1290,7 +1299,11 @@
                                 angle: (prev.angle || 0) - (next.angle || 0),
                                 startTime: snapshot.time
                             };
+                        } else {
+                            existing.renderError = null;
                         }
+                    } else {
+                        existing.renderError = null;
                     }
                     return;
                 }
@@ -1487,8 +1500,27 @@
             // Otherwise → full per-member adaptive delay. The transition from
             // 0 to baseDelay would normally yank position backward; the
             // renderError smoothing layer in getInterpolated absorbs that.
+            //
+            // While the catchup smoother is active (state.renderError set), we
+            // ramp the effective delay smoothly from 0 (lead from the freshest
+            // known snapshot) at progress=0 to the full baseDelay (bracket
+            // regime) at progress=1. This achieves the "lead from snapshot[1]"
+            // accuracy improvement during catchup — eliminates the stale
+            // snap[0].velocity Hermite tangent and the receiver-arrival-timing
+            // jitter in timeDiff — while guaranteeing position continuity at
+            // the moment renderError clears (effectiveDelay = baseDelay matches
+            // the post-window bracket regime exactly, so no backward jump).
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
-            const delay = (snapshots.length === 1) ? 0 : baseDelay;
+            let delay;
+            if (snapshots.length === 1) {
+                delay = 0;
+            } else if (state.renderError) {
+                const elapsed = renderTime - state.renderError.startTime;
+                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
+                delay = baseDelay * progress;
+            } else {
+                delay = baseDelay;
+            }
             const targetTime = renderTime - delay;
 
             // Before the oldest snapshot: return oldest (clamped)
