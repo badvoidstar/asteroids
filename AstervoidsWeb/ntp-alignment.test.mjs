@@ -141,7 +141,9 @@ function makeStore(baseDelay, useNtp) {
 
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                // NTP mode: align single-snap with bracket regime to avoid
+                // the spawn jump-back when snap[1] arrives.
+                delay = this.useNtp ? this.baseDelay : 0;
             } else if (!this.useNtp && state.renderError) {
                 const elapsed  = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
@@ -409,42 +411,77 @@ test('slew: effective offset moves monotonically from old to new (no reversal)',
 
 // ── End-to-end NTP alignment tests ───────────────────────────────────────────
 
-test('e2e NTP: first snapshot uses sender time → extrapolation advances from earlier anchor', () => {
-    // With NTP, snap[0].time = serverToLocal(T_send) which is earlier than T_recv.
-    // The single-snapshot extrapolation therefore spans MORE elapsed time (from
-    // T_send, not from T_recv), giving a more accurate dead-reckoned position.
-    //
-    // Scenario: zero offset (clocks aligned, timeOrigin=0).
-    // Server sends snap[0] at epoch 0; client receives at perf 100 (100ms OWD).
-    // serverToLocal(0) = 0 → snap[0].time = 0.
-    // Render at perf 100 (arrival): single-snap, delay=0, targetTime=100, extrapolate
-    //   from t=0 for 100ms → x = v*0.1 = 0.04.
-    // Without NTP: snap[0].time=100 (arrival), extrapolate for 0ms → x=0.
-    // NTP gives a more accurate position at the moment of arrival.
-    // No renderError installed (NTP mode).
+test('e2e NTP: single-snap uses delay=baseDelay (clamped to snap[0]) — no premature extrapolation', () => {
+    // With NTP, snap[0].time is anchored to the sender timestamp (in the past
+    // by ~OWD). Single-snap mode now uses delay=baseDelay so its behavior is
+    // continuous with the bracket regime that follows. At the moment of arrival,
+    // targetTime = renderTime - baseDelay is in the past of snap[0].time, so
+    // the position is clamped to snap[0].data (no premature extrapolation that
+    // would later snap back when snap[1] arrives).
 
     const timeOrigin = 0;
     let _t = 0;
     const c = makeNtpClock(timeOrigin, () => _t);
 
-    // ping at perf 0→10, server responds with epoch=5: zero offset
+    // Zero-offset clock
     _t = 10; c.addSample(0, 10, 5); // serverPerf=5, mid=5, offset=0
     assert.ok(Math.abs(c.getEffectiveOffset()) < 1e-9, 'offset should be ~0');
 
     const s = makeStore(100, /* useNtp */ true);
 
-    // Server sends at epoch 0; client receives at perf 100 (not simulated here,
-    // we just pass the NTP-aligned timestamp as snap[0].time).
+    // Server sends at epoch 0; snap[0].time = serverToLocal(0) = 0.
     const snapTime0 = c.serverToLocal(0); // = 0
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, snapTime0);
 
-    // Render at the simulated arrival time (perf=100): single snapshot, delay=0,
-    // extrapolation from t=0 for 100ms → x = 0.4 * 0.1 = 0.04.
+    // Render at perf=100 (one OWD after server sent). With the fix:
+    //   delay = baseDelay = 100, targetTime = 100 - 100 = 0 = snap[0].time
+    //   → returns snap[0].data (clamped). x = 0.
     const out = s.getInterpolated('a', 100);
-    assert.ok(out !== null, 'should have interpolated result');
-    assert.ok(Math.abs(out.x - 0.04) < 1e-9,
-        `expected extrapolated x=0.04 (100ms at v=0.4 from sender anchor), got ${out.x}`);
+    assert.ok(out !== null);
+    assert.ok(Math.abs(out.x - 0) < 1e-9,
+        `expected clamped snap[0].x=0, got ${out.x}`);
     assert.equal(s.states.get('a').renderError, null, 'renderError not installed (NTP mode)');
+});
+
+test('e2e NTP: spawn jump-back regression — single-snap → bracket transition is monotonic', () => {
+    // This is the exact scenario the user reported: a freshly-spawned asteroid
+    // (e.g. wave spawn or post-shot split-child) renders during single-snap mode,
+    // then snap[1] arrives. Pre-fix: single-snap with delay=0 extrapolated forward
+    // ~v·OWD; bracket then rendered at targetTime=renderTime−baseDelay, which
+    // corresponded to a position ~v·baseDelay further back → visible JUMP-BACK.
+    //
+    // Setup: zero-offset clocks; OWD=50ms; sendInterval=100ms; baseDelay=100ms.
+    // Server sends snap[0] at server-time 0;   client receives at perf 50.
+    // Server sends snap[1] at server-time 100; client receives at perf 150.
+    // Velocity 0.4 units/s → snap[1].x = 0.04.
+
+    const timeOrigin = 0;
+    let _t = 0;
+    const c = makeNtpClock(timeOrigin, () => _t);
+
+    // Zero-offset NTP sample (so serverToLocal(t)=t)
+    _t = 10; c.addSample(0, 10, 5);
+
+    const s = makeStore(100, /* useNtp */ true);
+
+    // snap[0] arrives at perf=50; snap[0].time = serverToLocal(0) = 0
+    s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, c.serverToLocal(0));
+
+    // Render every frame from perf=50 (first frame after snap[0]) up to perf=200
+    // (50ms after snap[1] arrives). Verify that x is non-decreasing (no jump-back).
+    // snap[1] is pushed at perf=150.
+    let prev = s.getInterpolated('a', 50).x;
+    let snap1Pushed = false;
+    for (let perf = 51; perf <= 200; perf += 1) {
+        if (!snap1Pushed && perf >= 150) {
+            s.updateState('a', { x: 0.04, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, c.serverToLocal(100));
+            snap1Pushed = true;
+        }
+        const cur = s.getInterpolated('a', perf).x;
+        assert.ok(cur >= prev - 1e-9,
+            `JUMP-BACK at perf=${perf} (snap1Pushed=${snap1Pushed}): ${prev} → ${cur}`);
+        prev = cur;
+    }
 });
 
 test('e2e NTP: 1→2 snapshot transition is continuous without renderError', () => {

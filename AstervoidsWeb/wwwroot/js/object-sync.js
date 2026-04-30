@@ -549,15 +549,22 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object replaced (atomic delete + create).
+     * @param {object} event
+     * @param {string} senderMemberId
+     * @param {number} memberSequence
+     * @param {number} [serverTimestamp] - Server epoch ms at broadcast time; threaded
+     *   into each created child so they pick up senderTimestampMs for NTP alignment.
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
-        // Create all replacement objects (no sequence tracking — already tracked above)
+        // Create all replacement objects (no sequence tracking — already tracked above).
+        // Pass serverTimestamp so split-children get senderTimestampMs anchored to the
+        // server's broadcast moment — required for NTP-aligned snapshot timing.
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined, serverTimestamp);
         }
 
         if (callbacks.onObjectReplaced) {

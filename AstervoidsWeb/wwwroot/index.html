@@ -1620,7 +1620,10 @@
                 return latest.data;
             }
 
-            // Single snapshot → delay 0 (extrapolate from snapshot[0]).
+            // Single snapshot → delay 0 (extrapolate from snapshot[0]) under the
+            // legacy renderError regime, so the object is dead-reckoned forward
+            // immediately rather than freezing on the spawn pixel.
+            //
             // Otherwise → full per-member adaptive delay. The transition from
             // 0 to baseDelay would normally yank position backward; the
             // renderError smoothing layer in getInterpolated absorbs that.
@@ -1634,12 +1637,21 @@
             // jitter in timeDiff — while guaranteeing position continuity at
             // the moment renderError clears (effectiveDelay = baseDelay matches
             // the post-window bracket regime exactly, so no backward jump).
-            // (Skipped when USE_NTP_ALIGNMENT=true — sender timestamps handle the
-            // transition without the effectiveDelay ramp.)
+            //
+            // Under USE_NTP_ALIGNMENT, snap[0].time is already in the past by
+            // ~OWD (sender-stamped via NtpClock.serverToLocal). If we used
+            // delay=0 here we'd extrapolate forward by ~OWD ms; when snap[1]
+            // arrives the bracket regime renders at targetTime = renderTime −
+            // baseDelay, which corresponds to a position ~v·baseDelay further
+            // back than what single-snap was just showing — visible jump-back
+            // at spawn. So in NTP mode we use delay=baseDelay even for the
+            // single snapshot (clamping to snap[0].data when targetTime <
+            // snap[0].time), making single-snap behavior continuous with the
+            // bracket regime that follows.
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                delay = USE_NTP_ALIGNMENT ? baseDelay : 0;
             } else if (!USE_NTP_ALIGNMENT && state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));

@@ -250,7 +250,7 @@ const SessionClient = (function() {
 
         connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp);
             }
         }));
 
