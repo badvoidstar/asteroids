@@ -394,7 +394,24 @@ const ObjectSync = (function() {
     function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
-        
+
+        // Capture true wire-arrival time (performance.now() domain) so the
+        // first interpolation snapshot for this object is anchored to when
+        // the network delivered it, not to when the next game-loop frame
+        // happens to detect it (0–16ms later, jittery).
+        const arrivalTime = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+
+        // Strip any legacy spawnTimestamp field (no longer used; receiver-side
+        // render-error smoothing absorbs the leading-edge → buffered handoff
+        // discontinuity instead). Cross-machine wall-clock skew made the
+        // back-date of arrivalTime by Date.now()-spawnTimestamp unreliable;
+        // it also amplified the discontinuity smoothing has to absorb.
+        if (objectInfo.data && objectInfo.data.spawnTimestamp !== undefined) {
+            delete objectInfo.data.spawnTimestamp;
+        }
+
         const existing = objects.get(objectInfo.id);
         if (existing) {
             // Backfill metadata from creation event (object was pre-created by update fallback)
@@ -405,6 +422,7 @@ const ObjectSync = (function() {
             if (objectInfo.version > existing.version) {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
+                existing.arrivalTime = arrivalTime;
             } else if (objectInfo.data) {
                 // Even when the existing object's version is ahead (because an
                 // update arrived first via the fallback path), we still need to
@@ -430,6 +448,10 @@ const ObjectSync = (function() {
         }
 
         const obj = registerObject(objectInfo);
+        // Stamp arrival time on the freshly-registered object so the next
+        // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
+        // call anchors the snapshot correctly (Fix 2 + Fix 3).
+        obj.arrivalTime = arrivalTime;
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
