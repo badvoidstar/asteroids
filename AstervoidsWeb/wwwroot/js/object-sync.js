@@ -563,8 +563,11 @@ const ObjectSync = (function() {
         // Create all replacement objects (no sequence tracking — already tracked above).
         // Pass serverTimestamp so split-children get senderTimestampMs anchored to the
         // server's broadcast moment — required for NTP-aligned snapshot timing.
+        // senderMemberId/memberSequence are passed as null to skip the redundant
+        // trackMemberSequence call inside handleRemoteObjectCreated (it early-returns on
+        // null inputs); tracking was already done at the top of this function.
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo, undefined, undefined, serverTimestamp);
+            handleRemoteObjectCreated(objectInfo, null, null, serverTimestamp);
         }
 
         if (callbacks.onObjectReplaced) {
