@@ -160,7 +160,47 @@ jobs:
             # Branch: provision with azd, then deploy with az cli to specific container app
             # First, provision the infrastructure
             azd provision --no-prompt
-            
+
+            # Defensive check: `azd provision --no-prompt` can falsely report
+            # "no changes" for branch deploys when a prior branch's truncated
+            # 20-char sanitized env name matches this one (azd's deployment
+            # state is keyed on env name, not on the actual resources). When
+            # that happens, our branch's container app is silently NOT created
+            # and the subsequent `az containerapp update` fails with
+            # "The containerapp '...' does not exist". Verify the expected app
+            # exists in the production resource group; if not, force a direct
+            # bicep deployment to create it.
+            EXPECTED_APP="${{ env.CONTAINER_APP_PREFIX }}-${SANITIZED_BRANCH}"
+            if ! az containerapp show \
+                  --name "$EXPECTED_APP" \
+                  --resource-group "${{ env.PRODUCTION_RG }}" \
+                  &>/dev/null; then
+              echo "::warning::Container app '$EXPECTED_APP' missing after azd provision (likely the env-name truncation collision in azd's deployment state). Forcing a direct bicep deployment to create it."
+
+              CD_NAME=$(azd env get-values | grep '^CUSTOM_DOMAIN_NAME=' | cut -d'=' -f2 | tr -d '"' || echo "")
+              CD_SUB=$(azd env get-values | grep '^CUSTOM_SUBDOMAIN=' | cut -d'=' -f2 | tr -d '"' || echo "")
+
+              az deployment sub create \
+                --name "fallback-${SANITIZED_BRANCH}-${{ github.run_id }}" \
+                --location westus2 \
+                --template-file infra/main.bicep \
+                --parameters \
+                  environmentName="${SANITIZED_BRANCH}" \
+                  location=westus2 \
+                  useSharedInfra=true \
+                  customDomainName="$CD_NAME" \
+                  customSubdomain="$CD_SUB"
+
+              # Re-verify after the fallback deployment.
+              if ! az containerapp show \
+                    --name "$EXPECTED_APP" \
+                    --resource-group "${{ env.PRODUCTION_RG }}" \
+                    &>/dev/null; then
+                echo "::error::Container app '$EXPECTED_APP' still missing after fallback bicep deployment. Aborting."
+                exit 1
+              fi
+            fi
+
             # Get the container registry name from azd outputs
             ACR_NAME=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_NAME=' | cut -d'=' -f2 | tr -d '"')
             ACR_LOGIN_SERVER=$(azd env get-values | grep '^AZURE_CONTAINER_REGISTRY_ENDPOINT=' | cut -d'=' -f2 | tr -d '"')

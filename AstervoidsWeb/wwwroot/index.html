@@ -1146,7 +1146,7 @@
         ADAPTIVE_DELAY_ENABLED: true,   // Auto-tune interpolation delay based on jitter
         ADAPTIVE_DELAY_MIN: 1000/60,   // Auto-tune interpolation min delay (hard floor)
         ADAPTIVE_DELAY_JITTER_MULT: 2, // σ multiplier for jitter buffer (2 ≈ 95% coverage)
-        ADAPTIVE_DELAY_NET_FLOOR: 0.25, // Min network factor — bounds worst-case extrapolation to this fraction of send interval
+        ADAPTIVE_DELAY_NET_FLOOR: 0.8, // Min network factor — keeps interpolation delay near a full send interval so the renderer stays in the safe interpolation buffer (was 0.25, which left the renderer in the extrapolation zone ~70% of each send cycle and made it sensitive to small jitter-induced changes in computedDelay).
         ADAPTIVE_DELAY_NET_SCALE: 2,   // RTT-to-mean divisor for network factor: factor = floor + RTT / (scale × mean)
         ADAPTIVE_DELAY_SMOOTHING: 0.1, // EMA alpha for delay transitions (lower = smoother, 0.1 ≈ 10-sample convergence)
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
@@ -1154,6 +1154,17 @@
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
         MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
+        // When a freshly-created remote object has only one snapshot the
+        // interpolator runs at zero buffered delay (leading edge) so the
+        // object is dead-reckoned forward from its broadcast velocity/
+        // rotationSpeed instead of freezing on the spawn pixel for one
+        // buffer-delay. The arrival of the 2nd snapshot then needs to switch
+        // to buffered (baseDelay-behind) output; doing so naively snaps the
+        // rendered position backward by ~v·(baseDelay + net_delay). Instead
+        // we capture that visual delta on the 1→2 transition and decay it
+        // linearly to zero over this window — output stays continuous across
+        // the transition and forward velocity quietly absorbs the offset.
+        SPAWN_CATCHUP_DURATION: 300,   // ms over which the renderError visual offset decays to zero
     };
 
     // ============================================
@@ -1231,9 +1242,16 @@
          * @param {string} objectId - Object ID
          * @param {object} data - New object data from ObjectSync
          * @param {string} ownerMemberId - Owner member ID (for per-member delay lookup)
+         * @param {number} [arrivalTime] - Wall-clock time the data actually arrived
+         *   from the network (performance.now()-domain). Defaults to now() if omitted,
+         *   but callers should pass the value captured by ObjectSync's network
+         *   handler so the snapshot is anchored to true arrival time and not to
+         *   the next game-loop frame's detection time. The latter introduces 0–16ms
+         *   of variable jitter that produces visible discontinuities at each
+         *   snapshot boundary during interpolation/extrapolation handoff.
          */
-        updateState(objectId, data, ownerMemberId) {
-            const now = performance.now();
+        updateState(objectId, data, ownerMemberId, arrivalTime) {
+            const now = (arrivalTime != null) ? arrivalTime : performance.now();
             const existing = this.states.get(objectId);
             const snapshot = {
                 data: { ...data },
@@ -1244,6 +1262,64 @@
             
             if (existing) {
                 existing.ownerMemberId = ownerMemberId;
+                // Keep snapshots strictly monotonic in time. If a caller passes
+                // an arrivalTime older than the most recent snapshot (e.g. due
+                // to clock skew between batches or out-of-order frame
+                // detection), advance to the latest known time so the bracket
+                // search stays valid.
+                const latest = existing.snapshots[existing.snapshots.length - 1];
+                if (latest && snapshot.time < latest.time) {
+                    snapshot.time = latest.time;
+                }
+                // On the 1→2 snapshot transition, the interpolator switches
+                // from leading-edge extrapolation (delay=0) to buffered output
+                // (delay=baseDelay). The instantaneous models disagree by
+                // ~v·(baseDelay + net_delay) and would yank the rendered
+                // position backward in a single frame. Capture that visual
+                // offset BEFORE pushing the new snapshot, then again AFTER,
+                // and store the delta on the state. getInterpolated decays it
+                // to zero over SPAWN_CATCHUP_DURATION so the rendered output
+                // remains continuous (no backward snap) while forward velocity
+                // smoothly absorbs the offset.
+                if (existing.snapshots.length === 1 && existing.renderError == null) {
+                    const prev = this.getInterpolated(objectId, snapshot.time);
+                    existing.snapshots.push(snapshot);
+                    if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
+                        existing.snapshots.shift();
+                    }
+                    // Install a zero-valued sentinel renderError so the base
+                    // interpolator uses the catchup-ramp model (effectiveDelay
+                    // = baseDelay·progress, which is 0 at progress=0 → leading
+                    // edge from the freshest snapshot) when computing `next`
+                    // below. Without this sentinel, the capture call would see
+                    // renderError=null and return the post-window bracket
+                    // value, causing the wrong offset to be captured.
+                    // Overwritten with real values immediately.
+                    existing.renderError = { x: 0, y: 0, angle: 0, startTime: snapshot.time };
+                    const next = this.getInterpolated(objectId, snapshot.time);
+                    if (prev && next && prev.x !== undefined && next.x !== undefined) {
+                        const dx = prev.x - next.x;
+                        const dy = (prev.y || 0) - (next.y || 0);
+                        // Skip smoothing when the delta suggests a screen-wrap
+                        // teleport (normalized coords are in [0,1]; a real
+                        // motion-induced offset in 50ms is far below 0.5).
+                        // Smoothing across a wrap would slowly drag the object
+                        // back across the screen — far worse than just snapping.
+                        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+                            existing.renderError = {
+                                x: dx,
+                                y: dy,
+                                angle: (prev.angle || 0) - (next.angle || 0),
+                                startTime: snapshot.time
+                            };
+                        } else {
+                            existing.renderError = null;
+                        }
+                    } else {
+                        existing.renderError = null;
+                    }
+                    return;
+                }
                 existing.snapshots.push(snapshot);
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
                     existing.snapshots.shift();
@@ -1251,7 +1327,8 @@
             } else {
                 this.states.set(objectId, {
                     ownerMemberId: ownerMemberId,
-                    snapshots: [snapshot]
+                    snapshots: [snapshot],
+                    renderError: null
                 });
             }
         },
@@ -1391,6 +1468,40 @@
             const state = this.states.get(objectId);
             if (!state || state.snapshots.length === 0) return null;
 
+            const result = this._baseInterpolated(state, renderTime);
+
+            // Apply decaying render-error offset captured at the 1→2 snapshot
+            // transition (see updateState). At progress=0 the offset exactly
+            // cancels the model switch, keeping rendered position continuous;
+            // at progress=1 the offset is zero and we render the pure buffered
+            // interpolation. Forward velocity covers the offset over the
+            // window, so rendered motion is always forward (provided
+            // SPAWN_CATCHUP_DURATION ≥ baseDelay + net_delay, which holds for
+            // typical 100ms baseDelay and 100ms net_delay vs the 300ms window).
+            if (state.renderError && result) {
+                const elapsed = renderTime - state.renderError.startTime;
+                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
+                if (progress >= 1) {
+                    state.renderError = null;
+                } else {
+                    const w = 1 - progress;
+                    return {
+                        ...result,
+                        x: result.x + state.renderError.x * w,
+                        y: (result.y || 0) + state.renderError.y * w,
+                        angle: (result.angle || 0) + state.renderError.angle * w
+                    };
+                }
+            }
+            return result;
+        },
+
+        /**
+         * Base interpolation: snapshot bracket-search + Hermite blend, with
+         * leading-edge extrapolation for the single-snapshot case. The
+         * render-error smoothing layer in getInterpolated wraps this output.
+         */
+        _baseInterpolated(state, renderTime) {
             const snapshots = state.snapshots;
             const latest = snapshots[snapshots.length - 1];
 
@@ -1398,12 +1509,31 @@
                 return latest.data;
             }
 
-            // Single snapshot — no interpolation possible yet
+            // Single snapshot → delay 0 (extrapolate from snapshot[0]).
+            // Otherwise → full per-member adaptive delay. The transition from
+            // 0 to baseDelay would normally yank position backward; the
+            // renderError smoothing layer in getInterpolated absorbs that.
+            //
+            // While the catchup smoother is active (state.renderError set), we
+            // ramp the effective delay smoothly from 0 (lead from the freshest
+            // known snapshot) at progress=0 to the full baseDelay (bracket
+            // regime) at progress=1. This achieves the "lead from snapshot[1]"
+            // accuracy improvement during catchup — eliminates the stale
+            // snap[0].velocity Hermite tangent and the receiver-arrival-timing
+            // jitter in timeDiff — while guaranteeing position continuity at
+            // the moment renderError clears (effectiveDelay = baseDelay matches
+            // the post-window bracket regime exactly, so no backward jump).
+            const baseDelay = this.getDelayForMember(state.ownerMemberId);
+            let delay;
             if (snapshots.length === 1) {
-                return latest.data;
+                delay = 0;
+            } else if (state.renderError) {
+                const elapsed = renderTime - state.renderError.startTime;
+                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
+                delay = baseDelay * progress;
+            } else {
+                delay = baseDelay;
             }
-
-            const delay = this.getDelayForMember(state.ownerMemberId);
             const targetTime = renderTime - delay;
 
             // Before the oldest snapshot: return oldest (clamped)
@@ -3042,8 +3172,18 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // Reconciliation snapshots are stale by ~RTT and would
+                    // step the rendered position backward if pushed. Advance
+                    // the version cursor without snapshotting; the next live
+                    // OnObjectsUpdated broadcast (with proper arrival-time
+                    // anchoring) will resume normal interpolation.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Get or create remote ship instance
@@ -3206,8 +3346,15 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // See updateRemoteShips for rationale: skip pushing a
+                    // stale reconciliation snapshot into the interpolator.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Find existing asteroid by sync ID
@@ -3309,8 +3456,15 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId);
-                RemoteObjects.lastVersions.set(obj.id, obj.version);
+                if (obj.fromReconciliation) {
+                    // See updateRemoteShips for rationale: skip pushing a
+                    // stale reconciliation snapshot into the interpolator.
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                    obj.fromReconciliation = false;
+                } else {
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    RemoteObjects.lastVersions.set(obj.id, obj.version);
+                }
             }
             
             // Find existing bullet by sync ID
@@ -5394,7 +5548,7 @@
                         velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',
                         thrusting: 'th', invulnerable: 'iv', colorIndex: 'ci',
                         memberId: 'mi', score: 'sc', hitCount: 'hc',
-                        radius: 'r', seed: 'sd',
+                        radius: 'r', seed: 'sd', spawnTimestamp: 'sp',
                         lifetime: 'lt', ownerMemberId: 'om',
                         pendingHit: 'ph', hitTargetId: 'ht', hitImpactTorque: 'hi',
                         hitBulletAngle: 'ha', hitOffsetN: 'hn',
