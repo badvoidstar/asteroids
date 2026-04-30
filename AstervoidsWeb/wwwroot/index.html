@@ -1237,9 +1237,10 @@
 
             // If the best (min-rtt) sample has changed significantly, initiate a slew
             // to avoid a sudden jump in the interpolation timeline.
+            // Threshold: 0.5 ms — sub-millisecond differences are within the noise of a
+            // single performance.now() call and don't warrant a slew transition.
             const best = this._bestSample();
             if (prevOffset !== null && Math.abs(best.localOffset - prevOffset) > 0.5) {
-                // More than 0.5 ms difference — initiate slew
                 this.slewStart = tRecvPerf;
                 this.slewFrom = prevOffset;
                 this.slewTo = best.localOffset;
@@ -5319,8 +5320,9 @@
             const tSend = performance.now();
             const serverTimeMs = await SessionClient.pingTime();
             if (serverTimeMs !== null && typeof serverTimeMs === 'number') {
-                NtpClock.addSample(tSend, performance.now(), serverTimeMs);
-                _log('[NTP] sample rtt=', performance.now() - tSend,
+                const tRecv = performance.now();
+                NtpClock.addSample(tSend, tRecv, serverTimeMs);
+                _log('[NTP] sample rtt=', (tRecv - tSend).toFixed(1), 'ms',
                      'offset=', NtpClock.getEffectiveOffset()?.toFixed(2));
             }
             pings++;

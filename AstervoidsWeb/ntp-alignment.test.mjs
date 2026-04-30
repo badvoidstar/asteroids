@@ -273,11 +273,11 @@ test('min-offset selection: ties broken by first-seen order', () => {
     const c = makeNtpClock();
     c.addSample(0, 10, 0 + 10/2 + 5); // rtt=10, offset=5
     c.addSample(0, 10, 0 + 10/2 + 9); // rtt=10, offset=9 — same rtt, added later
-    // reduce picks the first minimum found
+    // reduce picks the first minimum it finds, so the first sample with rtt=10 wins
     const best = c._bestSample();
     assert.equal(best.rtt, 10);
-    assert.ok(best.localOffset === 5 || best.localOffset === 9,
-        'tie-broken — either is valid per NTP convention');
+    assert.equal(best.localOffset, 5,
+        'tie-breaking: first sample with min rtt is preferred (reduce left-fold)');
 });
 
 test('sample window eviction: oldest sample is dropped when window is full', () => {
@@ -476,13 +476,14 @@ test('e2e NTP: 1→2 snapshot transition is continuous without renderError', () 
     assert.equal(s.states.get('a').renderError, null,
         'renderError must not be installed in NTP mode');
 
-    // Without renderError, there CAN be a discontinuity in the naive model. The
-    // test verifies the size is small (≤ v·baseDelay = 0.04, the single send interval).
-    // With sender timestamps, both snapshots are naturally separated by baseDelay,
-    // so the bracket regime is already in effect for snap[1].
+    // Without renderError, there CAN be a small discontinuity at the 1→2 transition.
+    // With sender timestamps, both snapshots are naturally separated by sendInterval in
+    // the sender's timeline. The maximum observable jump is v·baseDelay/1000 = 0.04
+    // (0.4 units/s × 0.1 s). The threshold 0.1 gives a generous margin that rejects
+    // only truly broken discontinuities (e.g. v·RTT-scale jumps from pure arrival-time).
     const delta = Math.abs(justAfter.x - beforeArrival.x);
     assert.ok(delta < 0.1,
-        `position jump across 1→2 transition should be small; got Δx=${delta.toFixed(4)}`);
+        `position jump across 1→2 transition should be small (≤ v·baseDelay = 0.04); got Δx=${delta.toFixed(4)}`);
 });
 
 test('e2e NTP: position is continuous across 1→2 transition when sender times are accurate', () => {

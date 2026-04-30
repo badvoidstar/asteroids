@@ -485,10 +485,8 @@ const SessionClient = (function() {
             return null;
         }
         try {
-            const result = await connection.invoke('PingTime');
-            return (result != null && typeof result === 'object' && 'serverTimeMs' in result)
-                ? result.serverTimeMs
-                : result; // server returns a plain long; MessagePack may deserialize as number
+            // Server returns a plain long (epoch ms); MessagePack deserializes it as number.
+            return await connection.invoke('PingTime');
         } catch (err) {
             _error('[SessionClient] PingTime failed:', err);
             return null;
