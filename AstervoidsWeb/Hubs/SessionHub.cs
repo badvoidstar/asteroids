@@ -592,6 +592,18 @@ public class SessionHub : Hub
     }
 
     /// <summary>
+    /// Returns the server's current epoch timestamp (ms) for NTP-style clock alignment.
+    /// No session required — clients call this before and during sessions to gather
+    /// (rtt, offset) samples for the min-offset estimator in NtpClock.
+    /// Protocol: client records t_send = performance.now() before invoke, t_recv after;
+    /// rtt = t_recv − t_send; offset = (serverTimeMs − performance.timeOrigin) − (t_send + t_recv)/2.
+    /// </summary>
+    public long PingTime()
+    {
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+
+    /// <summary>
     /// Returns the current session state for reconciliation.
     /// No side effects — does not broadcast or modify any state.
     /// </summary>

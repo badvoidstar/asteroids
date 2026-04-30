@@ -390,8 +390,13 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object created.
+     * @param {object} objectInfo
+     * @param {string} senderMemberId
+     * @param {number} memberSequence
+     * @param {number} [serverTimestamp] - Server epoch ms at broadcast time; stored as
+     *   senderTimestampMs so callers can do NTP-style clock alignment (Plan 2).
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, serverTimestamp) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -423,6 +428,7 @@ const ObjectSync = (function() {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
                 existing.arrivalTime = arrivalTime;
+                if (serverTimestamp) existing.senderTimestampMs = serverTimestamp;
             } else if (objectInfo.data) {
                 // Even when the existing object's version is ahead (because an
                 // update arrived first via the fallback path), we still need to
@@ -443,6 +449,10 @@ const ObjectSync = (function() {
                 if (typeChanged) {
                     updateTypeIndex(existing, oldType, existing.data.type);
                 }
+                // Backfill senderTimestampMs if not yet set
+                if (serverTimestamp && !existing.senderTimestampMs) {
+                    existing.senderTimestampMs = serverTimestamp;
+                }
             }
             return;
         }
@@ -452,6 +462,8 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
+        // Store server-side send timestamp for NTP-aligned snapshot timing (Plan 2).
+        if (serverTimestamp) obj.senderTimestampMs = serverTimestamp;
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -489,6 +501,8 @@ const ObjectSync = (function() {
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
+                    // Store server-side send timestamp for NTP-aligned snapshot timing (Plan 2).
+                    if (serverTimestamp) existing.senderTimestampMs = serverTimestamp;
 
                     // Update type index if type changed (only when type is present in delta)
                     if (update.data?.type !== undefined) {
@@ -509,7 +523,8 @@ const ObjectSync = (function() {
                     scope: null,
                     data: update.data || {},
                     version: update.version,
-                    arrivalTime: arrivalTime
+                    arrivalTime: arrivalTime,
+                    senderTimestampMs: serverTimestamp || null
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);

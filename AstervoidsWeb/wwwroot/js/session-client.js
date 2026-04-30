@@ -232,7 +232,7 @@ const SessionClient = (function() {
         // Object events
         connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, serverTimestamp);
             }
         }));
 
@@ -476,6 +476,26 @@ const SessionClient = (function() {
     }
 
     /**
+     * Returns the server's current epoch timestamp (ms) for NTP-style clock alignment.
+     * No session required — works as long as the SignalR connection is open.
+     * @returns {Promise<number|null>} serverTimeMs, or null on failure
+     */
+    async function pingTime() {
+        if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+            return null;
+        }
+        try {
+            const result = await connection.invoke('PingTime');
+            return (result != null && typeof result === 'object' && 'serverTimeMs' in result)
+                ? result.serverTimeMs
+                : result; // server returns a plain long; MessagePack may deserialize as number
+        } catch (err) {
+            _error('[SessionClient] PingTime failed:', err);
+            return null;
+        }
+    }
+
+    /**
      * Register event callbacks.
      */
     function on(event, callback) {
@@ -544,6 +564,7 @@ const SessionClient = (function() {
         replaceObject,
         deleteObject,
         getSessionState,
+        pingTime,
         on,
         getCurrentSession,
         getCurrentMember,

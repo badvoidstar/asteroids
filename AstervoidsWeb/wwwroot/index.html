@@ -643,6 +643,16 @@
     const _warn = (...a) => window.ASTERVOIDS_DEBUG && console.warn(...a);
     const _error = (...a) => window.ASTERVOIDS_DEBUG && console.error(...a);
 
+    // ============================================================
+    // EXPERIMENT TOGGLE — NTP min-offset clock alignment (Plan 2)
+    // true  → sender-stamped timestamps + NTP min-offset estimator
+    //         (this branch: set to true for A/B comparison with PR #85)
+    // false → PR #85 renderError smoother + effectiveDelay catchup ramp
+    //
+    // To compare approaches: flip this constant and reload.
+    // ============================================================
+    const USE_NTP_ALIGNMENT = true;
+
     // ============================================
     // SECTION 0: AUDIO SYSTEM
     // Web Audio API sound generation for classic arcade sounds
@@ -1152,6 +1162,12 @@
         // linearly to zero over this window — output stays continuous across
         // the transition and forward velocity quietly absorbs the offset.
         SPAWN_CATCHUP_DURATION: 300,   // ms over which the renderError visual offset decays to zero
+        // NTP-style clock alignment (Plan 2, USE_NTP_ALIGNMENT=true)
+        NTP_SAMPLE_WINDOW: 16,         // keep the most recent N ping samples (min-rtt active)
+        NTP_SLEW_WINDOW: 200,          // ms to slew effective offset toward new active sample
+        NTP_PING_BURST: 10,            // number of rapid pings after join (every NTP_PING_INTERVAL_BURST ms)
+        NTP_PING_INTERVAL_BURST: 1000, // ms between pings during burst phase
+        NTP_PING_INTERVAL_STEADY: 5000,// ms between pings in steady state
     };
 
     // ============================================
@@ -1174,6 +1190,109 @@
         '#FF00FF',  // Magenta (Player 3)
         '#FFFF00'   // Yellow (Player 4)
     ];
+
+    // ============================================================
+    // NTP-style min-offset clock estimator (Plan 2, USE_NTP_ALIGNMENT)
+    //
+    // Periodic PingTime() calls produce (rtt, localOffset) samples.
+    // The active offset is the sample with the minimum rtt (NTP "best
+    // sample" heuristic: lowest-latency sample is least asymmetry-
+    // corrupted). When the active sample changes, the effective offset
+    // slews linearly toward the new value over NTP_SLEW_WINDOW ms so
+    // that snapshot timestamps don't jump discontinuously.
+    //
+    // serverToLocal(senderTimeMs) converts the server's epoch-ms
+    // timestamp into the client's performance.now() domain.
+    // ============================================================
+    const NtpClock = {
+        samples: [],       // { rtt, localOffset } — most recent NTP_SAMPLE_WINDOW samples
+        slewStart: null,   // performance.now() when current slew began (null = no slew)
+        slewFrom: null,    // effective offset at slew start
+        slewTo: null,      // target offset for current slew
+
+        /**
+         * Record a PingTime round-trip sample.
+         * @param {number} tSendPerf  - performance.now() when invoke was sent
+         * @param {number} tRecvPerf  - performance.now() when response was received
+         * @param {number} serverTimeMs - server's DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+         */
+        addSample(tSendPerf, tRecvPerf, serverTimeMs) {
+            const rtt = tRecvPerf - tSendPerf;
+            // Server time translated into client's performance.now() domain:
+            //   serverPerf = serverTimeMs - performance.timeOrigin
+            // Client's perf estimate at the midpoint of the round-trip:
+            //   clientMid = (tSendPerf + tRecvPerf) / 2
+            // localOffset = how far the server-perf clock is ahead of the client-perf clock
+            const serverPerf = serverTimeMs - performance.timeOrigin;
+            const localOffset = serverPerf - (tSendPerf + tRecvPerf) / 2;
+
+            // Capture the current effective offset BEFORE adding the new sample,
+            // so we can detect when the active best sample changes.
+            const prevOffset = this.getEffectiveOffset();
+
+            this.samples.push({ rtt, localOffset });
+            if (this.samples.length > CONFIG.NTP_SAMPLE_WINDOW) {
+                this.samples.shift();
+            }
+
+            // If the best (min-rtt) sample has changed significantly, initiate a slew
+            // to avoid a sudden jump in the interpolation timeline.
+            const best = this._bestSample();
+            if (prevOffset !== null && Math.abs(best.localOffset - prevOffset) > 0.5) {
+                // More than 0.5 ms difference — initiate slew
+                this.slewStart = tRecvPerf;
+                this.slewFrom = prevOffset;
+                this.slewTo = best.localOffset;
+            }
+        },
+
+        /** Returns the sample with the lowest rtt (NTP best-sample heuristic). */
+        _bestSample() {
+            if (this.samples.length === 0) return null;
+            return this.samples.reduce((best, s) => s.rtt < best.rtt ? s : best, this.samples[0]);
+        },
+
+        /** Returns the current effective offset (slewed), or null if no samples. */
+        getEffectiveOffset() {
+            const best = this._bestSample();
+            if (!best) return null;
+            if (this.slewStart === null) return best.localOffset;
+
+            const elapsed = performance.now() - this.slewStart;
+            const progress = Math.min(1, elapsed / CONFIG.NTP_SLEW_WINDOW);
+            if (progress >= 1) {
+                this.slewStart = null;
+                return best.localOffset;
+            }
+            return this.slewFrom + (this.slewTo - this.slewFrom) * progress;
+        },
+
+        /** True once at least one sample has been collected. */
+        hasSamples() {
+            return this.samples.length > 0;
+        },
+
+        /**
+         * Convert a server-side epoch-ms timestamp to the client's
+         * performance.now() domain, using the current effective offset.
+         * Falls back to null if no samples have been collected yet.
+         * @param {number} senderTimeMs - server's DateTimeOffset epoch ms
+         * @returns {number|null}
+         */
+        serverToLocal(senderTimeMs) {
+            const offset = this.getEffectiveOffset();
+            if (offset === null) return null;
+            return (senderTimeMs - performance.timeOrigin) - offset;
+        },
+
+        /** Reset all state (call on session leave / disconnect). */
+        clear() {
+            this.samples = [];
+            this.slewStart = null;
+            this.slewFrom = null;
+            this.slewTo = null;
+        }
+    };
 
     // Remote object state tracking for interpolation
     const RemoteObjects = {
@@ -1268,7 +1387,10 @@
                 // to zero over SPAWN_CATCHUP_DURATION so the rendered output
                 // remains continuous (no backward snap) while forward velocity
                 // smoothly absorbs the offset.
-                if (existing.snapshots.length === 1 && existing.renderError == null) {
+                // (Skipped when USE_NTP_ALIGNMENT=true — sender-stamped time
+                // places the first snapshot naturally in the past, making the
+                // discontinuity negligibly small or absent.)
+                if (!USE_NTP_ALIGNMENT && existing.snapshots.length === 1 && existing.renderError == null) {
                     const prev = this.getInterpolated(objectId, snapshot.time);
                     existing.snapshots.push(snapshot);
                     if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
@@ -1465,7 +1587,8 @@
             // window, so rendered motion is always forward (provided
             // SPAWN_CATCHUP_DURATION ≥ baseDelay + net_delay, which holds for
             // typical 100ms baseDelay and 100ms net_delay vs the 300ms window).
-            if (state.renderError && result) {
+            // Skipped when USE_NTP_ALIGNMENT=true (sender timestamps make it unnecessary).
+            if (!USE_NTP_ALIGNMENT && state.renderError && result) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
                 if (progress >= 1) {
@@ -1510,11 +1633,13 @@
             // jitter in timeDiff — while guaranteeing position continuity at
             // the moment renderError clears (effectiveDelay = baseDelay matches
             // the post-window bracket regime exactly, so no backward jump).
+            // (Skipped when USE_NTP_ALIGNMENT=true — sender timestamps handle the
+            // transition without the effectiveDelay ramp.)
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
             let delay;
             if (snapshots.length === 1) {
                 delay = 0;
-            } else if (state.renderError) {
+            } else if (!USE_NTP_ALIGNMENT && state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
                 delay = baseDelay * progress;
@@ -2988,7 +3113,10 @@
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                     obj.fromReconciliation = false;
                 } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    const snapTime = USE_NTP_ALIGNMENT && NtpClock.hasSamples() && obj.senderTimestampMs
+                        ? NtpClock.serverToLocal(obj.senderTimestampMs)
+                        : obj.arrivalTime;
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, snapTime);
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                 }
             }
@@ -3072,6 +3200,7 @@
         game.astervoids = [];
         game.bullets = [];
         RemoteObjects.clear();
+        NtpClock.clear(); // Reset clock samples on session change; ping loop continues
         ObjectSync.clear();
         // Clear background sync interval if running (tab hidden during session)
         if (typeof backgroundInterval !== 'undefined' && backgroundInterval) {
@@ -3159,7 +3288,10 @@
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                     obj.fromReconciliation = false;
                 } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    const snapTime = USE_NTP_ALIGNMENT && NtpClock.hasSamples() && obj.senderTimestampMs
+                        ? NtpClock.serverToLocal(obj.senderTimestampMs)
+                        : obj.arrivalTime;
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, snapTime);
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                 }
             }
@@ -3269,7 +3401,10 @@
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                     obj.fromReconciliation = false;
                 } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
+                    const snapTime = USE_NTP_ALIGNMENT && NtpClock.hasSamples() && obj.senderTimestampMs
+                        ? NtpClock.serverToLocal(obj.senderTimestampMs)
+                        : obj.arrivalTime;
+                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, snapTime);
                     RemoteObjects.lastVersions.set(obj.id, obj.version);
                 }
             }
@@ -5167,6 +5302,39 @@
         }
     }
 
+    // NTP ping loop: runs after connection, fires burst then steady-state pings.
+    // Automatically stops when the connection drops.
+    let _ntpPingLoopRunning = false;
+    async function startNtpPingLoop() {
+        if (_ntpPingLoopRunning) return;
+        _ntpPingLoopRunning = true;
+        NtpClock.clear();
+
+        let pings = 0;
+        const runPing = async () => {
+            if (!SessionClient.isConnected()) {
+                _ntpPingLoopRunning = false;
+                return;
+            }
+            const tSend = performance.now();
+            const serverTimeMs = await SessionClient.pingTime();
+            if (serverTimeMs !== null && typeof serverTimeMs === 'number') {
+                NtpClock.addSample(tSend, performance.now(), serverTimeMs);
+                _log('[NTP] sample rtt=', performance.now() - tSend,
+                     'offset=', NtpClock.getEffectiveOffset()?.toFixed(2));
+            }
+            pings++;
+            const nextInterval = pings < CONFIG.NTP_PING_BURST
+                ? CONFIG.NTP_PING_INTERVAL_BURST
+                : CONFIG.NTP_PING_INTERVAL_STEADY;
+            if (_ntpPingLoopRunning) {
+                setTimeout(runPing, nextInterval);
+            }
+        };
+        // Fire the first ping immediately
+        runPing();
+    }
+
     // Connect to session hub
     async function connectToSessionHub(force = false) {
         setPickerStatus('Connecting...', 'connecting');
@@ -5242,6 +5410,12 @@
                 sessionPicker.connected = true;
                 await refreshSessionList();
                 // No polling - we rely on SignalR push notifications
+
+                // Start NTP clock sampling (Plan 2, gated by USE_NTP_ALIGNMENT).
+                // Fires a burst of pings right after connect, then settles to steady-state.
+                if (USE_NTP_ALIGNMENT) {
+                    startNtpPingLoop();
+                }
             } else {
                 throw new Error('Connection failed');
             }

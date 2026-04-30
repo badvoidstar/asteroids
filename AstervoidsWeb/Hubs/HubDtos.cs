@@ -85,6 +85,11 @@ public record ObjectReplacedEvent(
     [property: Key("deletedObjectId")] Guid DeletedObjectId,
     [property: Key("createdObjects")] List<ObjectInfo> CreatedObjects);
 
+// Time sync
+[MessagePackObject]
+public record PingTimeResponse(
+    [property: Key("serverTimeMs")] long ServerTimeMs);
+
 // Operation responses
 [MessagePackObject]
 public record CreateObjectResponse(
