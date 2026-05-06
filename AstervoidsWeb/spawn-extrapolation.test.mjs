@@ -422,3 +422,168 @@ test('catchup-ramp: end-of-window continuity holds even with sender acceleration
         prevX = cx;
     }
 });
+
+// ── Spawn-position projection (Phase 2 of spawn-latency fix) ──────────────
+//
+// Pure-logic mirrors of:
+//   * RemoteObjects.computeSpawnStaleness (index.html ~line 1709)
+//   * RemoteObjects.projectSpawnData      (index.html ~line 1729)
+//   * RemoteObjects.spawnAt               (index.html ~line 1761)
+//
+// Mirror the production helpers exactly so the math under test is the math
+// running in browser. Wrap-related helpers (wrapNormalized, wrapMargin*) are
+// stubbed to identity here — orthogonal to projection arithmetic, covered by
+// the toroidal wrap test below using a fixed pass-through margin.
+
+function computeSpawnStaleness(serverNowMs, spawnServerTime, ownerDelaySec) {
+    const elapsedSec = (serverNowMs - spawnServerTime) / 1000;
+    const stalenessSec = elapsedSec - ownerDelaySec;
+    const cap = CONFIG.MAX_EXTRAPOLATION;
+    if (stalenessSec > cap) return cap;
+    if (stalenessSec < -cap) return -cap;
+    return stalenessSec;
+}
+
+function projectSpawnDataNoWrap(data, stalenessSec) {
+    if (!stalenessSec) return data;
+    const vx = data.velocityX || 0;
+    const vy = data.velocityY || 0;
+    const rs = data.rotationSpeed || 0;
+    return {
+        ...data,
+        x: data.x + vx * stalenessSec,
+        y: data.y + vy * stalenessSec,
+        angle: (data.angle || 0) + rs * CONFIG.TARGET_FPS * stalenessSec,
+    };
+}
+
+test('computeSpawnStaleness: shooter case — locally-owned, ownerDelaySec=0', () => {
+    // Spawned at server time 1000. Server now is 1100 (i.e. RTT=100ms).
+    // Local owner has no display delay → staleness = 100ms = 0.1s.
+    const s = computeSpawnStaleness(1100, 1000, 0);
+    assert.equal(s, 0.1);
+});
+
+test('computeSpawnStaleness: observer case — per-member-delay subtracted', () => {
+    // Spawned at server time 1000. Server now is 1050 (one-way 50ms).
+    // Observer's per-member delay for owner = 75ms = 0.075s.
+    // staleness = 0.05 − 0.075 = −0.025s (negative — project backward).
+    const s = computeSpawnStaleness(1050, 1000, 0.075);
+    assert.ok(Math.abs(s - (-0.025)) < 1e-9);
+});
+
+test('computeSpawnStaleness: capped at +MAX_EXTRAPOLATION', () => {
+    // Wildly stale spawn (e.g. clock not initialized, or 5s clock drift).
+    const s = computeSpawnStaleness(6000, 1000, 0);
+    assert.equal(s, CONFIG.MAX_EXTRAPOLATION);
+});
+
+test('computeSpawnStaleness: capped at −MAX_EXTRAPOLATION', () => {
+    // Server time appears to be in the past (clock skew or pathological delay).
+    const s = computeSpawnStaleness(0, 5000, 0);
+    assert.equal(s, -CONFIG.MAX_EXTRAPOLATION);
+});
+
+test('projectSpawnData: zero staleness returns data unchanged', () => {
+    const data = { x: 0.5, y: 0.5, angle: 1, velocityX: 0.2, velocityY: 0.3, rotationSpeed: 0.01 };
+    const out = projectSpawnDataNoWrap(data, 0);
+    assert.equal(out, data);
+});
+
+test('projectSpawnData: positive staleness moves position forward by velocity·dt', () => {
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.2, velocityY: 0.3, rotationSpeed: 0 };
+    const out = projectSpawnDataNoWrap(data, 0.1);
+    assert.ok(Math.abs(out.x - (0.5 + 0.2 * 0.1)) < 1e-9, `x=${out.x}`);
+    assert.ok(Math.abs(out.y - (0.5 + 0.3 * 0.1)) < 1e-9, `y=${out.y}`);
+});
+
+test('projectSpawnData: negative staleness moves position backward', () => {
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.2, velocityY: 0.3, rotationSpeed: 0 };
+    const out = projectSpawnDataNoWrap(data, -0.05);
+    assert.ok(Math.abs(out.x - (0.5 - 0.2 * 0.05)) < 1e-9, `x=${out.x}`);
+    assert.ok(Math.abs(out.y - (0.5 - 0.3 * 0.05)) < 1e-9, `y=${out.y}`);
+});
+
+test('projectSpawnData: rotation advances by rotationSpeed·TARGET_FPS·dt', () => {
+    const data = { x: 0, y: 0, angle: 0.5, velocityX: 0, velocityY: 0, rotationSpeed: 0.01 };
+    const out = projectSpawnDataNoWrap(data, 0.1);
+    const expected = 0.5 + 0.01 * CONFIG.TARGET_FPS * 0.1;
+    assert.ok(Math.abs(out.angle - expected) < 1e-9, `angle=${out.angle}, expected=${expected}`);
+});
+
+test('projectSpawnData: stationary object stays put under any staleness', () => {
+    const data = { x: 0.3, y: 0.7, angle: 0, velocityX: 0, velocityY: 0, rotationSpeed: 0 };
+    const out = projectSpawnDataNoWrap(data, 0.5);
+    assert.equal(out.x, 0.3);
+    assert.equal(out.y, 0.7);
+});
+
+test('integration: shooter sees children spawn at parent\'s last visible position', () => {
+    // Scenario: shooter shoots an asteroid at server time 1000. Parent was
+    // moving at vx=0.4 normalized/sec. RTT to server is 120ms (echo arrives
+    // at server time 1120). Child data carries the parent's position at
+    // T_collision (data.x = 0.5).
+    //
+    // After projection (Option 1, ownerDelaySec=0 for locally-owned):
+    //   staleness = (1120 − 1000)/1000 = 0.12s
+    //   spawn_x = 0.5 + 0.4 × 0.12 = 0.548
+    //
+    // This MUST equal where the shooter's local sim of the parent had moved
+    // to in 120ms = 0.5 + 0.4 × 0.12 = 0.548. ✓
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.4, velocityY: 0, rotationSpeed: 0 };
+    const stalenessSec = computeSpawnStaleness(1120, 1000, 0);
+    const projected = projectSpawnDataNoWrap(data, stalenessSec);
+    const parentLocalSimAfter120ms = 0.5 + 0.4 * 0.12;
+    assert.ok(Math.abs(projected.x - parentLocalSimAfter120ms) < 1e-9,
+        `projected ${projected.x} should match local-sim parent at ${parentLocalSimAfter120ms}`);
+});
+
+test('integration: observer with matched delay sees children spawn at bracket-rendered parent position', () => {
+    // Scenario: observer sees the shooter's asteroid bracketed at "snapshot
+    // time minus per-member delay". Network one-way A→B = 50ms,
+    // per-member-delay for A's stream from B's view = 50ms.
+    //
+    // OnObjectReplaced arrives at B with spawnServerTime=1000, B's serverNow=1050
+    // (50ms one-way). data.x = 0.5 (parent's position at T_collision).
+    //
+    // staleness = (1050 − 1000)/1000 − 0.05 = 0  → child renders at 0.5.
+    //
+    // What was B rendering parent at? Bracket interp behind by per_member_delay
+    // (50ms). For a parent moving at vx=0.4, the freshest snap arrived ~50ms
+    // ago and was at "current trajectory minus 50ms". Bracket interp returns
+    // that snap's position because target_time = now - delay. So B was
+    // rendering parent at 0.5 (the snapshot value). Child appears there. ✓
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.4, velocityY: 0, rotationSpeed: 0 };
+    const stalenessSec = computeSpawnStaleness(1050, 1000, 0.05);
+    const projected = projectSpawnDataNoWrap(data, stalenessSec);
+    assert.ok(Math.abs(projected.x - 0.5) < 1e-9,
+        `projected ${projected.x} should match parent's bracket-rendered position 0.5`);
+});
+
+test('integration: observer with delay > network sees backward projection', () => {
+    // Observer's per-member delay over-estimates (e.g. delay=100ms but
+    // network one-way is 50ms). The observer was rendering the parent BEHIND
+    // T_collision in server time. Children must spawn there too.
+    //
+    // serverNow=1050, spawnServerTime=1000, ownerDelaySec=0.1.
+    // staleness = 0.05 − 0.1 = −0.05s.
+    // For vx=0.4: projected.x = 0.5 + 0.4·(−0.05) = 0.48.
+    //
+    // The bracket-rendered parent was at "snap_time + extrap to (now−delay)"
+    // = "1000 + (50ms − 100ms)·vx" = 0.5 + 0.4·(−0.05) = 0.48. Match. ✓
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.4, velocityY: 0, rotationSpeed: 0 };
+    const stalenessSec = computeSpawnStaleness(1050, 1000, 0.1);
+    const projected = projectSpawnDataNoWrap(data, stalenessSec);
+    assert.ok(Math.abs(projected.x - 0.48) < 1e-9, `projected.x=${projected.x}`);
+});
+
+test('integration: bootstrap fallback — clock uninitialized → no projection', () => {
+    // RemoteObjects.spawnAt skips projection when offsetInitialized is false:
+    // it would be worse to project with garbage offset than to ship the
+    // unprojected data. This test mirrors that gating in spirit by checking
+    // that callers passing stalenessSec=0 get unmodified data.
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.4, velocityY: 0, rotationSpeed: 0 };
+    const out = projectSpawnDataNoWrap(data, 0);
+    assert.equal(out.x, 0.5);
+    assert.equal(out.y, 0.5);
+});

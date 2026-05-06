@@ -171,6 +171,12 @@
         }
 
         function renderCoreMetrics(data) {
+            const offsetReady = data.clockOffsetInitialized === true;
+            const offsetVal = offsetReady
+                ? `${data.clockOffsetMs >= 0 ? '+' : ''}${data.clockOffsetMs} ms`
+                : '— (uninitialized)';
+            const sampleRttDisplay = (data.clockSampleRtt != null && isFinite(data.clockSampleRtt))
+                ? `${data.clockSampleRtt} ms` : '—';
             const items = [
                 { label: 'RTT', value: `${data.rtt} ms`, cls: rttClass(data.rtt) },
                 { label: 'FPS', value: `${data.fps ?? '—'}`, cls: data.fps != null ? fpsClass(data.fps) : '' },
@@ -178,7 +184,10 @@
                 { label: 'Jitter', value: `${data.jitter} ms` },
                 { label: 'Buffer delay', value: `${data.buf} ms` },
                 { label: 'Objects (owned / total)', value: `${data.ownedObjs} / ${data.totalObjs}` },
-                { label: 'Reconciliations', value: `${data.reconciliationCount}` }
+                { label: 'Reconciliations', value: `${data.reconciliationCount}` },
+                { label: 'Clock offset', value: offsetVal, cls: offsetReady ? 'rtt-good' : 'rtt-bad' },
+                { label: 'Clock sample RTT', value: sampleRttDisplay },
+                { label: 'Clock samples (accepted / rejected)', value: `${data.clockSampleCount ?? 0} / ${data.clockRejectedCount ?? 0}` }
             ];
             coreMetricsEl.innerHTML = items.map(item => {
                 const cls = item.cls ? ` class="${item.cls}"` : '';

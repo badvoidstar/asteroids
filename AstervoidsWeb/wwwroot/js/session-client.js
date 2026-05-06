@@ -250,7 +250,7 @@ const SessionClient = (function() {
 
         connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp);
             }
         }));
 
@@ -476,6 +476,19 @@ const SessionClient = (function() {
     }
 
     /**
+     * Returns the server's current UTC time in unix milliseconds. Used by
+     * the client's NTP-style clock-offset estimator (RemoteObjects.clock).
+     * Captured on the server's return statement for minimum processing bias.
+     * Does NOT require session membership.
+     */
+    async function ping() {
+        if (!isConnected()) {
+            throw new Error('Not connected');
+        }
+        return await connection.invoke('Ping');
+    }
+
+    /**
      * Register event callbacks.
      */
     function on(event, callback) {
@@ -544,6 +557,7 @@ const SessionClient = (function() {
         replaceObject,
         deleteObject,
         getSessionState,
+        ping,
         on,
         getCurrentSession,
         getCurrentMember,

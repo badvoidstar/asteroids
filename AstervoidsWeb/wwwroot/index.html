@@ -1199,6 +1199,83 @@
             initialized: false
         },
 
+        // ── NTP-style client↔server clock-offset estimator ─────────────────
+        //
+        // Lets every client compute serverNowMs() to within a few ms of the
+        // server's actual UTC clock, so spawn-position projection on
+        // OnObjectReplaced (Phase 2) is accurate for ALL members — not just
+        // the shooter — using the server as the common reference.
+        //
+        // Sampling cadence is decoupled from the game loop:
+        //  * performance.now() for sub-ms RTT (immune to wall-clock slewing).
+        //  * Date.now() for offset alignment with the server's UTC ms.
+        //  * Awaited setTimeout chain (no setInterval stacking).
+        //  * Skip while document.hidden, re-bootstrap on visibility return.
+        //
+        // Min-RTT-per-burst selection rejects samples polluted by frame
+        // render / GC / event-loop jitter — those raise RTT without raising
+        // accuracy. Pure-logic helpers below are mirrored by
+        // AstervoidsWeb/clock-offset.test.mjs.
+        clock: {
+            offsetMs: 0,
+            offsetInitialized: false,
+            lastSampleRtt: Infinity,
+            sampleCount: 0,
+            rejectedCount: 0,
+            // Tunables
+            bootstrapBurstSize: 5,
+            bootstrapIntervalMs: 100,
+            refreshIntervalMs: 30000,
+            emaAlpha: 0.3,
+            outlierGateMs: 20,
+            outlierGateRttMul: 3,
+            // Loop / lifecycle
+            running: false,
+            loopPromise: null,
+            visibilityHandler: null,
+            wakeResolve: null,
+        },
+
+        /**
+         * Pure: pick the sample with the smallest rtt. Tiebreak first occurrence.
+         */
+        pickMinRttSample(samples) {
+            if (!samples || samples.length === 0) return null;
+            let best = samples[0];
+            for (let i = 1; i < samples.length; i++) {
+                if (samples[i].rtt < best.rtt) best = samples[i];
+            }
+            return best;
+        },
+
+        /**
+         * Pure: NTP offset formula.
+         *   offset = serverTime + rtt/2 − t3Wall
+         * Assumes symmetric one-way latency. Residual bias is bounded by
+         * (oneWayUp − oneWayDown)/2; min-RTT selection minimises this.
+         */
+        computeOffsetForSample(sample) {
+            return sample.serverTime + sample.rtt / 2 - sample.t3Wall;
+        },
+
+        /**
+         * Pure: outlier gate. Until initialized, accept every sample. After
+         * initialization, reject any sample whose offset diverges from the
+         * current offset by more than max(gateMs, gateRttMul · lastRtt).
+         */
+        passesOutlierGate(args) {
+            if (!args.initialized) return true;
+            const tolerance = Math.max(args.gateMs, args.gateRttMul * args.lastSampleRtt);
+            return Math.abs(args.candidateOffset - args.currentOffset) <= tolerance;
+        },
+
+        /**
+         * Pure: single-alpha EMA. Returns current + alpha · (target − current).
+         */
+        emaUpdate(current, target, alpha) {
+            return current + alpha * (target - current);
+        },
+
         /**
          * Create a fresh adaptive delay state for a member
          */
@@ -1442,7 +1519,277 @@
         getRtt() {
             return this.rtt.estimatedRtt;
         },
-        
+
+        /**
+         * Returns the current server UTC time in unix milliseconds, computed
+         * from the local Date.now() plus the estimated clock offset. Falls
+         * back to Date.now() when the offset hasn't been initialized yet
+         * (Phase 2 callers must check offsetInitialized to decide whether to
+         * project; otherwise the bootstrap window would over-project).
+         */
+        serverNowMs() {
+            return Date.now() + this.clock.offsetMs;
+        },
+
+        /**
+         * Returns true once at least one ping burst has been integrated.
+         * Phase 2 spawn projection uses this as a gate.
+         */
+        isClockOffsetInitialized() {
+            return this.clock.offsetInitialized;
+        },
+
+        /**
+         * Get the latest min-RTT-per-burst sample's RTT, in milliseconds.
+         * Returns the canonical Infinity until the first sample lands, so
+         * the outlier gate's tolerance starts wide-open.
+         */
+        getClockSampleRtt() {
+            return this.clock.lastSampleRtt;
+        },
+
+        /**
+         * Get the current estimated client→server clock offset, in milliseconds.
+         * Positive = server clock is ahead of client clock.
+         */
+        getClockOffsetMs() {
+            return this.clock.offsetMs;
+        },
+
+        /**
+         * Internal: run a burst of N pings spaced by bootstrapIntervalMs,
+         * pick the min-RTT sample, gate-and-EMA-update offsetMs.
+         *
+         * Per-ping capture uses BOTH performance.now() (for sub-ms RTT,
+         * monotonic, immune to wall-clock corrections) AND Date.now() (for
+         * offset alignment with the server's UTC ms). This is the
+         * insulation layer against quantized/variable game-loop cadence:
+         * the await-resolution microtask runs OUTSIDE requestAnimationFrame,
+         * so frame work cannot inflate the captured t3Perf.
+         *
+         * If document.hidden becomes true mid-burst, we abort early — the
+         * suspended event loop would inject huge unrepresentative RTT.
+         *
+         * @param {number} burstSize - number of pings to fire (≥1)
+         * @returns {Promise<object|null>} the accepted sample or null
+         */
+        async runPingBurst(burstSize) {
+            const samples = [];
+            for (let i = 0; i < burstSize; i++) {
+                if (typeof document !== 'undefined' && document.hidden) break;
+                if (i > 0) {
+                    await new Promise(r => setTimeout(r, this.clock.bootstrapIntervalMs));
+                }
+                let sample;
+                try {
+                    const t0Perf = performance.now();
+                    const serverTime = await SessionClient.ping();
+                    const t3Perf = performance.now();
+                    const t3Wall = Date.now();
+                    if (typeof serverTime !== 'number' || !isFinite(serverTime)) continue;
+                    sample = { rtt: t3Perf - t0Perf, serverTime, t3Wall };
+                } catch (e) {
+                    // Ping invocation failed (transient disconnect, etc.).
+                    // Skip this sample; the loop will retry on next refresh.
+                    continue;
+                }
+                samples.push(sample);
+            }
+            const winner = this.pickMinRttSample(samples);
+            if (!winner) return null;
+            const candidate = this.computeOffsetForSample(winner);
+            const accepted = this.passesOutlierGate({
+                currentOffset: this.clock.offsetMs,
+                lastSampleRtt: this.clock.lastSampleRtt,
+                candidateOffset: candidate,
+                gateMs: this.clock.outlierGateMs,
+                gateRttMul: this.clock.outlierGateRttMul,
+                initialized: this.clock.offsetInitialized,
+            });
+            if (!accepted) {
+                this.clock.rejectedCount++;
+                return null;
+            }
+            if (!this.clock.offsetInitialized) {
+                this.clock.offsetMs = candidate;
+                this.clock.offsetInitialized = true;
+            } else {
+                this.clock.offsetMs = this.emaUpdate(
+                    this.clock.offsetMs, candidate, this.clock.emaAlpha);
+            }
+            this.clock.lastSampleRtt = winner.rtt;
+            this.clock.sampleCount++;
+            return winner;
+        },
+
+        /**
+         * Internal: long-running loop. Runs an initial bootstrap burst, then
+         * one refresh ping every refreshIntervalMs. Skips work while hidden
+         * and re-bootstraps on visibility return so the offset is fresh
+         * before any spawn event is rendered.
+         */
+        async clockSyncLoop() {
+            // Bootstrap: large burst gives several independent samples for
+            // min-RTT selection, so the first usable offset lands fast.
+            await this.runPingBurst(this.clock.bootstrapBurstSize);
+            while (this.clock.running) {
+                await new Promise(resolve => {
+                    this.clock.wakeResolve = resolve;
+                    setTimeout(() => {
+                        if (this.clock.wakeResolve === resolve) {
+                            this.clock.wakeResolve = null;
+                            resolve();
+                        }
+                    }, this.clock.refreshIntervalMs);
+                });
+                if (!this.clock.running) break;
+                if (typeof document !== 'undefined' && document.hidden) {
+                    // Skip refreshes while hidden — frame throttling pollutes RTT.
+                    // The visibilitychange handler will fire a fresh burst when
+                    // we return to foreground.
+                    continue;
+                }
+                await this.runPingBurst(1);
+            }
+        },
+
+        /**
+         * Start the clock-sync loop. Idempotent. Wires a visibilitychange
+         * handler so a fresh bootstrap burst runs on tab reactivation.
+         */
+        startClockSync() {
+            if (this.clock.running) return;
+            this.clock.running = true;
+            this.clock.loopPromise = this.clockSyncLoop().catch(() => {
+                // Loop exited unexpectedly; clear running so a future
+                // startClockSync() call can restart it.
+                this.clock.running = false;
+            });
+            if (typeof document !== 'undefined' && !this.clock.visibilityHandler) {
+                this.clock.visibilityHandler = () => {
+                    if (!document.hidden && this.clock.running) {
+                        // Wake the loop immediately (skip remaining refresh wait)
+                        // and run a fresh bootstrap burst before any new gameplay
+                        // event needs serverNowMs().
+                        const wake = this.clock.wakeResolve;
+                        this.clock.wakeResolve = null;
+                        this.runPingBurst(this.clock.bootstrapBurstSize).then(() => {
+                            if (wake) wake();
+                        });
+                    }
+                };
+                document.addEventListener('visibilitychange', this.clock.visibilityHandler);
+            }
+        },
+
+        /**
+         * Stop the clock-sync loop. Resets the visibility handler.
+         * Does NOT clear offsetMs — the last-known offset stays usable in
+         * case a quick reconnect rebuilds the loop.
+         */
+        stopClockSync() {
+            this.clock.running = false;
+            if (this.clock.wakeResolve) {
+                const r = this.clock.wakeResolve;
+                this.clock.wakeResolve = null;
+                r();
+            }
+            if (typeof document !== 'undefined' && this.clock.visibilityHandler) {
+                document.removeEventListener('visibilitychange', this.clock.visibilityHandler);
+                this.clock.visibilityHandler = null;
+            }
+            this.clock.loopPromise = null;
+        },
+
+        // ── Spawn-position projection (Phase 2 of spawn-latency fix) ──────
+        //
+        // When OnObjectReplaced delivers child objects (e.g. asteroid splits),
+        // the snapshot data carries the parent's position at T_collision in
+        // SERVER TIME. Without projection:
+        //   * The shooter sees the parent move locally for ~RTT, then the
+        //     children pop into existence at the older position.
+        //   * Other observers see the children appear at the snapshot data
+        //     position, which is roughly per_member_delay-velocity ahead of
+        //     where their bracket-interpolated parent was rendered.
+        //
+        // computeSpawnStaleness returns the seconds to forward-extrapolate a
+        // child from data.x at spawnServerTime to "where the parent was being
+        // rendered the moment before the split" on this client. Two distinct
+        // formulas — see comments below.
+        //
+        // staleness can be negative for remote-owned children (when a client's
+        // per_member_delay exceeds network latency, the parent was being
+        // rendered slightly behind T_collision in server time). Capped to
+        // ±MAX_EXTRAPOLATION to avoid runaway projection from a poor clock
+        // estimate.
+
+        /**
+         * Pure: computes the projection time (seconds) for a spawn event.
+         * For locally-owned children, ownerDelaySec should be 0 (shooter
+         * renders own objects in real time without delay). For remote-owned
+         * children, ownerDelaySec is the per-member display delay for the
+         * owner's stream from this client's perspective.
+         */
+        computeSpawnStaleness(serverNowMsValue, spawnServerTime, ownerDelaySec) {
+            const elapsedSec = (serverNowMsValue - spawnServerTime) / 1000;
+            const stalenessSec = elapsedSec - ownerDelaySec;
+            const cap = CONFIG.MAX_EXTRAPOLATION;
+            if (stalenessSec > cap) return cap;
+            if (stalenessSec < -cap) return -cap;
+            return stalenessSec;
+        },
+
+        /**
+         * Project a spawn data position forward (or backward) by
+         * `stalenessSec` of constant-velocity motion, applying toroidal wrap
+         * with the matching radius-aware margins. Mirrors the
+         * `_baseInterpolated` extrapolation branch (line ~1796) for the
+         * normalized-coordinate convention, so projected snapshots and
+         * subsequent interpolated snapshots remain in the same coordinate
+         * frame.
+         */
+        projectSpawnData(data, stalenessSec) {
+            if (!stalenessSec) return data;
+            const refDim = getReferenceDimension();
+            const r = this.getBoundingRadius(data);
+            const vx = data.velocityX || 0;
+            const vy = data.velocityY || 0;
+            const rs = data.rotationSpeed || 0;
+            return {
+                ...data,
+                x: wrapNormalized(data.x + vx * (refDim / getGameWidth()) * stalenessSec, wrapMarginX(r)),
+                y: wrapNormalized(data.y + vy * (refDim / getGameHeight()) * stalenessSec, wrapMarginY(r)),
+                angle: (data.angle || 0) + rs * CONFIG.TARGET_FPS * stalenessSec,
+            };
+        },
+
+        /**
+         * Install the FIRST snapshot for a newly-spawned remote-owned object,
+         * with its position projected to where the parent was being rendered
+         * at the spawn moment on this client. Called from the
+         * `onObjectReplaced` handler (index.html → connectToSessionHub).
+         *
+         * If the clock offset hasn't initialized yet, we fall back to the
+         * unprojected data (no projection is better than wrong projection
+         * with a garbage offset). This is rare in practice — Phase 1's
+         * bootstrap burst lands well before the player's first shot.
+         *
+         * Idempotent: if a state already exists for this objectId, we no-op
+         * (the next updateState call from updateAstervoidsFromSync will push
+         * the second snapshot and the renderError smoother will engage).
+         */
+        spawnAt(objectId, data, ownerMemberId, spawnServerTime, arrivalTime) {
+            if (this.states.has(objectId)) return;
+            let snapshotData = data;
+            if (this.clock.offsetInitialized && spawnServerTime != null) {
+                const ownerDelaySec = (this.getDelayForMember(ownerMemberId) || 0) / 1000;
+                const stalenessSec = this.computeSpawnStaleness(
+                    this.serverNowMs(), spawnServerTime, ownerDelaySec);
+                snapshotData = this.projectSpawnData(data, stalenessSec);
+            }
+            this.updateState(objectId, snapshotData, ownerMemberId, arrivalTime);
+        },
+
         /**
          * Get interpolated position for rendering.
          * Bracket-searches the ring buffer for the two snapshots surrounding targetTime,
@@ -3144,6 +3491,24 @@
                 if (!existing) {
                     const asteroid = Asteroid.fromSyncData(obj.data);
                     asteroid.syncObjectId = obj.id;
+                    // Spawn-position projection for locally-owned children of an
+                    // OnObjectReplaced event (asteroid splits we just shot).
+                    // obj.spawnServerTime was stamped in
+                    // object-sync.js handleRemoteObjectCreated. The shooter
+                    // renders own objects in real time (no per-member delay),
+                    // so ownerDelaySec=0 and staleness ≈ RTT — exactly the
+                    // time the local sim of the parent kept moving while we
+                    // waited for the OnObjectReplaced echo.
+                    if (obj.spawnServerTime != null && !obj.spawnHandled
+                        && RemoteObjects.isClockOffsetInitialized()) {
+                        const stalenessSec = RemoteObjects.computeSpawnStaleness(
+                            RemoteObjects.serverNowMs(), obj.spawnServerTime, 0);
+                        const projected = RemoteObjects.projectSpawnData(obj.data, stalenessSec);
+                        asteroid.x = projected.x;
+                        asteroid.y = projected.y;
+                        asteroid.angle = projected.angle;
+                    }
+                    obj.spawnHandled = true;
                     game.astervoids.push(asteroid);
                 }
                 continue;
@@ -4431,7 +4796,12 @@
                 reconciliationCount: ObjectSync.getReconciliationCount(),
                 sessionName: game.sessionInfo?.name || '',
                 myMemberId: myMemberId || '',
-                members: memberMetrics
+                members: memberMetrics,
+                clockOffsetMs: Math.round(RemoteObjects.getClockOffsetMs()),
+                clockSampleRtt: Math.round(RemoteObjects.getClockSampleRtt()),
+                clockSampleCount: RemoteObjects.clock.sampleCount,
+                clockRejectedCount: RemoteObjects.clock.rejectedCount,
+                clockOffsetInitialized: RemoteObjects.isClockOffsetInitialized()
             });
         }
     }
@@ -5217,6 +5587,32 @@
                         reconnectingOverlay.classList.remove('visible');
                     }
                 });
+                // Spawn-position projection (Phase 2 of spawn-latency fix). When
+                // OnObjectReplaced delivers child objects (asteroid splits), each
+                // child carries spawnServerTime stamped by SessionHub.ReplaceObject
+                // at hub-method entry. We project the child's position from the
+                // parent's T_collision position to where the parent was being
+                // rendered the moment before the split:
+                //   * Remote-owned children → RemoteObjects.spawnAt installs the
+                //     first interpolation snapshot at the projected position.
+                //   * Locally-owned children (the shooter's own asteroid splits)
+                //     → updateAstervoidsFromSync's adopt branch reads
+                //     obj.spawnServerTime and projects the local Asteroid's
+                //     initial position (handled there, not here).
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, serverTimestamp) => {
+                    if (serverTimestamp == null) return;
+                    const myMemberId = SessionClient.getCurrentMember()?.id;
+                    const arrivalTime = (typeof performance !== 'undefined' && performance.now)
+                        ? performance.now() : Date.now();
+                    for (const objectInfo of createdObjects) {
+                        const obj = ObjectSync.getObject(objectInfo.id);
+                        if (!obj) continue;
+                        if (obj.ownerMemberId === myMemberId) continue;
+                        if (obj.data?.type !== OBJECT_TYPES.ASTEROID) continue;
+                        RemoteObjects.spawnAt(
+                            obj.id, obj.data, obj.ownerMemberId, serverTimestamp, arrivalTime);
+                    }
+                });
                 // Apply configured sync timing and field compression map
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
@@ -5240,6 +5636,10 @@
                 });
                 
                 sessionPicker.connected = true;
+                // Start the NTP-style clock-offset estimator now that the
+                // hub is reachable. Idempotent — visibility-driven re-bootstraps
+                // happen automatically inside the loop.
+                RemoteObjects.startClockSync();
                 await refreshSessionList();
                 // No polling - we rely on SignalR push notifications
             } else {
@@ -5757,10 +6157,18 @@
             reconnectingOverlay.classList.remove('visible');
         }
         sessionPicker.connected = true;
+        // Restart clock-sync after auto-reconnect (idempotent if already running).
+        // Pings issued while the transport was down would have failed; the loop's
+        // try/catch absorbed them, but the offset estimate may be stale.
+        RemoteObjects.startClockSync();
     });
 
     SessionClient.on('onDisconnected', (error) => {
         sessionPicker.connected = false;
+        // Stop the clock-sync loop until the transport reconnects. The loop's
+        // try/catch tolerates ping failures, but a quiet stop keeps the event
+        // loop unloaded during the disconnected window.
+        RemoteObjects.stopClockSync();
         // If the user is voluntarily leaving, do nothing — leavingSession is set
         // synchronously at the top of returnToStartScreen / handleLeaveLobby. Without
         // this guard a transport drop during leave teardown would auto-rejoin into

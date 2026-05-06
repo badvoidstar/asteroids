@@ -155,6 +155,35 @@ public class SessionHubTests
             "the joining member should appear as Client in the snapshot");
     }
 
+    [Fact]
+    public void Ping_ShouldReturnUtcMillisecondsCloseToNow()
+    {
+        // Arrange — Ping requires no session membership, but the existing
+        // CreateHub helper sets up a connection context. Just call directly.
+        var hub = CreateHub("connection-ping");
+        var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Act
+        var result = hub.Ping();
+
+        // Assert
+        var after = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        result.Should().BeGreaterThanOrEqualTo(before);
+        result.Should().BeLessThanOrEqualTo(after);
+    }
+
+    [Fact]
+    public void Ping_ShouldSucceedWithoutSessionMembership()
+    {
+        // Arrange — fresh hub with no session, no member.
+        var hub = CreateHub("connection-no-session");
+
+        // Act + Assert — does not throw, returns a positive UTC ms value.
+        var act = () => hub.Ping();
+        var result = act.Should().NotThrow().Which;
+        result.Should().BeGreaterThan(0);
+    }
+
     private SessionHub CreateHub(string connectionId, Mock<IGroupManager>? groupsMock = null)
     {
         var hub = new SessionHub(

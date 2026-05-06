@@ -237,6 +237,12 @@ public class SessionHub : Hub
     /// </param>
     public async Task<JoinSessionResponse?> JoinSession(Guid sessionId, Guid? evictMemberId = null)
     {
+        // Capture serverTimestamp at hub-method entry so it represents the
+        // moment the action was authoritatively realized, not the moment the
+        // broadcast was assembled. Receivers use this for spawn-position
+        // projection (see RemoteObjects.spawnAt) and adaptive-delay tracking.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var result = _sessionService.JoinSession(sessionId, Context.ConnectionId, evictMemberId);
         if (!result.Success)
         {
@@ -260,8 +266,8 @@ public class SessionHub : Hub
         // in the group, so they won't receive this — they get the full snapshot.
         if (result.Eviction is { } eviction)
         {
-            var evictTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
+            // Reuse the hub-entry serverTimestamp captured above — the eviction
+            // is realized as part of this join call's atomic processing.
             // Remove the evicted member's dead connection from the group so
             // SignalR doesn't try to deliver to a stale transport.
             await Groups.RemoveFromGroupAsync(eviction.EvictedConnectionId, session.Id.ToString());
@@ -276,7 +282,7 @@ public class SessionHub : Hub
             // The new joiner isn't in the SignalR group yet, so excluding member.Id
             // matches the actual delivery set and keeps RX accounting accurate.
             await BroadcastToOthersAsync(session, member.Id, "OnMemberLeft",
-                evictionInfo, eviction.EvictedMemberId, (long)0, evictTimestamp);
+                evictionInfo, eviction.EvictedMemberId, (long)0, serverTimestamp);
 
             _metrics.RemoveMember(eviction.EvictedMemberId);
 
@@ -305,7 +311,6 @@ public class SessionHub : Hub
         var (members, objects) = ToSessionSnapshot(session);
 
         var memberSequence = NextMemberSequence(member);
-        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         var joinedMemberInfo = ToMemberInfo(member);
         await BroadcastToOthersAsync(session, member.Id, "OnMemberJoined",
@@ -338,6 +343,9 @@ public class SessionHub : Hub
     /// </summary>
     public async Task LeaveSession()
     {
+        // Hub-entry serverTimestamp — see JoinSession for rationale.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var result = _sessionService.LeaveSession(Context.ConnectionId);
         if (result == null)
         {
@@ -351,7 +359,6 @@ public class SessionHub : Hub
 
         if (!result.SessionDestroyed && result.RemainingMemberIds.Count > 0)
         {
-            var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             // Notify remaining members with enriched departure info.
             // Promotion info and object disposal are all in the single LeaveSessionResult,
@@ -429,6 +436,9 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
     {
+        // Hub-entry serverTimestamp — see JoinSession for rationale.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
@@ -445,7 +455,6 @@ public class SessionHub : Hub
         var objectInfo = ToObjectInfo(obj);
 
         var memberSequence = NextMemberSequence(member);
-        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -464,6 +473,11 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null, long? senderSendIntervalMs = null)
     {
+        // Hub-entry serverTimestamp — see JoinSession for rationale. Always
+        // populated (even when no objects are updated) so the response carries
+        // a valid timestamp the client's clock-offset estimator can use.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
@@ -477,11 +491,9 @@ public class SessionHub : Hub
         var objectInfos = updatedObjects.Select(ToObjectInfo).ToList();
 
         long memberSequence = 0;
-        long serverTimestamp = 0;
         if (objectInfos.Count > 0)
         {
             memberSequence = NextMemberSequence(member);
-            serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             // Build a map from objectId → requested data for the broadcast payload.
             // Use the service updates (which own the data dictionaries we passed in).
             var requestDataByObjectId = serviceUpdates
@@ -515,6 +527,9 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<DeleteObjectResponse?> DeleteObject(Guid objectId)
     {
+        // Hub-entry serverTimestamp — see JoinSession for rationale.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
@@ -531,7 +546,6 @@ public class SessionHub : Hub
         }
 
         var memberSequence = NextMemberSequence(member);
-        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Broadcast to other members only — sender deleted locally before invoking (local-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
@@ -550,6 +564,12 @@ public class SessionHub : Hub
     /// </summary>
     public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null)
     {
+        // Hub-entry serverTimestamp — critical for spawn projection. Receivers
+        // compute staleness = serverNowMs() - serverTimestamp to forward-project
+        // child positions. Capturing AFTER service work would bias the receivers'
+        // staleness LOW and make the projection slightly undershoot.
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
@@ -575,7 +595,6 @@ public class SessionHub : Hub
         var createdInfos = createdObjects.Select(ToObjectInfo).ToList();
 
         var memberSequence = NextMemberSequence(member);
-        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         // Single atomic broadcast to ALL members (including sender).
         // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
@@ -610,6 +629,28 @@ public class SessionHub : Hub
             m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
 
         return new SessionStateSnapshot(members, objects, memberSequences);
+    }
+
+    /// <summary>
+    /// Returns the current server UTC time in unix milliseconds. Used by clients
+    /// to compute their clock offset relative to the server (NTP-style):
+    /// <c>offset = serverTime + (rtt / 2) − clientReceiveTime</c>.
+    ///
+    /// The timestamp is captured on the return statement itself for minimum
+    /// server-side processing bias. No session membership is required, so the
+    /// client can run a clock-sync bootstrap immediately after connect, before
+    /// joining a session.
+    /// </summary>
+    public long Ping()
+    {
+        // Track for bandwidth metrics if the caller is associated with a member,
+        // but tolerate calls before session join (sessionless clock sync).
+        var ctx = GetCallerContext();
+        if (ctx != null)
+        {
+            _metrics.OnHubInvocation(ctx.Value.Member.Id, 0);
+        }
+        return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     }
 
     /// <summary>

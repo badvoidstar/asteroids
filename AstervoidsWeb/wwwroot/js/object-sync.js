@@ -150,6 +150,7 @@ const ObjectSync = (function() {
         onObjectCreated: null,
         onObjectUpdated: null,
         onObjectDeleted: null,
+        onObjectReplaced: null,
         onBatchReceived: null,
         onSyncError: null,
         onReconciliationFailed: null,
@@ -391,7 +392,7 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, spawnServerTime) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -444,6 +445,9 @@ const ObjectSync = (function() {
                     updateTypeIndex(existing, oldType, existing.data.type);
                 }
             }
+            if (spawnServerTime !== undefined && existing.spawnServerTime === undefined) {
+                existing.spawnServerTime = spawnServerTime;
+            }
             return;
         }
 
@@ -452,6 +456,12 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
+        // Stamp spawnServerTime when this creation comes from an OnObjectReplaced
+        // event — used for spawn-position projection (RemoteObjects.spawnAt and
+        // updateAstervoidsFromSync's adopt branch).
+        if (spawnServerTime !== undefined) {
+            obj.spawnServerTime = spawnServerTime;
+        }
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -534,19 +544,28 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object replaced (atomic delete + create).
+     * @param {object} event - { deletedObjectId, createdObjects }
+     * @param {string} senderMemberId
+     * @param {number} memberSequence
+     * @param {number} [serverTimestamp] - server-captured ms when the replace
+     *   was authoritatively realized. Forwarded to handleRemoteObjectCreated
+     *   so each new child carries spawnServerTime for downstream
+     *   spawn-position projection (RemoteObjects.spawnAt).
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
-        // Create all replacement objects (no sequence tracking — already tracked above)
+        // Create all replacement objects (no sequence tracking — already tracked above).
+        // Pass spawnServerTime so each new obj is stamped with the moment the
+        // replace was authoritatively realized — used for spawn projection.
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined, serverTimestamp);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, serverTimestamp);
         }
     }
 
