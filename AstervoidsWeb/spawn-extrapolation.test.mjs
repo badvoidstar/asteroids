@@ -1,5 +1,5 @@
 /**
- * Tests for RemoteObjects single-snapshot extrapolation and render-error
+ * Tests for RemoteObjects single-snapshot clamping and render-error
  * smoothing of the leading-edge → buffered-interpolation handoff.
  *
  * Run with:  node --test AstervoidsWeb/spawn-extrapolation.test.mjs
@@ -9,10 +9,10 @@
  * AstervoidsWeb/wwwroot/index.html (RemoteObjects).
  *
  * Behaviour verified:
- *  1. Single snapshot → linear extrapolation of x/y from velocity AND of
- *     angle from rotationSpeed. Position and rotation ride the same
- *     extrapolation site; one fix addresses both.
- *  2. Single-snapshot extrapolation is capped at MAX_EXTRAPOLATION seconds.
+ *  1. Single snapshot uses baseDelay and clamps to snapshot[0].data through
+ *     the 1→2 handoff window, avoiding spawn jump-back.
+ *  2. Extrapolation (when targetTime > latest.time) remains capped at
+ *     MAX_EXTRAPOLATION seconds.
  *  3. On 1→2 transition, renderError captures the (prevOutput − newOutput)
  *     visual offset so getInterpolated stays continuous across the model
  *     switch (no backward snap).
@@ -53,14 +53,15 @@ function makeStore(baseDelay) {
             const latest = snapshots[snapshots.length - 1];
             if (!CONFIG.INTERPOLATION_ENABLED) return latest.data;
 
-            // While the catchup smoother is active (state.renderError set),
-            // ramp the effective delay from 0 (lead from latest snapshot) at
-            // progress=0 to baseDelay (bracket regime) at progress=1. This
-            // tightens accuracy beneath the smoother during catchup AND
-            // guarantees position continuity at the moment renderError clears.
+            // Single snapshot uses full baseDelay (not delay=0) so targetTime
+            // is behind snapshot[0].time during the initial fill and clamps to
+            // snapshot[0].data. When snapshot[1] arrives, bracket interpolation
+            // continues from the same targetTime formula without jump-back.
+            // Catchup ramp still transitions delay from baseDelay·0 to
+            // baseDelay while renderError decays.
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                delay = this.baseDelay;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
@@ -168,68 +169,72 @@ function makeStore(baseDelay) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-test('single snapshot: position dead-reckons forward from broadcast velocity', () => {
+test('single snapshot: clamps to snap[0].data — bracket-transition-safe (position)', () => {
     const s = makeStore(100);
     const t0 = 1000;
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 2, velocityY: 3, rotationSpeed: 0 }, t0);
 
-    const out = s.getInterpolated('a', t0 + 50);
-    assert.ok(Math.abs(out.x - 2 * 0.05) < 1e-9);
-    assert.ok(Math.abs(out.y - 3 * 0.05) < 1e-9);
+    // Contract change: single-snapshot mode now uses delay=baseDelay, so
+    // targetTime stays at/before snap[0].time during the initial fill window.
+    // This avoids the old forward extrapolation + backward handoff jump.
+    const t1 = s.getInterpolated('a', t0 + 1);
+    const t50 = s.getInterpolated('a', t0 + 50);
+    const t99 = s.getInterpolated('a', t0 + 99);
+    assert.equal(t1.x, 0);
+    assert.equal(t1.y, 0);
+    assert.equal(t50.x, 0);
+    assert.equal(t50.y, 0);
+    assert.equal(t99.x, 0);
+    assert.equal(t99.y, 0);
 });
 
-test('single snapshot: rotation dead-reckons forward from broadcast rotationSpeed', () => {
+test('single snapshot: clamps to snap[0].data — bracket-transition-safe (rotation)', () => {
     const s = makeStore(100);
     const t0 = 1000;
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0, velocityY: 0, rotationSpeed: 0.01 }, t0);
 
-    const out = s.getInterpolated('a', t0 + 100);
-    assert.ok(Math.abs(out.angle - 0.01 * 60 * 0.1) < 1e-9);
+    const out = s.getInterpolated('a', t0 + 99);
+    assert.equal(out.angle, 0);
 });
 
-test('single snapshot: extrapolation is capped at MAX_EXTRAPOLATION', () => {
+test('extrapolation branch is capped at MAX_EXTRAPOLATION', () => {
     const s = makeStore(100);
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 1, rotationSpeed: 0 }, 0);
-    const out = s.getInterpolated('a', 5000);
-    assert.ok(Math.abs(out.x - 1 * CONFIG.MAX_EXTRAPOLATION) < 1e-9);
+    s.updateState('a', { x: 0.1, y: 0, angle: 0, velocityX: 1, rotationSpeed: 0 }, 100);
+    s.states.get('a').renderError = null; // exercise pure extrapolation branch
+    const out = s.getInterpolated('a', 5100); // targetTime=5000, latest.time=100
+    assert.ok(Math.abs(out.x - (0.1 + 1 * CONFIG.MAX_EXTRAPOLATION)) < 1e-9);
 });
 
 test('renderError captured on 1→2 transition reflects prev−leadingEdge disagreement', () => {
-    // Under the catchup-ramp model, `next` at progress=0 is the leading-edge
-    // value at the latest snapshot — i.e. snap[1].x exactly. So renderError.x
-    // captures (single-snap extrap from snap[0]) − snap[1].x. For constant
-    // velocity this is zero (the smoother has nothing to absorb because the
-    // base model is already accurate). Use a scenario where sender velocity
-    // changed between snap[0] and snap[1] (e.g. a deflection kick) — then the
-    // extrap-from-stale-velocity disagrees with snap[1].x and the smoother
-    // captures a real offset.
+    // With delay=baseDelay in single-snap mode:
+    // prev @t=100 clamps to snap[0].x=0.
+    // During renderError capture, `next` is evaluated with progress=0
+    // (effective delay=0), so next=snap[1].x=0.06.
+    // Expected renderError.x = prev − next = 0 − 0.06 = -0.06.
     const s = makeStore(100);
     // snap[0]: x=0, v=0.4 at t=0
     // snap[1]: x=0.06 (sender accelerated), v=0.5 at t=100
-    // prev (single-snap extrap from snap[0] at t=100) = 0 + 0.4*0.1 = 0.04
-    // next (LE from snap[1] at t=100) = snap[1].x + v·0 = 0.06
-    // Expected renderError.x = 0.04 - 0.06 = -0.02
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 0);
     s.updateState('a', { x: 0.06, y: 0, angle: 0, velocityX: 0.5, rotationSpeed: 0 }, 100);
     const state = s.states.get('a');
     assert.ok(state.renderError, 'renderError installed');
-    assert.ok(Math.abs(state.renderError.x - (-0.02)) < 1e-9,
-        `expected dx=-0.02, got ${state.renderError.x}`);
+    assert.ok(Math.abs(state.renderError.x - (-0.06)) < 1e-9,
+        `expected dx=-0.06, got ${state.renderError.x}`);
     assert.equal(state.renderError.startTime, 100);
 });
 
-test('renderError is zero when sender velocity is constant (base model already accurate)', () => {
-    // Under the catchup-ramp model, leading-edge from snap[1] at t=snap[1].time
-    // equals snap[1].x exactly. For constant velocity, snap[1].x equals
-    // (single-snap extrap from snap[0] at t=snap[1].time), so the smoother
-    // has no offset to absorb — proof that the underlying base path is now
-    // accurate by construction in the constant-velocity case.
+test('renderError captures single-snap clamp → leading-edge handoff under constant velocity', () => {
+    // With delay=baseDelay for single-snap:
+    // prev @t=100 clamps to snap[0].x=0.
+    // next during capture (progress=0) is snap[1].x=0.04.
+    // renderError.x = -0.04.
     const s = makeStore(100);
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 0);
     s.updateState('a', { x: 0.04, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 100);
     const re = s.states.get('a').renderError;
-    assert.ok(re, 'renderError installed even when zero');
-    assert.ok(Math.abs(re.x) < 1e-9, `expected dx≈0 for constant velocity, got ${re.x}`);
+    assert.ok(re, 'renderError installed');
+    assert.ok(Math.abs(re.x - (-0.04)) < 1e-9, `expected dx=-0.04, got ${re.x}`);
     assert.ok(Math.abs(re.y) < 1e-9);
 });
 
@@ -237,13 +242,12 @@ test('continuity across handoff: rendered output equals prev-frame extrapolation
     const s = makeStore(100);
     s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 0);
 
-    const beforeArrival = s.getInterpolated('a', 100); // single-snap extrap
+    const beforeArrival = s.getInterpolated('a', 100); // single-snap output
     s.updateState('a', { x: 0.04, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 100);
     const justAfter = s.getInterpolated('a', 100);     // smoothed buffered output
 
-    // The whole point of the smoothing: rendered position must be continuous
-    // through the model switch. Pre-fix, justAfter.x would have snapped from
-    // 0.04 down to 0 (snapshot[0].x), a backward jump of v·baseDelay.
+    // The whole point of the smoothing: rendered output remains continuous
+    // through the model switch.
     assert.ok(Math.abs(justAfter.x - beforeArrival.x) < 1e-9,
         `expected continuity: before=${beforeArrival.x} just-after=${justAfter.x}`);
 });
@@ -284,8 +288,8 @@ test('rendered motion never goes backward across the decay window', () => {
 test('wrap-skip: large dx (likely screen wrap) does NOT install renderError', () => {
     const s = makeStore(100);
     // Sender wraps from x=0.95 (with velocity moving right) to x=0.05 across the seam.
-    // Single-snap extrap at t=100 from snapshot[0](x=0.95, v=10) → 0.95 + 10*0.1 = 1.95 (no wrap in test mirror)
-    // snapshot[1] arrives at x=0.05. Disagreement: 1.95 - (clamped to snapshot[0].data x=0.95) = 1.0 — way over 0.5.
+    // Single-snap now clamps at t=100 to snapshot[0].x=0.95.
+    // snapshot[1] arrives at x=0.05. Disagreement: 0.95 - 0.05 = 0.9 (> 0.5).
     s.updateState('a', { x: 0.95, y: 0, angle: 0, velocityX: 10, rotationSpeed: 0 }, 0);
     s.updateState('a', { x: 0.05, y: 0, angle: 0, velocityX: 10, rotationSpeed: 0 }, 100);
     assert.equal(s.states.get('a').renderError, null,
@@ -321,6 +325,37 @@ test('after renderError clears, steady-state output is pure buffered interpolati
     assert.ok(Math.abs(out.x - 0.12) < 1e-9);
 });
 
+test('regression (from PR #87): no spawn jump-back across single-snap → bracket transition', () => {
+    // Pre-fix scenario: single-snap with delay=0 extrapolated forward for
+    // ~sendInterval ms; bracket regime then rendered at targetTime =
+    // renderTime − baseDelay, snapping backward by ~v·sendInterval. The
+    // renderError smoother masked this in the wrapped output, but the
+    // underlying base path was discontinuous. Post-fix: single-snap uses
+    // delay=baseDelay → clamps to snap[0].data → bracket transitions
+    // continuously when snap[1] arrives.
+    //
+    // Setup: parent at v=0.4 normalized/sec, sendInterval=100ms, baseDelay=100.
+    // snap[0] arrives at t=50; snap[1] at t=150.
+    const s = makeStore(100);
+    s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 50);
+
+    // Render every ms from t=50 to t=200; assert position is monotonically
+    // non-decreasing (no backward jump) — this is the property pre-fix
+    // violated. Push snap[1] in the middle (at t=150) to cover the transition.
+    let prev = s._baseInterpolated(s.states.get('a'), 50).x;
+    let snap1Pushed = false;
+    for (let t = 51; t <= 200; t += 1) {
+        if (!snap1Pushed && t >= 150) {
+            s.updateState('a', { x: 0.04, y: 0, angle: 0, velocityX: 0.4, rotationSpeed: 0 }, 150);
+            snap1Pushed = true;
+        }
+        const cur = s._baseInterpolated(s.states.get('a'), t).x;
+        assert.ok(cur >= prev - 1e-9,
+            `JUMP-BACK at t=${t} (snap1Pushed=${snap1Pushed}): ${prev} → ${cur}`);
+        prev = cur;
+    }
+});
+
 // ── Catchup-ramp accuracy tests (proposal (1) from the residual-error plan) ──
 
 test('catchup-ramp: jittered arrivals — rendered tracks sender path closely', () => {
@@ -336,23 +371,23 @@ test('catchup-ramp: jittered arrivals — rendered tracks sender path closely', 
     s.updateState('a', { x: 0.00, y: 0, angle: 0, velocityX: v, rotationSpeed: 0 }, 0);
     s.updateState('a', { x: 0.02, y: 0, angle: 0, velocityX: v, rotationSpeed: 0 }, 80);
 
-    // prev (single-snap extrap @t=80) = 0 + 0.4·0.08 = 0.032
+    // prev (single-snap @t=80 uses baseDelay=50) = 0 + 0.4·(0.08−0.05) = 0.012
     // next (LE from snap[1] @t=80)   = 0.02
-    // offset = 0.032 − 0.02 = 0.012  (the smoother absorbs the early-arrival jitter)
+    // offset = 0.012 − 0.02 = -0.008  (the smoother absorbs the early-arrival jitter)
     const re = s.states.get('a').renderError;
-    assert.ok(Math.abs(re.x - 0.012) < 1e-9, `expected jitter offset 0.012, got ${re.x}`);
+    assert.ok(Math.abs(re.x - (-0.008)) < 1e-9, `expected jitter offset -0.008, got ${re.x}`);
 
-    // At seam (t=80): rendered = prev = 0.032 (continuity).
-    assert.ok(Math.abs(s.getInterpolated('a', 80).x - 0.032) < 1e-9);
+    // At seam (t=80): rendered = prev = 0.012 (continuity).
+    assert.ok(Math.abs(s.getInterpolated('a', 80).x - 0.012) < 1e-9);
 
     // Mid-window (t=80+150=230): progress=0.5, w=0.5.
     // effectiveDelay = 50·0.5 = 25 → target=205 → extrap from snap[1] for 125ms:
     //   base = 0.02 + 0.4·0.125 = 0.07
-    // + offset·w = 0.012·0.5 = 0.006
-    // → 0.076
+    // + offset·w = (-0.008)·0.5 = -0.004
+    // → 0.066
     const renderMid = s.getInterpolated('a', 230).x;
-    assert.ok(Math.abs(renderMid - 0.076) < 1e-9,
-        `expected ramped position 0.076 at mid-window, got ${renderMid}`);
+    assert.ok(Math.abs(renderMid - 0.066) < 1e-9,
+        `expected ramped position 0.066 at mid-window, got ${renderMid}`);
 });
 
 test('catchup-ramp: acceleration mid-gap — rendered tracks new (snap[1]) velocity', () => {
@@ -370,16 +405,16 @@ test('catchup-ramp: acceleration mid-gap — rendered tracks new (snap[1]) veloc
 
     // Sample two points within the catchup window. The ramp also slowly
     // increases effectiveDelay (baseDelay=100, window=300 → factor 1−1/3 = 2/3
-    // velocity reduction in steady-state); plus the small offset decay
-    // (offset = -0.02, decay over 300ms contributes +0.067/sec). Net apparent
-    // velocity ≈ 0.8·2/3 + 0.067 ≈ 0.6 — well above stale 0.4 (= 0.4·2/3 = 0.267).
+    // velocity reduction in steady-state); plus larger offset decay here
+    // (offset = -0.06, decay over 300ms contributes +0.2/sec). Net apparent
+    // velocity ≈ 0.8·2/3 + 0.2 ≈ 0.73 — still far above stale 0.4.
     const a = s.getInterpolated('a', 150).x;
     const b = s.getInterpolated('a', 250).x;
     const apparentV = (b - a) / 0.1; // 100ms apart, normalized/sec
 
-    assert.ok(apparentV > 0.5,
-        `apparent velocity ${apparentV} should reflect snap[1].vel=0.8 (expected ≈0.6), not stale snap[0].vel=0.4 (would give ≈0.27)`);
-    assert.ok(apparentV < 0.7,
+    assert.ok(apparentV > 0.65,
+        `apparent velocity ${apparentV} should reflect snap[1].vel=0.8 (expected ≈0.73), not stale snap[0].vel=0.4`);
+    assert.ok(apparentV < 0.8,
         `apparent velocity ${apparentV} consistent with the ramp's 2/3 base-velocity factor + offset decay`);
 });
 

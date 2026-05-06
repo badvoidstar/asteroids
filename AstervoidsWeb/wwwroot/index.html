@@ -1873,24 +1873,30 @@
                 return latest.data;
             }
 
-            // Single snapshot → delay 0 (extrapolate from snapshot[0]).
-            // Otherwise → full per-member adaptive delay. The transition from
-            // 0 to baseDelay would normally yank position backward; the
-            // renderError smoothing layer in getInterpolated absorbs that.
+            // Single snapshot → use full baseDelay (NOT delay=0). targetTime then
+            // resolves to renderTime − baseDelay, which is in the past of
+            // snap[0].time = arrivalTime, so the clamp-to-snapshots[0] branch below
+            // returns snap[0].data — equivalent to "freeze on the spawn pixel for
+            // ~baseDelay ms while the buffer fills". When snap[1] arrives, the
+            // bracket regime renders at the same targetTime formula, producing
+            // continuous output (≈snap[0].data, transitioning smoothly to snap[1]
+            // as wall time advances). Pre-fix: delay=0 extrapolated forward for
+            // ~sendInterval ms, then bracket regime snapped backward by
+            // v·sendInterval — visible jump-back at every spawn. (Ported from PR #87,
+            // which proved the same fix on its NTP-aligned snapshot times; the math
+            // is identical for arrival-time snapshots because the discontinuity
+            // comes from the change in `delay`, not from the absolute snap[0].time.)
             //
-            // While the catchup smoother is active (state.renderError set), we
-            // ramp the effective delay smoothly from 0 (lead from the freshest
-            // known snapshot) at progress=0 to the full baseDelay (bracket
-            // regime) at progress=1. This achieves the "lead from snapshot[1]"
-            // accuracy improvement during catchup — eliminates the stale
-            // snap[0].velocity Hermite tangent and the receiver-arrival-timing
-            // jitter in timeDiff — while guaranteeing position continuity at
-            // the moment renderError clears (effectiveDelay = baseDelay matches
-            // the post-window bracket regime exactly, so no backward jump).
+            // Catchup ramp (when renderError is active) continues to ramp delay from
+            // baseDelay·0 to baseDelay across the window; with the single-snap
+            // transition no longer producing a jump-back, the captured renderError
+            // is now ~zero in the constant-velocity case. The smoother is preserved
+            // because it still absorbs the velocity-disagreement case (sender
+            // acceleration between snap[0] and snap[1]).
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                delay = baseDelay;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
