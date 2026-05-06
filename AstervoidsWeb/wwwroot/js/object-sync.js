@@ -131,6 +131,12 @@ const ObjectSync = (function() {
     // Delta encoding: track last-sent data per object to only send changes
     const lastSentData = new Map();
     let deltaEncodingEnabled = false;
+    // Optional clock source for owner-stamped spawn times. Provided via
+    // configure({ clockSource: { nowMs(), initialized() } }). When set,
+    // replaceObject stamps clientSpawnServerTime so the server's broadcast
+    // anchors at the owner's collision-detection moment instead of the
+    // hub-entry time (eliminates upload-time bias in spawn projection).
+    let clockSource = null;
     
     // Full-state sync interval (frames at nominal rate)
     const FULL_SYNC_INTERVAL = 6000;
@@ -150,6 +156,7 @@ const ObjectSync = (function() {
         onObjectCreated: null,
         onObjectUpdated: null,
         onObjectDeleted: null,
+        onObjectReplaced: null,
         onBatchReceived: null,
         onSyncError: null,
         onReconciliationFailed: null,
@@ -179,6 +186,9 @@ const ObjectSync = (function() {
             reverseMap = Object.fromEntries(
                 Object.entries(fieldMap).map(([k, v]) => [v, k])
             );
+        }
+        if (config.clockSource !== undefined) {
+            clockSource = config.clockSource;
         }
     }
     
@@ -391,7 +401,7 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, spawnServerTime) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -444,6 +454,9 @@ const ObjectSync = (function() {
                     updateTypeIndex(existing, oldType, existing.data.type);
                 }
             }
+            if (spawnServerTime !== undefined && existing.spawnServerTime === undefined) {
+                existing.spawnServerTime = spawnServerTime;
+            }
             return;
         }
 
@@ -452,6 +465,12 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
+        // Stamp spawnServerTime when this creation comes from an OnObjectReplaced
+        // event — used for spawn-position projection (RemoteObjects.spawnAt and
+        // updateAstervoidsFromSync's adopt branch).
+        if (spawnServerTime !== undefined) {
+            obj.spawnServerTime = spawnServerTime;
+        }
 
         if (callbacks.onObjectCreated) {
             callbacks.onObjectCreated(obj);
@@ -534,19 +553,36 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object replaced (atomic delete + create).
+     * @param {object} event - { deletedObjectId, createdObjects }
+     * @param {string} senderMemberId
+     * @param {number} memberSequence
+     * @param {number} [serverTimestamp] - server-captured ms at hub entry
+     *   (network-arrival anchor; carries server processing time).
+     * @param {number} [spawnServerTime] - owner-anchored ms (or server fallback)
+     *   representing "when did the spawn happen in server-time-space".
+     *   Forwarded to handleRemoteObjectCreated so each new child carries it
+     *   for downstream spawn-position projection (RemoteObjects.spawnAt).
+     *   When the owner's clock is initialized, this is upload-time-bias-free;
+     *   when it falls back to serverTimestamp, projection is still correct
+     *   modulo the owner's upload time.
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
-        // Create all replacement objects (no sequence tracking — already tracked above)
+        // Create all replacement objects (no sequence tracking — already tracked above).
+        // Pass spawnServerTime (owner-anchored) so each new obj is stamped with
+        // the moment the spawn was authoritatively realized — used for spawn
+        // projection. Falls back to serverTimestamp if the broadcast didn't
+        // include the new field (older servers).
+        const spawnAnchor = (spawnServerTime != null) ? spawnServerTime : serverTimestamp;
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined, spawnAnchor);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, spawnAnchor);
         }
     }
 
@@ -767,7 +803,24 @@ const ObjectSync = (function() {
 
         try {
             const compressedReplacements = replacements.map(r => compressData(r));
-            const createdInfos = await SessionClient.replaceObject(deleteObjectId, compressedReplacements, scope, ownerMemberId);
+            // Stamp owner's best estimate of server time NOW (collision moment).
+            // Server clamps to ±2s of its own UtcNow before forwarding as the
+            // spawn anchor. If the clock isn't initialized yet, send null and
+            // server falls back to its hub-entry timestamp (less accurate but
+            // still bounded by upload_time).
+            //
+            // Math.round is required: clockSource.nowMs() returns
+            // Date.now() + offsetMs where offsetMs is a fractional EMA value
+            // (e.g., 237.9). MessagePack-JS encodes a fractional Number as
+            // float64; the server's long? deserializer rejects it with
+            // "Type mismatch", causing the entire ReplaceObject invocation to
+            // throw — leaving the asteroid undeletable. Rounding to an integer
+            // forces MessagePack to encode as int64.
+            const clientSpawnServerTime = (clockSource && clockSource.initialized && clockSource.initialized())
+                ? Math.round(clockSource.nowMs())
+                : null;
+            const createdInfos = await SessionClient.replaceObject(
+                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientSpawnServerTime);
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {

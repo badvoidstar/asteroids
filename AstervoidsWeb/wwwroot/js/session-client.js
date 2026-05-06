@@ -248,9 +248,9 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime);
             }
         }));
 
@@ -459,9 +459,17 @@ const SessionClient = (function() {
 
     /**
      * Atomically delete an object and create replacements in a single broadcast.
+     * @param {string} deleteObjectId
+     * @param {Array} replacements
+     * @param {string} [scope='Session']
+     * @param {string|null} [ownerMemberId=null]
+     * @param {number|null} [clientSpawnServerTime=null] - Owner's best estimate
+     *   (via clock-offset) of "server time at this moment". Server clamps to
+     *   ±2000ms of its own UtcNow before forwarding as the spawn anchor. Pass
+     *   null to fall back to server's hub-entry timestamp (less accurate).
      */
-    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null) {
-        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId);
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientSpawnServerTime = null) {
+        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId, clientSpawnServerTime);
     }
 
     /**
@@ -473,6 +481,19 @@ const SessionClient = (function() {
 
     async function getSessionState() {
         return invokeHub('GetSessionState');
+    }
+
+    /**
+     * Returns the server's current UTC time in unix milliseconds. Used by
+     * the client's NTP-style clock-offset estimator (RemoteObjects.clock).
+     * Captured on the server's return statement for minimum processing bias.
+     * Does NOT require session membership.
+     */
+    async function ping() {
+        if (!isConnected()) {
+            throw new Error('Not connected');
+        }
+        return await connection.invoke('Ping');
     }
 
     /**
@@ -544,6 +565,7 @@ const SessionClient = (function() {
         replaceObject,
         deleteObject,
         getSessionState,
+        ping,
         on,
         getCurrentSession,
         getCurrentMember,
