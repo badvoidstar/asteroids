@@ -562,19 +562,46 @@ public class SessionHub : Hub
     /// Ownership check, creation of replacements, and deletion of the original all happen
     /// atomically under the session lock inside the service layer.
     /// </summary>
-    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null)
+    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null, long? clientSpawnServerTime = null)
     {
-        // Hub-entry serverTimestamp — critical for spawn projection. Receivers
-        // compute staleness = serverNowMs() - serverTimestamp to forward-project
-        // child positions. Capturing AFTER service work would bias the receivers'
-        // staleness LOW and make the projection slightly undershoot.
+        // Hub-entry serverTimestamp — used by recordPacketArrival (network arrival
+        // timing, includes server processing time). NOT used as the spawn anchor;
+        // see spawnServerTime below for the owner-stamped value used by spawn
+        // projection.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Spawn anchor for receiver-side projection. The asteroid OWNER stamps
+        // their best estimate of "server time at collision detection" using their
+        // Phase 1 clock-offset (RemoteObjects.serverNowMs). This eliminates the
+        // owner→server upload-time bias that plagued using serverTimestamp alone:
+        //   * serverTimestamp = T_collision_owner + upload_time_owner_to_server
+        //   * clientSpawnServerTime = T_collision_owner   (modulo NTP residual)
+        // Receivers compute staleness = serverNow_recv − spawnServerTime − delay,
+        // so using clientSpawnServerTime makes children spawn at the position the
+        // bracket-renderer was actually showing the parent at.
+        //
+        // Sanity bound: if the client-stamped value is more than 2s away from the
+        // hub-entry timestamp, we assume the client's clock estimate is bogus
+        // (clock not yet initialized, glitched, or hostile) and fall back to
+        // serverTimestamp. 2s comfortably exceeds any realistic
+        // RTT + clock-skew combination on a real game session.
+        const long SpawnTimeSanityBoundMs = 2000;
+        long spawnServerTime;
+        if (clientSpawnServerTime.HasValue
+            && Math.Abs(clientSpawnServerTime.Value - serverTimestamp) <= SpawnTimeSanityBoundMs)
+        {
+            spawnServerTime = clientSpawnServerTime.Value;
+        }
+        else
+        {
+            spawnServerTime = serverTimestamp;
+        }
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(deleteObjectId, replacements, scope, ownerMemberId));
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(deleteObjectId, replacements, scope, ownerMemberId, clientSpawnServerTime));
 
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
@@ -602,7 +629,7 @@ public class SessionHub : Hub
         // to refactor replaceObject to process the invoke response locally first.
         var replaceEvent = new ObjectReplacedEvent(deleteObjectId, createdInfos);
         await BroadcastToAllAsync(session, "OnObjectReplaced",
-            replaceEvent, member.Id, memberSequence, serverTimestamp);
+            replaceEvent, member.Id, memberSequence, serverTimestamp, spawnServerTime);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
             deleteObjectId, createdObjects.Count, member.SessionId);

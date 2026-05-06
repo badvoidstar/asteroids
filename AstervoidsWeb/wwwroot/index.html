@@ -1792,10 +1792,17 @@
          * at the spawn moment on this client. Called from the
          * `onObjectReplaced` handler (index.html → connectToSessionHub).
          *
-         * If the clock offset hasn't initialized yet, we fall back to the
-         * unprojected data (no projection is better than wrong projection
-         * with a garbage offset). This is rare in practice — Phase 1's
-         * bootstrap burst lands well before the player's first shot.
+         * spawnServerTime is the OWNER's clock-corrected estimate of "server
+         * time at collision detection" (set by the owner's
+         * ObjectSync.replaceObject and forwarded by SessionHub after a ±2s
+         * sanity clamp). When the owner's clock isn't yet initialized, the
+         * server falls back to its hub-entry timestamp; in that mode the
+         * projection is still correct modulo the owner's upload time.
+         *
+         * If our own clock offset hasn't initialized yet, we skip projection
+         * (no projection is better than wrong projection with a garbage
+         * offset). This is rare in practice — Phase 1's bootstrap burst
+         * lands well before the player's first shot.
          *
          * Idempotent: if a state already exists for this objectId, we no-op
          * (the next updateState call from updateAstervoidsFromSync will push
@@ -5642,6 +5649,14 @@
                     minFrameTime: CONFIG.SYNC_MIN_FRAME_TIME,
                     deltaEncoding: CONFIG.DELTA_ENCODING_ENABLED,
                     adaptiveSendRate: CONFIG.ADAPTIVE_SEND_RATE,
+                    // Owner-stamp source for replaceObject's clientSpawnServerTime —
+                    // eliminates upload-time bias from the spawn anchor when the
+                    // local clock-offset estimator has bootstrapped. Server clamps
+                    // ±2s before forwarding.
+                    clockSource: {
+                        nowMs: () => RemoteObjects.serverNowMs(),
+                        initialized: () => RemoteObjects.isClockOffsetInitialized()
+                    },
                     fieldMap: {
                         type: 't', x: 'x', y: 'y', angle: 'a',
                         velocityX: 'vx', velocityY: 'vy', rotationSpeed: 'rs',

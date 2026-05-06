@@ -587,3 +587,104 @@ test('integration: bootstrap fallback — clock uninitialized → no projection'
     assert.equal(out.x, 0.5);
     assert.equal(out.y, 0.5);
 });
+
+// ── Phase 2 owner-stamped spawn anchor (eliminates upload-time bias) ─────
+//
+// With the old design, spawnServerTime = serverTimestamp = hub-entry time:
+//   spawnServerTime_OLD = T_collision_owner + upload_time_owner_to_server
+// Children would be placed `velocity * upload_time` BEHIND where the
+// observer's bracket-renderer was showing the parent.
+//
+// With the new design, the owner stamps clientSpawnServerTime via their
+// own clock-offset estimate at collision detection time:
+//   spawnServerTime_NEW = T_collision_owner   (modulo NTP residual)
+// The upload_time bias term disappears.
+
+test('phase 2: owner-stamped time eliminates upload-time bias on observer projection', () => {
+    // Setup:
+    //   T_collision_owner  = 1000 (server time space, owner's clock-corrected)
+    //   upload_time        = 30ms (owner→server one-way)
+    //   download_time      = 50ms (server→observer one-way)
+    //   delay_observer_C   = 100ms per-member buffer
+    //   parent vx          = 0.5 normalized/sec
+    //
+    // OLD behavior (server hub-entry timestamp):
+    //   spawnServerTime_OLD = 1000 + 30 = 1030
+    //   serverNow_observer  = T_collision_owner + upload + download = 1080
+    //   staleness_OLD       = (1080 − 1030 − 100)/1000 = -0.05s
+    //   projected_OLD       = 0.5 + 0.5*(-0.05) = 0.475
+    //   bracket-render      = parent at server time (1080 − 100) = 980
+    //                       = position at 980 = 0.5 + 0.5*(980−1000)/1000 = 0.49
+    //   error_OLD           = 0.475 − 0.49 = -0.015 (15 px on 1000px screen)
+    //
+    // NEW behavior (owner-stamped time):
+    //   spawnServerTime_NEW = 1000
+    //   staleness_NEW       = (1080 − 1000 − 100)/1000 = -0.02s
+    //   projected_NEW       = 0.5 + 0.5*(-0.02) = 0.49
+    //   bracket-render      = 0.49
+    //   error_NEW           = 0
+    //
+    // The new path matches bracket-render exactly. Old path lags by
+    // velocity * upload_time = 0.015 (the residual jump).
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.5, velocityY: 0, rotationSpeed: 0 };
+
+    const T_collision_owner = 1000;
+    const upload_time_ms = 30;
+    const download_time_ms = 50;
+    const delay_C_sec = 0.1;
+    const serverNow_observer = T_collision_owner + upload_time_ms + download_time_ms;
+
+    const spawnServerTime_OLD = T_collision_owner + upload_time_ms;
+    const spawnServerTime_NEW = T_collision_owner;
+
+    const stalenessSec_OLD = computeSpawnStaleness(serverNow_observer, spawnServerTime_OLD, delay_C_sec);
+    const stalenessSec_NEW = computeSpawnStaleness(serverNow_observer, spawnServerTime_NEW, delay_C_sec);
+
+    const projected_OLD = projectSpawnDataNoWrap(data, stalenessSec_OLD);
+    const projected_NEW = projectSpawnDataNoWrap(data, stalenessSec_NEW);
+
+    // Where the observer's bracket-renderer was showing the parent: at
+    // server-time (serverNow − delay_C), translated to position via parent's
+    // velocity from its known T_collision spawn point.
+    const bracketRenderTimeServerSec = (serverNow_observer / 1000) - delay_C_sec;
+    const parentT_collision_sec = T_collision_owner / 1000;
+    const bracketRenderPosition = data.x + data.velocityX * (bracketRenderTimeServerSec - parentT_collision_sec);
+
+    // OLD projection has measurable error proportional to upload_time × velocity.
+    const error_OLD = Math.abs(projected_OLD.x - bracketRenderPosition);
+    const error_NEW = Math.abs(projected_NEW.x - bracketRenderPosition);
+
+    // OLD: ≈ velocity * upload_time = 0.5 * 0.03 = 0.015 normalized.
+    assert.ok(Math.abs(error_OLD - 0.5 * 0.03) < 1e-9,
+        `OLD error should equal velocity*upload_time, got ${error_OLD}`);
+    // NEW: zero (within fp).
+    assert.ok(error_NEW < 1e-9,
+        `NEW error should be ~0, got ${error_NEW}`);
+    // Strict improvement.
+    assert.ok(error_NEW < error_OLD,
+        `NEW (${error_NEW}) must be strictly better than OLD (${error_OLD})`);
+});
+
+test('phase 2: server-side sanity-clamp logic — pure mirror of SessionHub.ReplaceObject', () => {
+    // Pure mirror of the C# clamp. Lets us drift-detect if the constants
+    // get tweaked on either side without coordinated update.
+    const SPAWN_TIME_SANITY_BOUND_MS = 2000;
+    function clampSpawnAnchor(clientSpawnServerTime, hubEntryMs) {
+        if (clientSpawnServerTime == null) return hubEntryMs;
+        if (Math.abs(clientSpawnServerTime - hubEntryMs) > SPAWN_TIME_SANITY_BOUND_MS) {
+            return hubEntryMs;
+        }
+        return clientSpawnServerTime;
+    }
+    const HUB = 1_000_000;
+    // Within bounds: forwarded verbatim.
+    assert.equal(clampSpawnAnchor(HUB - 250, HUB), HUB - 250);
+    assert.equal(clampSpawnAnchor(HUB + 1500, HUB), HUB + 1500);
+    assert.equal(clampSpawnAnchor(HUB - 2000, HUB), HUB - 2000, 'exactly at bound passes');
+    assert.equal(clampSpawnAnchor(HUB + 2000, HUB), HUB + 2000, 'exactly at bound passes');
+    // Out of bounds: fall back.
+    assert.equal(clampSpawnAnchor(HUB - 2001, HUB), HUB);
+    assert.equal(clampSpawnAnchor(HUB + 10_000, HUB), HUB);
+    // Null: fall back.
+    assert.equal(clampSpawnAnchor(null, HUB), HUB);
+});
