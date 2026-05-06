@@ -688,3 +688,46 @@ test('phase 2: server-side sanity-clamp logic — pure mirror of SessionHub.Repl
     // Null: fall back.
     assert.equal(clampSpawnAnchor(null, HUB), HUB);
 });
+
+// ── Fractional-stamp regression (MessagePack long? deserialization) ─────
+//
+// RemoteObjects.serverNowMs() returns Date.now() + offsetMs where offsetMs
+// is a fractional EMA value. If we send the raw fractional Number to the
+// server's ReplaceObject(long? clientSpawnServerTime), MessagePack-JS
+// encodes it as float64 and the server's long? deserializer THROWS — the
+// entire ReplaceObject call fails, the asteroid never gets deleted from the
+// sync map, and the user observes "asteroids aren't destructible (but
+// score still increments)" because score-award is local-immediate while
+// asteroid removal depends on the OnObjectReplaced echo.
+//
+// Fix: round in object-sync.js before sending. This pure-logic test mirrors
+// that contract.
+test('phase 2: clientSpawnServerTime must be an integer for MessagePack long? compatibility', () => {
+    // Mirror of object-sync.js replaceObject's stamping logic.
+    function stampClientSpawnServerTime(clockSource) {
+        const ready = clockSource && clockSource.initialized && clockSource.initialized();
+        return ready ? Math.round(clockSource.nowMs()) : null;
+    }
+
+    // Realistic fractional offset (EMA of 237ms target, alpha=0.3, target=240): 237.9
+    const fractionalOffset = 237.9;
+    const baseDateNow = 1778054297698;
+    const clockSource = {
+        nowMs: () => baseDateNow + fractionalOffset,    // 1778054297935.9
+        initialized: () => true,
+    };
+
+    const stamp = stampClientSpawnServerTime(clockSource);
+    assert.notEqual(stamp, null, 'stamp returned because clock is initialized');
+    assert.equal(Number.isInteger(stamp), true,
+        'stamp must be an integer so MessagePack-JS encodes as int64, not float64');
+    assert.equal(stamp, Math.round(baseDateNow + fractionalOffset),
+        'stamp matches rounded value');
+
+    // Null fallback when clock not initialized.
+    const uninit = { nowMs: () => 1778054297935.9, initialized: () => false };
+    assert.equal(stampClientSpawnServerTime(uninit), null);
+
+    // Null fallback when clockSource not configured.
+    assert.equal(stampClientSpawnServerTime(null), null);
+});

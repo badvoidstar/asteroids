@@ -808,8 +808,16 @@ const ObjectSync = (function() {
             // spawn anchor. If the clock isn't initialized yet, send null and
             // server falls back to its hub-entry timestamp (less accurate but
             // still bounded by upload_time).
+            //
+            // Math.round is required: clockSource.nowMs() returns
+            // Date.now() + offsetMs where offsetMs is a fractional EMA value
+            // (e.g., 237.9). MessagePack-JS encodes a fractional Number as
+            // float64; the server's long? deserializer rejects it with
+            // "Type mismatch", causing the entire ReplaceObject invocation to
+            // throw — leaving the asteroid undeletable. Rounding to an integer
+            // forces MessagePack to encode as int64.
             const clientSpawnServerTime = (clockSource && clockSource.initialized && clockSource.initialized())
-                ? clockSource.nowMs()
+                ? Math.round(clockSource.nowMs())
                 : null;
             const createdInfos = await SessionClient.replaceObject(
                 deleteObjectId, compressedReplacements, scope, ownerMemberId, clientSpawnServerTime);
