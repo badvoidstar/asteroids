@@ -1190,8 +1190,16 @@
             samples: [],
             maxSamples: 30
         },
-        // Round-trip time estimation (client→server→client)
-        // Uses EMA with asymmetric smoothing: rises fast, decays gradually
+        // Round-trip time estimation (client→server→client) for application-
+        // level broadcasts. Sampled from every OnObjectsUpdated echo of our
+        // own clientTimestamp (~10 Hz). EMA-smoothed asymmetric: rises fast,
+        // decays gradually. Drives adaptive send-rate (updateSendRate) and
+        // per-member jitter buffer sizing (computeAdaptiveDelayForMember).
+        //
+        // INCLUDES SERVER HUB-METHOD PROCESSING TIME — not suitable for
+        // wall-clock offset estimation. For pure transport RTT (offset
+        // estimation, spawn projection), see RemoteObjects.clock below
+        // which uses the lightweight Ping hub method.
         rtt: {
             estimatedRtt: 0,
             alphaUp: 0.3,    // fast reaction to congestion
@@ -1514,7 +1522,14 @@
         },
 
         /**
-         * Get the estimated round-trip time (client→server→client)
+         * Get the EMA-smoothed broadcast RTT, in milliseconds. Sampled from
+         * OnObjectsUpdated echoes — INCLUDES server hub-method processing
+         * time. Use for adaptive send-rate / jitter buffer sizing where the
+         * "round-trip cost of a real broadcast" is what matters.
+         *
+         * NOT suitable for wall-clock offset estimation (the server
+         * processing time biases offset). For that, see getClockSampleRtt()
+         * + getClockOffsetMs(), which use the dedicated lightweight Ping.
          */
         getRtt() {
             return this.rtt.estimatedRtt;
@@ -1540,9 +1555,17 @@
         },
 
         /**
-         * Get the latest min-RTT-per-burst sample's RTT, in milliseconds.
+         * Get the latest min-RTT-per-burst sample's RTT, in milliseconds —
+         * pure transport round-trip on the dedicated Ping hub method (server
+         * processing time ≈ 0 by construction). Used internally as input to
+         * the outlier gate and offset computation.
+         *
          * Returns the canonical Infinity until the first sample lands, so
          * the outlier gate's tolerance starts wide-open.
+         *
+         * Distinct from getRtt() (broadcast EMA, includes server work).
+         * The gap between them is itself a useful diagnostic for server
+         * hub-method latency.
          */
         getClockSampleRtt() {
             return this.clock.lastSampleRtt;
