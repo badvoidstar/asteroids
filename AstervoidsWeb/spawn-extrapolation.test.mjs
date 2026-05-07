@@ -58,13 +58,9 @@ function makeStore(baseDelay) {
             // progress=0 to baseDelay (bracket regime) at progress=1. This
             // tightens accuracy beneath the smoother during catchup AND
             // guarantees position continuity at the moment renderError clears.
-            //
-            // NTP-anchored states (initialized via spawnAt with a valid
-            // server-time anchor) use delay=baseDelay even in single-snap
-            // mode — see comment in production index.html.
             let delay;
             if (snapshots.length === 1) {
-                delay = state.ntpAnchored ? this.baseDelay : 0;
+                delay = 0;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
@@ -135,11 +131,7 @@ function makeStore(baseDelay) {
                 const latest = existing.snapshots[existing.snapshots.length - 1];
                 if (latest && snapshot.time < latest.time) snapshot.time = latest.time;
 
-                // NTP-anchored states skip renderError capture — their
-                // single-snap rendering already uses delay=baseDelay, so
-                // the 1→2 transition is a no-op (mathematically continuous).
-                if (existing.snapshots.length === 1 && existing.renderError == null
-                    && !existing.ntpAnchored) {
+                if (existing.snapshots.length === 1 && existing.renderError == null) {
                     const prev = this.getInterpolated(id, snapshot.time);
                     existing.snapshots.push(snapshot);
                     if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) existing.snapshots.shift();
@@ -169,17 +161,6 @@ function makeStore(baseDelay) {
             } else {
                 states.set(id, { snapshots: [snapshot], renderError: null });
             }
-        },
-
-        // Mirror of RemoteObjects.spawnAt: project data forward by staleness,
-        // install as snapshot[0] at arrivalTime, mark state.ntpAnchored.
-        spawnAt(id, data, spawnServerTime, serverNow, ownerDelaySec, arrivalTime) {
-            if (states.has(id)) return;
-            const stalenessSec = computeSpawnStaleness(serverNow, spawnServerTime, ownerDelaySec);
-            const projected = projectSpawnDataNoWrap(data, stalenessSec);
-            this.updateState(id, projected, arrivalTime);
-            const state = states.get(id);
-            if (state) state.ntpAnchored = true;
         },
     };
     return store;
@@ -800,112 +781,4 @@ test('phase 2: wave-spawn asteroid is projected forward by net delay on observer
     const shooterStaleness = computeSpawnStaleness(observerServerNowMs, spawnServerTime, 0);
     assert.equal(shooterStaleness.toFixed(3), '0.050',
         'shooter case projects forward by full elapsed time');
-});
-
-// ── PR #87 deferred-feature integration: NTP-anchored single-snap rendering ──
-//
-// When spawnAt successfully projects (clock initialized + spawnServerTime
-// available), the resulting state is marked ntpAnchored=true. In that mode:
-//
-//   * _baseInterpolated single-snap branch uses delay=baseDelay (clamps to
-//     snap[0].data — the projected position) instead of delay=0 (extrapolate
-//     forward from arrivalTime).
-//   * The 1→2 transition skips renderError capture, because both single-snap
-//     and bracket regimes render the same projected position at that moment.
-//
-// Net effect: the model-switch jump-back that the renderError smoother was
-// introduced to mask is eliminated by construction (not by smoothing) for
-// any object that has a valid NTP spawn anchor. Legacy behavior is preserved
-// for non-anchored objects (e.g. before clock-offset bootstrap completes).
-
-test('ntp-anchored: single-snap clamps to projected position (no real-time extrapolation)', () => {
-    const baseDelay = 100;
-    const s = makeStore(baseDelay);
-    const t0 = 1000;                         // arrival time (perf clock)
-    const projected = { x: 0.5, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 };
-
-    // Install via spawnAt with staleness = 0 (projected == raw data) for clarity
-    s.spawnAt('a', projected, /*spawnServerTime*/ 1000, /*serverNow*/ 1000, /*ownerDelay*/ 0, t0);
-
-    const state = s.states.get('a');
-    assert.equal(state.ntpAnchored, true, 'state is marked ntpAnchored');
-
-    // 50 ms after arrival, single-snap clamps (targetTime = t0+50-100 = t0-50 < snap[0].time = t0).
-    const out = s.getInterpolated('a', t0 + 50);
-    assert.equal(out.x, 0.5, 'rendered x stays at projected position (no forward extrapolation)');
-    assert.equal(out.y, 0.5, 'rendered y stays at projected position');
-});
-
-test('ntp-anchored: 1→2 transition skips renderError capture entirely', () => {
-    const baseDelay = 100;
-    const s = makeStore(baseDelay);
-    const t0 = 1000;
-    const projected = { x: 0.5, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 };
-
-    s.spawnAt('a', projected, 1000, 1000, 0, t0);
-
-    // Push snap[1] (a real network update arriving later)
-    s.updateState('a', { x: 0.6, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 }, t0 + 100);
-
-    const state = s.states.get('a');
-    assert.equal(state.renderError, null,
-        'no renderError captured for ntp-anchored states (model switch is a no-op)');
-    assert.equal(state.snapshots.length, 2, 'second snapshot is appended normally');
-});
-
-test('ntp-anchored: rendered position is monotonic across the 1→2 transition', () => {
-    // The point of PR #87's idea: with delay=baseDelay in BOTH single-snap and
-    // bracket regimes, the rendered position never jumps backward at the
-    // model-switch boundary because there IS no model switch.
-    const baseDelay = 100;
-    const s = makeStore(baseDelay);
-    const t0 = 1000;
-    const projected = { x: 0.5, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 };
-
-    s.spawnAt('a', projected, 1000, 1000, 0, t0);
-
-    // Frame just before snap[1] arrives (still single-snap regime).
-    const beforeX = s.getInterpolated('a', t0 + 99).x;
-
-    // snap[1] arrives at t0+100.
-    s.updateState('a', { x: 0.6, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 }, t0 + 100);
-
-    // Frame immediately after snap[1] arrives. Now bracket regime is active.
-    const afterX = s.getInterpolated('a', t0 + 100).x;
-
-    // Continuity: position must not move backward at the transition.
-    assert.ok(afterX >= beforeX,
-        `rendered x must be monotonic across 1→2 transition (before=${beforeX}, after=${afterX})`);
-    // And the magnitude of any forward step is bounded by ~baseDelay's worth
-    // of extrapolation, not by ~v·baseDelay (the legacy jump amount).
-    assert.ok(afterX - beforeX < 0.05,
-        `transition step is small, not a baseDelay-sized jump (delta=${afterX - beforeX})`);
-});
-
-test('legacy (non-anchored): updateState path still captures renderError on 1→2 transition', () => {
-    // Confirms we didn't regress the existing path. Non-anchored states
-    // (clock not yet bootstrapped, or pre-Phase-1 callers) keep their
-    // delay=0 single-snap + renderError smoothing behavior.
-    const baseDelay = 100;
-    const s = makeStore(baseDelay);
-    const t0 = 1000;
-    s.updateState('a', { x: 0.5, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 }, t0);
-
-    s.updateState('a', { x: 0.6, y: 0.5, angle: 0, velocityX: 5, velocityY: 0, rotationSpeed: 0 }, t0 + 100);
-
-    const state = s.states.get('a');
-    assert.notEqual(state.renderError, null,
-        'renderError still captured for non-anchored states (legacy behavior preserved)');
-});
-
-test('ntp-anchored: legacy renderError test still passes for non-anchored states', () => {
-    // Sanity check that the wave-spawn projection test setup (which feeds
-    // unprojected data through plain updateState) still works as before.
-    const baseDelay = 100;
-    const s = makeStore(baseDelay);
-    s.updateState('a', { x: 0, y: 0, angle: 0, velocityX: 1, velocityY: 0, rotationSpeed: 0 }, 0);
-    const out = s.getInterpolated('a', 50);
-    // Single-snap delay=0 extrapolates forward.
-    assert.ok(Math.abs(out.x - 1 * 0.05) < 1e-9,
-        'non-anchored single-snap extrapolates forward (legacy preserved)');
 });

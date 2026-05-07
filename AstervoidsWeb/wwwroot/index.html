@@ -1353,15 +1353,7 @@
                 // to zero over SPAWN_CATCHUP_DURATION so the rendered output
                 // remains continuous (no backward snap) while forward velocity
                 // smoothly absorbs the offset.
-                //
-                // NTP-anchored states (initialized via spawnAt with a valid
-                // server-time anchor) already use delay=baseDelay in single-
-                // snap mode, so both pre-snap[1] and post-snap[1] rendering
-                // share the same bracket-domain timeline — no model switch
-                // happens, and the renderError capture would just record a
-                // zero offset. Skip the capture entirely.
-                if (existing.snapshots.length === 1 && existing.renderError == null
-                    && !existing.ntpAnchored) {
+                if (existing.snapshots.length === 1 && existing.renderError == null) {
                     const prev = this.getInterpolated(objectId, snapshot.time);
                     existing.snapshots.push(snapshot);
                     if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
@@ -1818,28 +1810,14 @@
          */
         spawnAt(objectId, data, ownerMemberId, spawnServerTime, arrivalTime) {
             if (this.states.has(objectId)) return;
-            const canProject = this.clock.offsetInitialized && spawnServerTime != null;
             let snapshotData = data;
-            if (canProject) {
+            if (this.clock.offsetInitialized && spawnServerTime != null) {
                 const ownerDelaySec = (this.getDelayForMember(ownerMemberId) || 0) / 1000;
                 const stalenessSec = this.computeSpawnStaleness(
                     this.serverNowMs(), spawnServerTime, ownerDelaySec);
                 snapshotData = this.projectSpawnData(data, stalenessSec);
             }
             this.updateState(objectId, snapshotData, ownerMemberId, arrivalTime);
-            // Mark this state as NTP-anchored so the interpolator knows snap[0]
-            // already represents the observer's bracket-rendered timeline (via
-            // ownerDelay subtraction in computeSpawnStaleness). With this flag,
-            // _baseInterpolated uses delay=baseDelay even in single-snap mode
-            // (clamps to projected position), which makes the 1→2 transition
-            // mathematically continuous with the bracket regime — no model-
-            // switch jump, no renderError smoothing needed. Without the flag,
-            // we fall back to legacy delay=0 + renderError capture.
-            // Idea pulled from PR #87 (copilot/experiment-timestamp-alignment).
-            if (canProject) {
-                const state = this.states.get(objectId);
-                if (state) state.ntpAnchored = true;
-            }
         },
 
         /**
@@ -1912,19 +1890,7 @@
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
             let delay;
             if (snapshots.length === 1) {
-                // NTP-anchored: snap[0].data is already projected to the
-                // observer's bracket-rendered timeline (server time
-                // serverNow − ownerDelay), so render at delay=baseDelay just
-                // like the bracket regime will. targetTime < snap[0].time
-                // clamps to snap[0].data — the projected position renders
-                // stably until snap[1] arrives, then bracket continues from
-                // the same timeline (no model-switch jump). PR #87 idea.
-                //
-                // Non-anchored (legacy): delay=0 extrapolates forward in
-                // real-time during single-snap, then 1→2 transition triggers
-                // renderError capture which absorbs the model-switch over
-                // SPAWN_CATCHUP_DURATION.
-                delay = state.ntpAnchored ? baseDelay : 0;
+                delay = 0;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
