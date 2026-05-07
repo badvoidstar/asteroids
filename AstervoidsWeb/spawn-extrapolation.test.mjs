@@ -731,3 +731,54 @@ test('phase 2: clientSpawnServerTime must be an integer for MessagePack long? co
     // Null fallback when clockSource not configured.
     assert.equal(stampClientSpawnServerTime(null), null);
 });
+
+// ── Wave-spawn projection regression (PR #87 idea: serverTimestamp via OnObjectCreated) ──
+//
+// Before this fix, OnObjectCreated discarded the server's hub-entry timestamp,
+// so wave-spawn asteroids (created via CreateObject, not ReplaceObject) had
+// no spawn anchor on observer clients. RemoteObjects.spawnAt was never
+// called for them, so the first interpolation snapshot was the unprojected
+// data — visually ~OWD ms behind reality (e.g. ~30 px lag for a slow wave
+// asteroid at 50ms one-way latency).
+//
+// Fix: session-client.js now forwards serverTimestamp as the 4th arg to
+// callbacks.onObjectCreated, which propagates to handleRemoteObjectCreated
+// (storing obj.spawnServerTime) and to the index.html onObjectCreated
+// handler (calling spawnAt for asteroids). This pure-logic test mirrors the
+// projection that spawnAt would apply.
+test('phase 2: wave-spawn asteroid is projected forward by net delay on observers', () => {
+    // Simulated scenario: server stamps t=1000 ms when wave creates an
+    // asteroid moving at vx=0.5 norm/s. Network OWD is 50 ms; observer's
+    // clock-offset estimator has converged so serverNow is accurate.
+    // Observer's per-member display delay is 100 ms (Phase 1+2 default).
+    const spawnServerTime = 1000;
+    const observerServerNowMs = 1050;       // 50ms after spawn (the OWD)
+    const ownerDelaySec = 0.100;            // 100ms display delay for owner
+    const vx = 0.5;                         // norm-per-sec rightward
+    const data = { x: 0.5, y: 0.5, velocityX: vx, velocityY: 0, angle: 0, rotationSpeed: 0 };
+
+    const stalenessSec = computeSpawnStaleness(observerServerNowMs, spawnServerTime, ownerDelaySec);
+    // staleness = (1050-1000)/1000 - 0.100 = 0.05 - 0.10 = -0.050 s
+    // Negative staleness means the asteroid hasn't yet "arrived" on the
+    // observer's display timeline (display lags by ~OWD + delay). Projection
+    // pushes the asteroid backward in time on the observer's view, which is
+    // correct: the observer is rendering an aged timeline.
+    assert.equal(stalenessSec.toFixed(3), '-0.050',
+        'observer staleness = (now-spawn)/1000 - ownerDelay');
+
+    const projected = projectSpawnDataNoWrap(data, stalenessSec);
+    // Expected x: 0.5 + 0.5 * -0.050 = 0.475 (slightly LEFT of spawn x)
+    assert.equal(projected.x.toFixed(4), '0.4750',
+        'wave asteroid renders 0.025 norm-units behind spawn for observer at 50ms OWD + 100ms delay');
+
+    // Without projection (the bug): observer renders at data.x = 0.5, then
+    // the next snapshot ~1 frame later jumps to where the asteroid actually
+    // is on the bracket-rendered timeline. The fix gets the FIRST rendered
+    // frame correct — eliminating the jump.
+
+    // Sanity: shooter case (ownerDelay=0, no display lag for owner) gives
+    // staleness = elapsed only, so projection is forward by full elapsed.
+    const shooterStaleness = computeSpawnStaleness(observerServerNowMs, spawnServerTime, 0);
+    assert.equal(shooterStaleness.toFixed(3), '0.050',
+        'shooter case projects forward by full elapsed time');
+});

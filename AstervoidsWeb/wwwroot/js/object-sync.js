@@ -465,9 +465,14 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
-        // Stamp spawnServerTime when this creation comes from an OnObjectReplaced
-        // event — used for spawn-position projection (RemoteObjects.spawnAt and
-        // updateAstervoidsFromSync's adopt branch).
+        // Stamp spawnServerTime so receiver-side projection
+        // (RemoteObjects.spawnAt and updateAstervoidsFromSync's adopt branch)
+        // can compensate for upload + queue + broadcast latency. Source:
+        //   * OnObjectReplaced path → owner-stamped clientSpawnServerTime
+        //     (best accuracy: no upload-time bias).
+        //   * OnObjectCreated path  → server hub-entry timestamp
+        //     (still better than arrivalTime: removes display-delay bias for
+        //     wave-spawn asteroids / non-Replaced creations on observers).
         if (spawnServerTime !== undefined) {
             obj.spawnServerTime = spawnServerTime;
         }

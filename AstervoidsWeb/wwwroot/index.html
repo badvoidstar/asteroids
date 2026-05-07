@@ -5583,6 +5583,24 @@
                         sessionPicker.gameStarted = true;
                         updatePickerButtons();
                     }
+                    // Spawn-position projection for wave-spawn asteroids (and any
+                    // other remote-owned asteroid created via raw OnObjectCreated
+                    // rather than OnObjectReplaced). Mirrors the onObjectReplaced
+                    // handler below — but the spawn anchor here is the server's
+                    // hub-entry timestamp (no owner-stamp on CreateObject), so the
+                    // projection still includes the creator's upload time as a
+                    // bias. That's strictly better than no projection at all
+                    // (which used to leave wave asteroids ~OWD ms behind reality
+                    // on observers).
+                    const myMemberId = SessionClient.getCurrentMember()?.id;
+                    if (obj.spawnServerTime != null
+                        && obj.ownerMemberId !== myMemberId
+                        && obj.data?.type === OBJECT_TYPES.ASTEROID) {
+                        const arrivalTime = (typeof performance !== 'undefined' && performance.now)
+                            ? performance.now() : Date.now();
+                        RemoteObjects.spawnAt(
+                            obj.id, obj.data, obj.ownerMemberId, obj.spawnServerTime, arrivalTime);
+                    }
                 });
                 // Handle reconciliation failure after auto-reconnect: the transport
                 // reconnected but the server already processed our disconnect (member
