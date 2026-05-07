@@ -1810,14 +1810,26 @@
          */
         spawnAt(objectId, data, ownerMemberId, spawnServerTime, arrivalTime) {
             if (this.states.has(objectId)) return;
+            const canProject = this.clock.offsetInitialized && spawnServerTime != null;
             let snapshotData = data;
-            if (this.clock.offsetInitialized && spawnServerTime != null) {
+            if (canProject) {
                 const ownerDelaySec = (this.getDelayForMember(ownerMemberId) || 0) / 1000;
                 const stalenessSec = this.computeSpawnStaleness(
                     this.serverNowMs(), spawnServerTime, ownerDelaySec);
                 snapshotData = this.projectSpawnData(data, stalenessSec);
             }
             this.updateState(objectId, snapshotData, ownerMemberId, arrivalTime);
+            // Mark this state NTP-anchored so the interpolator knows snap[0]
+            // already represents the observer's bracket-rendered timeline (via
+            // ownerDelay subtraction in computeSpawnStaleness). With this flag,
+            // _baseInterpolated uses delay=baseDelay even in single-snap mode
+            // (clamps to / extrapolates from projected position), reducing the
+            // 1→2 model-switch jump while the renderError smoother still runs
+            // to absorb any residual offset. Idea pulled from PR #87.
+            if (canProject) {
+                const state = this.states.get(objectId);
+                if (state) state.ntpAnchored = true;
+            }
         },
 
         /**
@@ -1890,7 +1902,21 @@
             const baseDelay = this.getDelayForMember(state.ownerMemberId);
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                // NTP-anchored: snap[0].data is already projected to the
+                // observer's bracket-rendered timeline (server time
+                // serverNow − ownerDelay), so render at delay=baseDelay just
+                // like the bracket regime will. targetTime ≤ snap[0].time
+                // clamps to snap[0].data — the projected position renders
+                // stably until snap[1] arrives, then bracket continues from
+                // the same timeline (no model-switch jump). PR #87 idea.
+                // The renderError smoother is still captured/decayed at the
+                // 1→2 transition to absorb any residual projection error.
+                //
+                // Non-anchored (legacy): delay=0 extrapolates forward in
+                // real-time during single-snap, then 1→2 transition triggers
+                // renderError capture which absorbs the model-switch over
+                // SPAWN_CATCHUP_DURATION.
+                delay = state.ntpAnchored ? baseDelay : 0;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
