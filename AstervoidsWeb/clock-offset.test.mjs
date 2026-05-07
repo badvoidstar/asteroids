@@ -79,6 +79,73 @@ function emaUpdate(current, target, alpha) {
     return current + alpha * (target - current);
 }
 
+function createClockState(overrides = {}) {
+    return {
+        offsetMs: 0,
+        effectiveOffsetMs: 0,
+        offsetInitialized: false,
+        slewDurationMs: 200,
+        slewMinDeltaMs: 0.5,
+        slewStartMs: null,
+        slewFromOffsetMs: 0,
+        slewToOffsetMs: 0,
+        emaAlpha: 0.3,
+        ...overrides,
+    };
+}
+
+function getEffectiveClockOffsetMs(clock, nowMs) {
+    if (!clock.offsetInitialized) return clock.effectiveOffsetMs;
+    if (clock.slewStartMs == null) {
+        clock.effectiveOffsetMs = clock.offsetMs;
+        return clock.effectiveOffsetMs;
+    }
+    const progress = Math.max(0, Math.min(1, (nowMs - clock.slewStartMs) / Math.max(1, clock.slewDurationMs)));
+    clock.effectiveOffsetMs = clock.slewFromOffsetMs + (clock.slewToOffsetMs - clock.slewFromOffsetMs) * progress;
+    if (progress >= 1) {
+        clock.slewStartMs = null;
+        clock.slewFromOffsetMs = clock.slewToOffsetMs;
+        clock.effectiveOffsetMs = clock.slewToOffsetMs;
+    }
+    return clock.effectiveOffsetMs;
+}
+
+function startClockOffsetSlew(clock, targetOffsetMs, nowMs, fromOffsetMs) {
+    const fromOffset = (fromOffsetMs != null) ? fromOffsetMs : getEffectiveClockOffsetMs(clock, nowMs);
+    clock.slewFromOffsetMs = fromOffset;
+    clock.slewToOffsetMs = targetOffsetMs;
+    if (Math.abs(clock.slewToOffsetMs - clock.slewFromOffsetMs) < clock.slewMinDeltaMs) {
+        clock.slewStartMs = null;
+        clock.effectiveOffsetMs = clock.slewToOffsetMs;
+        clock.slewFromOffsetMs = clock.slewToOffsetMs;
+        return;
+    }
+    clock.slewStartMs = nowMs;
+    clock.effectiveOffsetMs = fromOffset;
+}
+
+function integrateAcceptedOffsetCandidate(clock, candidate, nowMs) {
+    if (!clock.offsetInitialized) {
+        clock.offsetMs = candidate;
+        clock.effectiveOffsetMs = candidate;
+        clock.offsetInitialized = true;
+        clock.slewStartMs = null;
+        clock.slewFromOffsetMs = candidate;
+        clock.slewToOffsetMs = candidate;
+        return;
+    }
+    const currentEffective = getEffectiveClockOffsetMs(clock, nowMs);
+    const priorTarget = clock.offsetMs;
+    clock.offsetMs = emaUpdate(clock.offsetMs, candidate, clock.emaAlpha);
+    if (Math.abs(clock.offsetMs - priorTarget) >= clock.slewMinDeltaMs) {
+        startClockOffsetSlew(clock, clock.offsetMs, nowMs, currentEffective);
+    } else if (clock.slewStartMs == null) {
+        clock.effectiveOffsetMs = clock.offsetMs;
+        clock.slewFromOffsetMs = clock.offsetMs;
+        clock.slewToOffsetMs = clock.offsetMs;
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 test('pickMinRttSample returns null for empty input', () => {
@@ -201,6 +268,66 @@ test('emaUpdate converges toward a constant target over many samples', () => {
     for (let i = 0; i < 50; i++) est = emaUpdate(est, 100, 0.3);
     assert.ok(Math.abs(est - 100) < 0.01,
         `expected close to 100 after 50 samples; got ${est}`);
+});
+
+test('first accepted sample initializes effective offset immediately', () => {
+    const clock = createClockState();
+    assert.equal(clock.offsetInitialized, false);
+    assert.equal(getEffectiveClockOffsetMs(clock, 0), 0);
+    integrateAcceptedOffsetCandidate(clock, 123.25, 0);
+    assert.equal(clock.offsetInitialized, true);
+    assert.equal(clock.offsetMs, 123.25);
+    assert.equal(getEffectiveClockOffsetMs(clock, 0), 123.25);
+});
+
+test('material target change triggers slew progression', () => {
+    const clock = createClockState({ emaAlpha: 1, slewDurationMs: 200, slewMinDeltaMs: 0.5 });
+    integrateAcceptedOffsetCandidate(clock, 100, 0);
+    integrateAcceptedOffsetCandidate(clock, 200, 10);
+    assert.equal(getEffectiveClockOffsetMs(clock, 10), 100);
+    const halfway = getEffectiveClockOffsetMs(clock, 110);
+    assert.ok(halfway > 100 && halfway < 200, `expected halfway offset in (100,200), got ${halfway}`);
+    assert.equal(getEffectiveClockOffsetMs(clock, 210), 200);
+});
+
+test('slew moves monotonically without overshoot (increasing case)', () => {
+    const clock = createClockState({ emaAlpha: 1, slewDurationMs: 200, slewMinDeltaMs: 0.5 });
+    integrateAcceptedOffsetCandidate(clock, 10, 0);
+    integrateAcceptedOffsetCandidate(clock, 30, 5);
+    let prev = getEffectiveClockOffsetMs(clock, 5);
+    assert.equal(prev, 10);
+    for (let t = 25; t <= 205; t += 20) {
+        const current = getEffectiveClockOffsetMs(clock, t);
+        assert.ok(current >= prev, `expected non-decreasing slew at t=${t}: ${current} < ${prev}`);
+        assert.ok(current <= 30, `expected no overshoot at t=${t}: got ${current}`);
+        prev = current;
+    }
+    assert.equal(getEffectiveClockOffsetMs(clock, 205), 30);
+});
+
+test('mid-slew retarget starts from current effective offset without discontinuity', () => {
+    const clock = createClockState({ emaAlpha: 1, slewDurationMs: 200, slewMinDeltaMs: 0.5 });
+    integrateAcceptedOffsetCandidate(clock, 100, 0);
+    integrateAcceptedOffsetCandidate(clock, 200, 0);
+    const effectiveAtRetarget = getEffectiveClockOffsetMs(clock, 100);
+    integrateAcceptedOffsetCandidate(clock, 260, 100);
+    assert.equal(getEffectiveClockOffsetMs(clock, 100), effectiveAtRetarget);
+    assert.equal(clock.slewFromOffsetMs, effectiveAtRetarget);
+    assert.equal(clock.slewToOffsetMs, 260);
+    assert.ok(getEffectiveClockOffsetMs(clock, 300) > effectiveAtRetarget);
+    assert.equal(getEffectiveClockOffsetMs(clock, 500), 260);
+});
+
+test('sub-threshold target change does not restart slew', () => {
+    const clock = createClockState({ emaAlpha: 1, slewDurationMs: 200, slewMinDeltaMs: 0.5 });
+    integrateAcceptedOffsetCandidate(clock, 100, 0);
+    integrateAcceptedOffsetCandidate(clock, 130, 20);
+    const firstSlewStart = clock.slewStartMs;
+    assert.equal(firstSlewStart, 20);
+    // Small target change (< 0.5ms) should not restart the slew.
+    integrateAcceptedOffsetCandidate(clock, 130.2, 30);
+    assert.equal(clock.slewStartMs, firstSlewStart);
+    assert.equal(getEffectiveClockOffsetMs(clock, 30), 101.5);
 });
 
 test('end-to-end: bursts of polluted samples converge to the true offset', () => {

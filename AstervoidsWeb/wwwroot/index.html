@@ -1226,6 +1226,7 @@
         // AstervoidsWeb/clock-offset.test.mjs.
         clock: {
             offsetMs: 0,
+            effectiveOffsetMs: 0,
             offsetInitialized: false,
             lastSampleRtt: Infinity,
             sampleCount: 0,
@@ -1237,6 +1238,12 @@
             emaAlpha: 0.3,
             outlierGateMs: 20,
             outlierGateRttMul: 3,
+            slewDurationMs: 200,
+            slewMinDeltaMs: 0.5,
+            // Slew state
+            slewStartMs: null,
+            slewFromOffsetMs: 0,
+            slewToOffsetMs: 0,
             // Loop / lifecycle
             running: false,
             loopPromise: null,
@@ -1536,14 +1543,70 @@
         },
 
         /**
+         * Monotonic timestamp source for clock-offset slewing.
+         */
+        getClockMonotonicNowMs() {
+            if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+                return performance.now();
+            }
+            return Date.now();
+        },
+
+        /**
+         * Get the effective clock offset consumed by serverNowMs(). When a slew
+         * is active, linearly interpolate from slewFrom→slewTo over
+         * slewDurationMs. If no slew is active, this equals the current target
+         * offset (clock.offsetMs).
+         */
+        getEffectiveClockOffsetMs() {
+            const c = this.clock;
+            if (!c.offsetInitialized) return c.effectiveOffsetMs;
+            if (c.slewStartMs == null) {
+                c.effectiveOffsetMs = c.offsetMs;
+                return c.effectiveOffsetMs;
+            }
+            const elapsedMs = this.getClockMonotonicNowMs() - c.slewStartMs;
+            const durationMs = Math.max(1, c.slewDurationMs);
+            const progress = Math.max(0, Math.min(1, elapsedMs / durationMs));
+            c.effectiveOffsetMs =
+                c.slewFromOffsetMs + (c.slewToOffsetMs - c.slewFromOffsetMs) * progress;
+            if (progress >= 1) {
+                c.slewStartMs = null;
+                c.slewFromOffsetMs = c.slewToOffsetMs;
+                c.effectiveOffsetMs = c.slewToOffsetMs;
+            }
+            return c.effectiveOffsetMs;
+        },
+
+        /**
+         * Start/restart offset slewing from the current effective value toward
+         * the latest target offset. Using the current effective value avoids
+         * jumps if we retarget mid-slew.
+         */
+        startClockOffsetSlew(targetOffsetMs, fromOffsetMs) {
+            const c = this.clock;
+            const fromOffset = (fromOffsetMs != null) ? fromOffsetMs : this.getEffectiveClockOffsetMs();
+            c.slewFromOffsetMs = fromOffset;
+            c.slewToOffsetMs = targetOffsetMs;
+            if (Math.abs(c.slewToOffsetMs - c.slewFromOffsetMs) < c.slewMinDeltaMs) {
+                c.slewStartMs = null;
+                c.effectiveOffsetMs = c.slewToOffsetMs;
+                c.slewFromOffsetMs = c.slewToOffsetMs;
+                return;
+            }
+            c.slewStartMs = this.getClockMonotonicNowMs();
+            c.effectiveOffsetMs = fromOffset;
+        },
+
+        /**
          * Returns the current server UTC time in unix milliseconds, computed
-         * from the local Date.now() plus the estimated clock offset. Falls
-         * back to Date.now() when the offset hasn't been initialized yet
+         * from the local Date.now() plus the effective (slewed) clock offset.
+         * Falls back to Date.now() when the offset hasn't been initialized yet
          * (Phase 2 callers must check offsetInitialized to decide whether to
          * project; otherwise the bootstrap window would over-project).
          */
         serverNowMs() {
-            return Date.now() + this.clock.offsetMs;
+            return Date.now() + this.getEffectiveClockOffsetMs();
         },
 
         /**
@@ -1572,11 +1635,11 @@
         },
 
         /**
-         * Get the current estimated client→server clock offset, in milliseconds.
-         * Positive = server clock is ahead of client clock.
+         * Get the effective (slewed) client→server clock offset, in
+         * milliseconds. Positive = server clock is ahead of client clock.
          */
         getClockOffsetMs() {
-            return this.clock.offsetMs;
+            return this.getEffectiveClockOffsetMs();
         },
 
         /**
@@ -1622,6 +1685,7 @@
             if (!winner) return null;
             const candidate = this.computeOffsetForSample(winner);
             const accepted = this.passesOutlierGate({
+                // Gate against current target offset (estimator baseline).
                 currentOffset: this.clock.offsetMs,
                 lastSampleRtt: this.clock.lastSampleRtt,
                 candidateOffset: candidate,
@@ -1635,10 +1699,24 @@
             }
             if (!this.clock.offsetInitialized) {
                 this.clock.offsetMs = candidate;
+                this.clock.effectiveOffsetMs = candidate;
                 this.clock.offsetInitialized = true;
+                this.clock.slewStartMs = null;
+                this.clock.slewFromOffsetMs = candidate;
+                this.clock.slewToOffsetMs = candidate;
             } else {
+                const currentEffectiveOffset = this.getEffectiveClockOffsetMs();
+                const priorTargetOffset = this.clock.offsetMs;
                 this.clock.offsetMs = this.emaUpdate(
                     this.clock.offsetMs, candidate, this.clock.emaAlpha);
+                if (Math.abs(this.clock.offsetMs - priorTargetOffset) >= this.clock.slewMinDeltaMs) {
+                    this.startClockOffsetSlew(this.clock.offsetMs, currentEffectiveOffset);
+                } else if (this.clock.slewStartMs == null) {
+                    // Ignore sub-threshold noise unless we're already slewing.
+                    this.clock.effectiveOffsetMs = this.clock.offsetMs;
+                    this.clock.slewFromOffsetMs = this.clock.offsetMs;
+                    this.clock.slewToOffsetMs = this.clock.offsetMs;
+                }
             }
             this.clock.lastSampleRtt = winner.rtt;
             this.clock.sampleCount++;
