@@ -155,6 +155,35 @@ public class SessionHubTests
             "the joining member should appear as Client in the snapshot");
     }
 
+    [Fact]
+    public void Ping_ShouldReturnUtcMillisecondsCloseToNow()
+    {
+        // Arrange — Ping requires no session membership, but the existing
+        // CreateHub helper sets up a connection context. Just call directly.
+        var hub = CreateHub("connection-ping");
+        var before = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        // Act
+        var result = hub.Ping();
+
+        // Assert
+        var after = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        result.Should().BeGreaterThanOrEqualTo(before);
+        result.Should().BeLessThanOrEqualTo(after);
+    }
+
+    [Fact]
+    public void Ping_ShouldSucceedWithoutSessionMembership()
+    {
+        // Arrange — fresh hub with no session, no member.
+        var hub = CreateHub("connection-no-session");
+
+        // Act + Assert — does not throw, returns a positive UTC ms value.
+        var act = () => hub.Ping();
+        var result = act.Should().NotThrow().Which;
+        result.Should().BeGreaterThan(0);
+    }
+
     private SessionHub CreateHub(string connectionId, Mock<IGroupManager>? groupsMock = null)
     {
         var hub = new SessionHub(
@@ -355,5 +384,153 @@ public class SessionHubTests
         // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 4).
         capturedArgs!.Length.Should().Be(4,
             "broadcast helpers must spread args via SendCoreAsync, not wrap them through SendAsync(string, object?)");
+    }
+
+    /// <summary>
+    /// Phase 2 (owner-stamped spawn time): ReplaceObject should accept an optional
+    /// clientSpawnServerTime and forward it as the spawnServerTime broadcast arg
+    /// when within ±2s of the server's hub-entry timestamp.
+    /// </summary>
+    [Fact]
+    public async Task ReplaceObject_ShouldUseClientSpawnServerTime_WhenWithinSanityBounds()
+    {
+        // Arrange — create a session and an object owned by the connecting member.
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        var parent = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        // clientSpawnServerTime within sanity bounds (250ms before hub entry).
+        var hubEntry = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientStamp = hubEntry - 250;
+
+        // Act
+        var result = await hub.ReplaceObject(parent.Id,
+            new List<Dictionary<string, object?>>
+            {
+                new() { ["type"] = "asteroid" }
+            },
+            scope: "Session",
+            ownerMemberId: null,
+            clientSpawnServerTime: clientStamp);
+
+        // Assert — broadcast carries 5 args: replaceEvent, memberId, memberSeq, serverTimestamp, spawnServerTime.
+        result.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(5,
+            "OnObjectReplaced broadcast must include both serverTimestamp (hub-entry, for recordPacketArrival) and spawnServerTime (owner-anchored, for spawnAt projection)");
+        var broadcastSpawnServerTime = (long)capturedArgs[4]!;
+        broadcastSpawnServerTime.Should().Be(clientStamp,
+            "in-bounds clientSpawnServerTime should be forwarded verbatim as the spawn anchor");
+    }
+
+    [Fact]
+    public async Task ReplaceObject_ShouldFallBackToServerTimestamp_WhenClientStampOutOfBounds()
+    {
+        // Arrange
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        var parent = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        // Wildly out-of-bounds: 10s in the past (would mean 10s clock skew, far above 2s tolerance).
+        var hubEntryEstimate = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientStamp = hubEntryEstimate - 10_000;
+
+        // Act
+        var result = await hub.ReplaceObject(parent.Id,
+            new List<Dictionary<string, object?>>
+            {
+                new() { ["type"] = "asteroid" }
+            },
+            scope: "Session",
+            ownerMemberId: null,
+            clientSpawnServerTime: clientStamp);
+
+        // Assert
+        result.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(5);
+        var serverTimestamp = (long)capturedArgs[3]!;
+        var spawnServerTime = (long)capturedArgs[4]!;
+        spawnServerTime.Should().Be(serverTimestamp,
+            "out-of-bounds clientSpawnServerTime must be rejected and spawnServerTime should fall back to the hub-entry serverTimestamp");
+    }
+
+    [Fact]
+    public async Task ReplaceObject_ShouldFallBackToServerTimestamp_WhenClientStampOmitted()
+    {
+        // Arrange
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        var parent = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        // Act — omit clientSpawnServerTime (older clients, or unbootstrapped offset).
+        var result = await hub.ReplaceObject(parent.Id,
+            new List<Dictionary<string, object?>>
+            {
+                new() { ["type"] = "asteroid" }
+            });
+
+        // Assert
+        result.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(5);
+        var serverTimestamp = (long)capturedArgs[3]!;
+        var spawnServerTime = (long)capturedArgs[4]!;
+        spawnServerTime.Should().Be(serverTimestamp,
+            "null clientSpawnServerTime must fall back to the hub-entry serverTimestamp");
+    }
+
+    private SessionHub CreateHubWithProxy(string connectionId, Mock<IClientProxy> proxy)
+    {
+        var hub = new SessionHub(_sessionService, _objectService,
+            Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService());
+        var context = new Mock<HubCallerContext>();
+        context.SetupGet(c => c.ConnectionId).Returns(connectionId);
+        hub.Context = context.Object;
+        var clients = new Mock<IHubCallerClients>();
+        clients.Setup(c => c.OthersInGroup(It.IsAny<string>())).Returns(proxy.Object);
+        clients.Setup(c => c.Group(It.IsAny<string>())).Returns(proxy.Object);
+        hub.Clients = clients.Object;
+        var groups = new Mock<IGroupManager>();
+        groups.Setup(g => g.AddToGroupAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        hub.Groups = groups.Object;
+        return hub;
     }
 }
