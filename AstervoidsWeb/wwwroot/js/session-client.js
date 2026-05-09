@@ -232,7 +232,15 @@ const SessionClient = (function() {
         // Object events
         connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
+                // Forward serverTimestamp as the spawn anchor for non-Replaced
+                // creations (e.g. wave-spawn asteroids, ship joins). Without this,
+                // observer-side wave asteroids rendered ~OWD ms behind reality
+                // because handleRemoteObjectCreated had no spawn-time reference
+                // and fell back to arrivalTime. CreateObject doesn't carry an
+                // owner-stamped clientSpawnServerTime (unlike ReplaceObject), so
+                // the server's hub-entry timestamp is the best anchor available
+                // — strictly better than no anchor at all.
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, serverTimestamp);
             }
         }));
 

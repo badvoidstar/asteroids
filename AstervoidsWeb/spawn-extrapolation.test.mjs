@@ -60,7 +60,11 @@ function makeStore(baseDelay) {
             // guarantees position continuity at the moment renderError clears.
             let delay;
             if (snapshots.length === 1) {
-                delay = 0;
+                // Mirror of NTP-anchored path: when state.ntpAnchored is set,
+                // snap[0].data is already projected to the bracket-rendered
+                // timeline, so render at delay=baseDelay even with a single
+                // snapshot. Otherwise legacy delay=0 extrapolation.
+                delay = state.ntpAnchored ? this.baseDelay : 0;
             } else if (state.renderError) {
                 const elapsed = renderTime - state.renderError.startTime;
                 const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
@@ -160,6 +164,22 @@ function makeStore(baseDelay) {
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) existing.snapshots.shift();
             } else {
                 states.set(id, { snapshots: [snapshot], renderError: null });
+            }
+        },
+
+        // Mirror of RemoteObjects.spawnAt for tests that need the ntpAnchored
+        // flag set. Pre-projects `data` by the supplied stalenessSec and
+        // installs the snapshot via updateState, then marks the state
+        // ntpAnchored=true (caller controls whether projection "applies").
+        spawnAt(id, data, time, { stalenessSec = 0, anchored = true } = {}) {
+            if (states.has(id)) return;
+            const projected = anchored
+                ? projectSpawnDataNoWrap(data, stalenessSec)
+                : { ...data };
+            this.updateState(id, projected, time);
+            if (anchored) {
+                const state = states.get(id);
+                if (state) state.ntpAnchored = true;
             }
         },
     };
@@ -730,4 +750,166 @@ test('phase 2: clientSpawnServerTime must be an integer for MessagePack long? co
 
     // Null fallback when clockSource not configured.
     assert.equal(stampClientSpawnServerTime(null), null);
+});
+
+// ── Wave-spawn projection regression (PR #87 idea: serverTimestamp via OnObjectCreated) ──
+//
+// Before this fix, OnObjectCreated discarded the server's hub-entry timestamp,
+// so wave-spawn asteroids (created via CreateObject, not ReplaceObject) had
+// no spawn anchor on observer clients. RemoteObjects.spawnAt was never
+// called for them, so the first interpolation snapshot was the unprojected
+// data — visually ~OWD ms behind reality (e.g. ~30 px lag for a slow wave
+// asteroid at 50ms one-way latency).
+//
+// Fix: session-client.js now forwards serverTimestamp as the 4th arg to
+// callbacks.onObjectCreated, which propagates to handleRemoteObjectCreated
+// (storing obj.spawnServerTime) and to the index.html onObjectCreated
+// handler (calling spawnAt for asteroids). This pure-logic test mirrors the
+// projection that spawnAt would apply.
+test('phase 2: wave-spawn asteroid is projected forward by net delay on observers', () => {
+    // Simulated scenario: server stamps t=1000 ms when wave creates an
+    // asteroid moving at vx=0.5 norm/s. Network OWD is 50 ms; observer's
+    // clock-offset estimator has converged so serverNow is accurate.
+    // Observer's per-member display delay is 100 ms (Phase 1+2 default).
+    const spawnServerTime = 1000;
+    const observerServerNowMs = 1050;       // 50ms after spawn (the OWD)
+    const ownerDelaySec = 0.100;            // 100ms display delay for owner
+    const vx = 0.5;                         // norm-per-sec rightward
+    const data = { x: 0.5, y: 0.5, velocityX: vx, velocityY: 0, angle: 0, rotationSpeed: 0 };
+
+    const stalenessSec = computeSpawnStaleness(observerServerNowMs, spawnServerTime, ownerDelaySec);
+    // staleness = (1050-1000)/1000 - 0.100 = 0.05 - 0.10 = -0.050 s
+    // Negative staleness means the asteroid hasn't yet "arrived" on the
+    // observer's display timeline (display lags by ~OWD + delay). Projection
+    // pushes the asteroid backward in time on the observer's view, which is
+    // correct: the observer is rendering an aged timeline.
+    assert.equal(stalenessSec.toFixed(3), '-0.050',
+        'observer staleness = (now-spawn)/1000 - ownerDelay');
+
+    const projected = projectSpawnDataNoWrap(data, stalenessSec);
+    // Expected x: 0.5 + 0.5 * -0.050 = 0.475 (slightly LEFT of spawn x)
+    assert.equal(projected.x.toFixed(4), '0.4750',
+        'wave asteroid renders 0.025 norm-units behind spawn for observer at 50ms OWD + 100ms delay');
+
+    // Without projection (the bug): observer renders at data.x = 0.5, then
+    // the next snapshot ~1 frame later jumps to where the asteroid actually
+    // is on the bracket-rendered timeline. The fix gets the FIRST rendered
+    // frame correct — eliminating the jump.
+
+    // Sanity: shooter case (ownerDelay=0, no display lag for owner) gives
+    // staleness = elapsed only, so projection is forward by full elapsed.
+    const shooterStaleness = computeSpawnStaleness(observerServerNowMs, spawnServerTime, 0);
+    assert.equal(shooterStaleness.toFixed(3), '0.050',
+        'shooter case projects forward by full elapsed time');
+});
+
+
+// ────────────────────────────────────────────────────────────────────────────
+// NTP-anchored single-snap rendering + renderError smoother coexistence
+// ────────────────────────────────────────────────────────────────────────────
+//
+// PR #87 jump-eliminator and the existing renderError smoother are kept
+// active together. spawnAt sets state.ntpAnchored when projection applied;
+// _baseInterpolated then uses delay=baseDelay even with one snapshot. The
+// 1→2 transition still runs the renderError capture path. With a perfect
+// projection the captured offset is ~zero (smoother becomes a no-op); with
+// an imperfect projection the smoother absorbs the residual.
+
+test('ntp-anchored single-snap: clamps to projected position at spawn moment', () => {
+    const s = makeStore(100);
+    const t0 = 1000;
+    const stalenessSec = 0.05;
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 };
+    s.spawnAt('a', data, t0, { stalenessSec, anchored: true });
+
+    // At renderTime = t0 (snap installed at t0), single-snap delay=baseDelay=100.
+    // targetTime = t0 - 100 < snap.time = t0 → clamp to projected position.
+    const r = s.getInterpolated('a', t0);
+    const expectedX = 0.5 + 0.1 * stalenessSec; // projected forward by stalenessSec
+    assert.equal(r.x, expectedX);
+});
+
+test('ntp-anchored single-snap: legacy non-anchored still extrapolates forward (regression)', () => {
+    const s = makeStore(100);
+    const t0 = 1000;
+    const data = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 };
+    // anchored=false: install raw snapshot, do NOT mark ntpAnchored.
+    s.spawnAt('a', data, t0, { stalenessSec: 0, anchored: false });
+
+    // delay=0, targetTime=renderTime > snap.time → extrapolates.
+    const r = s.getInterpolated('a', t0 + 50);
+    assert.equal(r.x, 0.5 + 0.1 * 0.05); // forward by 50ms of velocity
+});
+
+test('ntp-anchored 1→2 transition: renderError IS still captured and decays', () => {
+    const s = makeStore(100);
+    const t0 = 1000;
+    // Imperfect projection: anchor projects forward 50ms but the next snap
+    // shows the owner moved a slightly different amount, leaving residual.
+    const stalenessSec = 0.05;
+    const projectedData = { x: 0.5, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 };
+    s.spawnAt('a', projectedData, t0, { stalenessSec, anchored: true });
+
+    const state = s.states.get('a');
+    assert.equal(state.ntpAnchored, true, 'spawnAt must mark state ntpAnchored');
+    assert.equal(state.renderError, null, 'no renderError before second snap');
+
+    // Second snapshot arrives at t0+50 with owner reporting a position that
+    // does NOT match the projection (residual offset ~0.005 in x).
+    const t1 = t0 + 50;
+    const actualSnap1 = { x: 0.510, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 };
+    s.updateState('a', actualSnap1, t1);
+
+    // renderError SHOULD have been captured (the ntpAnchored skip from the
+    // original PR #87 commit was intentionally NOT applied — both features run).
+    assert.notEqual(state.renderError, null, 'renderError must be captured on 1→2 even for ntpAnchored');
+    assert.equal(typeof state.renderError.x, 'number');
+});
+
+test('ntp-anchored: position is monotonic across the 1→2 transition', () => {
+    const s = makeStore(100);
+    const t0 = 1000;
+    const stalenessSec = 0.05;
+    const projected = { x: 0.500, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 };
+    s.spawnAt('a', projected, t0, { stalenessSec, anchored: true });
+
+    // Sample positions every 5ms across the transition window.
+    const samples = [];
+    for (let dt = 0; dt < 50; dt += 5) {
+        samples.push(s.getInterpolated('a', t0 + dt).x);
+    }
+    // Push snap[1] at t0+50.
+    s.updateState('a', { x: 0.510, y: 0.5, angle: 0, velocityX: 0.1, velocityY: 0, rotationSpeed: 0 }, t0 + 50);
+    for (let dt = 50; dt <= 400; dt += 10) {
+        samples.push(s.getInterpolated('a', t0 + dt).x);
+    }
+    // No backward jump > 1e-6 across the entire trajectory.
+    for (let i = 1; i < samples.length; i++) {
+        assert.ok(samples[i] >= samples[i - 1] - 1e-6,
+            `sample ${i} (${samples[i]}) jumped back from ${samples[i - 1]}`);
+    }
+});
+
+test('ntp-anchored 1→2 with PERFECT projection: smoother becomes effective no-op', () => {
+    // If snap[0] projection exactly equals where the owner reports being at
+    // the snap[1] arrival time, both prev (clamped to snap[0]) and next
+    // (extrapolated from snap[1] with progress=0) yield the same position →
+    // captured offset is zero or tiny, smoother is a no-op.
+    const s = makeStore(100);
+    const t0 = 1000;
+    const v = 0.1;
+    const dt = 0.05;
+    // Project snap[0] forward by exactly dt of v; snap[1] arrives at t0+50ms
+    // showing the owner at that exact projected position.
+    const projected = { x: 0.5 + v * dt, y: 0.5, angle: 0, velocityX: v, velocityY: 0, rotationSpeed: 0 };
+    s.spawnAt('a', projected, t0, { stalenessSec: 0, anchored: true });
+
+    const t1 = t0 + 50;
+    s.updateState('a', { x: 0.5 + v * dt, y: 0.5, angle: 0, velocityX: v, velocityY: 0, rotationSpeed: 0 }, t1);
+
+    const state = s.states.get('a');
+    if (state.renderError) {
+        assert.ok(Math.abs(state.renderError.x) < 1e-9,
+            `perfect projection should yield ~0 renderError.x, got ${state.renderError.x}`);
+    }
 });
