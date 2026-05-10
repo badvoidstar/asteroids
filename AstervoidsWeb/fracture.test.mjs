@@ -284,8 +284,11 @@ const CONFIG = {
     INITIAL_ASTEROID_RADIUS: 0.083,
     ASTEROID_DENSITY: 5.0,
     SEPARATION_ENERGY_SIZE_BLEND: 1.0,
+    FRACTURE_ENABLED: false,
     FRACTURE_VERTEX_DENSITY: 1.0,
     FRACTURE_JAGGEDNESS: 0.35,
+    MIN_SPLIT_RATIO: 0.1,
+    MASS_SPLIT_BIAS: 1.0,
 };
 
 function fragmentPolygon(parentVerts, R, vx, vy, omega, offsetN, bulletAngle, cfg = CONFIG) {
@@ -311,59 +314,112 @@ function fragmentPolygon(parentVerts, R, vx, vy, omega, offsetN, bulletAngle, cf
     const sideSign = offsetN >= 0 ? 1 : -1;
     const sx = sideSign * nx, sy = sideSign * ny;
 
-    const A_parent = Math.abs(polygonArea(parentVerts));
-    const pi_eff = A_parent / (R * R);
-    const probe = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, []);
-    if (!probe) return null;
-    const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
-                                probe.exit.y - probe.entry.y);
-    const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentVerts.length);
-    const fracDensity = Math.max(0, cfg.FRACTURE_VERTEX_DENSITY);
-    const jagCount = parentSpacing > 0
-        ? Math.max(0, Math.floor((chordLen / parentSpacing) * fracDensity))
-        : 0;
-    const jag = buildFracturePolyline(probe.entry, probe.exit,
-        jagCount, cfg.FRACTURE_JAGGEDNESS * R, makeSeededRandom(1));
-    const split = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, jag);
-    if (!split) return null;
-    const A_pos = Math.abs(polygonArea(split.positive));
-    const A_neg = Math.abs(polygonArea(split.negative));
-    const smallSide = A_pos <= A_neg ? { poly: split.positive, area: A_pos } : { poly: split.negative, area: A_neg };
-    const largeSide = A_pos <= A_neg ? { poly: split.negative, area: A_neg } : { poly: split.positive, area: A_pos };
-    const cSmall = polygonCentroid(smallSide.poly);
-    const cLarge = polygonCentroid(largeSide.poly);
-    const rSmall = Math.sqrt(smallSide.area / pi_eff);
-    const rLarge = Math.sqrt(largeSide.area / pi_eff);
-    const mSmall = (smallSide.area / A_parent) * M;
-    const mLarge = (largeSide.area / A_parent) * M;
-
-    const out = { M, I, J: { x: Jx, y: Jy }, vxP, vyP, omegaP, A_parent, A_pos, A_neg,
-                  pi_eff, children: [] };
-
-    if (rSmall < cfg.MIN_ASTEROID_RADIUS) {
+    const out = {
+        M, I, J: { x: Jx, y: Jy }, vxP, vyP, omegaP,
+        A_parent: null, A_pos: null, A_neg: null, pi_eff: null,
+        children: []
+    };
+    if (cfg.FRACTURE_ENABLED) {
+        const A_parent = Math.abs(polygonArea(parentVerts));
+        const pi_eff = A_parent / (R * R);
+        const probe = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, []);
+        if (!probe) return null;
+        const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
+                                    probe.exit.y - probe.entry.y);
+        const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentVerts.length);
+        const fracDensity = Math.max(0, cfg.FRACTURE_VERTEX_DENSITY);
+        const jagCount = parentSpacing > 0
+            ? Math.max(0, Math.floor((chordLen / parentSpacing) * fracDensity))
+            : 0;
+        const jag = buildFracturePolyline(probe.entry, probe.exit,
+            jagCount, cfg.FRACTURE_JAGGEDNESS * R, makeSeededRandom(1));
+        const split = fractureSplitPolygon(parentVerts, { x: nx, y: ny }, b, jag);
+        if (!split) return null;
+        const A_pos = Math.abs(polygonArea(split.positive));
+        const A_neg = Math.abs(polygonArea(split.negative));
+        if (!(A_pos > 0 && A_neg > 0 && A_parent > 0)) return null;
+        out.A_parent = A_parent;
+        out.A_pos = A_pos;
+        out.A_neg = A_neg;
+        out.pi_eff = pi_eff;
+        const smallSide = A_pos <= A_neg ? { poly: split.positive, area: A_pos } : { poly: split.negative, area: A_neg };
+        const largeSide = A_pos <= A_neg ? { poly: split.negative, area: A_neg } : { poly: split.positive, area: A_pos };
+        const cSmall = polygonCentroid(smallSide.poly);
+        const cLarge = polygonCentroid(largeSide.poly);
+        const rSmall = Math.sqrt(smallSide.area / pi_eff);
+        const rLarge = Math.sqrt(largeSide.area / pi_eff);
+        const mSmall = (smallSide.area / A_parent) * M;
+        const mLarge = (largeSide.area / A_parent) * M;
+        if (rSmall < cfg.MIN_ASTEROID_RADIUS) {
+            out.children.push({ r: rLarge, m: mLarge, cx: cLarge.x, cy: cLarge.y,
+                vx: vxP + (-omegaP) * cLarge.y, vy: vyP + (omegaP) * cLarge.x, omega: omegaP, vertices: [] });
+            return out;
+        }
+        const v_rs = { vx: vxP + (-omegaP) * cSmall.y, vy: vyP + (omegaP) * cSmall.x };
+        const v_rl = { vx: vxP + (-omegaP) * cLarge.y, vy: vyP + (omegaP) * cLarge.x };
+        const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
+        const proj = cSmall.x * sx + cSmall.y * sy;
+        const sepDir = proj >= 0 ? 1 : -1;
+        const sepX = sepDir * sx, sepY = sepDir * sy;
+        out.children.push({ r: rSmall, m: mSmall, cx: cSmall.x, cy: cSmall.y,
+            vx: v_rs.vx + sepX * s, vy: v_rs.vy + sepY * s, omega: omegaP, vertices: [] });
         out.children.push({ r: rLarge, m: mLarge, cx: cLarge.x, cy: cLarge.y,
-            vx: vxP + (-omegaP) * cLarge.y, vy: vyP + (omegaP) * cLarge.x, omega: omegaP });
+            vx: v_rl.vx - sepX * s * (mSmall / mLarge),
+            vy: v_rl.vy - sepY * s * (mSmall / mLarge), omega: omegaP, vertices: [] });
         return out;
     }
 
-    const v_rs = { vx: vxP + (-omegaP) * cSmall.y, vy: vyP + (omegaP) * cSmall.x };
-    const v_rl = { vx: vxP + (-omegaP) * cLarge.y, vy: vyP + (omegaP) * cLarge.x };
+    const minRatio = Math.max(0.01, Math.min(0.5, cfg.MIN_SPLIT_RATIO));
+    const massBias = Math.max(0, Math.min(1, cfg.MASS_SPLIT_BIAS));
+    const fSmall = Math.max(minRatio, 0.5 * (1 - massBias * Math.abs(offsetN)));
+    const fLarge = 1 - fSmall;
+    const rSmall = R * Math.sqrt(fSmall);
+    const rLarge = R * Math.sqrt(fLarge);
+    const mSmall = fSmall * M;
+    const mLarge = fLarge * M;
+    if (rSmall < cfg.MIN_ASTEROID_RADIUS) {
+        out.children.push({ r: rLarge, m: mLarge, cx: 0, cy: 0, vx: vxP, vy: vyP, omega: omegaP, vertices: null });
+        return out;
+    }
+    const dSmall = +R * fLarge;
+    const dLarge = -R * fSmall;
+    const rigidVelocityAt = (d) => ({
+        vx: vxP + (-omegaP) * (d * sy),
+        vy: vyP + ( omegaP) * (d * sx),
+    });
+    const vS = rigidVelocityAt(dSmall), vL = rigidVelocityAt(dLarge);
     const s = E_sep > 0 ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M)) : 0;
-    const proj = cSmall.x * sx + cSmall.y * sy;
-    const sepDir = proj >= 0 ? 1 : -1;
-    const sepX = sepDir * sx, sepY = sepDir * sy;
-    out.children.push({ r: rSmall, m: mSmall, cx: cSmall.x, cy: cSmall.y,
-        vx: v_rs.vx + sepX * s, vy: v_rs.vy + sepY * s, omega: omegaP });
-    out.children.push({ r: rLarge, m: mLarge, cx: cLarge.x, cy: cLarge.y,
-        vx: v_rl.vx - sepX * s * (mSmall / mLarge),
-        vy: v_rl.vy - sepY * s * (mSmall / mLarge), omega: omegaP });
+    out.children.push({
+        r: rSmall, m: mSmall, cx: dSmall * sx, cy: dSmall * sy,
+        vx: vS.vx + s * sx, vy: vS.vy + s * sy, omega: omegaP, vertices: null,
+    });
+    out.children.push({
+        r: rLarge, m: mLarge, cx: dLarge * sx, cy: dLarge * sy,
+        vx: vL.vx - s * sx * (mSmall / mLarge),
+        vy: vL.vy - s * sy * (mSmall / mLarge), omega: omegaP, vertices: null,
+    });
     return out;
 }
+
+const FRACTURE_ON_CONFIG = { ...CONFIG, FRACTURE_ENABLED: true };
+
+test('fracture split master flag defaults to disabled', () => {
+    assert.equal(CONFIG.FRACTURE_ENABLED, false);
+});
+
+test('fragmentPolygon: fracture disabled uses disk split and null vertices', () => {
+    const R = 0.083;
+    const parent = regularPolygon(R, 10);
+    const out = fragmentPolygon(parent, R, 0, 0, 0, 0.2, Math.PI / 4);
+    assert.equal(out.children.length, 2);
+    assert.equal(out.children[0].vertices, null);
+    assert.equal(out.children[1].vertices, null);
+});
 
 test('end-to-end: mass conservation Σ m_i = M', () => {
     const R = 0.083;
     const parent = regularPolygon(R, 10);
-    const out = fragmentPolygon(parent, R, 0.1, -0.05, 0.01, 0.2, Math.PI / 4);
+    const out = fragmentPolygon(parent, R, 0.1, -0.05, 0.01, 0.2, Math.PI / 4, FRACTURE_ON_CONFIG);
     const totalM = out.children.reduce((acc, c) => acc + c.m, 0);
     assert.ok(Math.abs(totalM - out.M) < 1e-12, `Σm=${totalM} M=${out.M}`);
 });
@@ -372,7 +428,7 @@ test('end-to-end: linear momentum Σ m_i v_i = M v + J', () => {
     const R = 0.083;
     const parent = regularPolygon(R, 10);
     const vx = 0.1, vy = -0.05, omega = 0.01;
-    const out = fragmentPolygon(parent, R, vx, vy, omega, 0.2, Math.PI / 4);
+    const out = fragmentPolygon(parent, R, vx, vy, omega, 0.2, Math.PI / 4, FRACTURE_ON_CONFIG);
     const px = out.children.reduce((a, c) => a + c.m * c.vx, 0);
     const py = out.children.reduce((a, c) => a + c.m * c.vy, 0);
     const expectedPx = out.M * vx + out.J.x;
@@ -384,7 +440,7 @@ test('end-to-end: linear momentum Σ m_i v_i = M v + J', () => {
 test('end-to-end: head-on hit ⇒ areas ≈ 50/50 (within 5%)', () => {
     const R = 0.083;
     const parent = regularPolygon(R, 10);
-    const out = fragmentPolygon(parent, R, 0, 0, 0, 0, 0);
+    const out = fragmentPolygon(parent, R, 0, 0, 0, 0, 0, FRACTURE_ON_CONFIG);
     assert.equal(out.children.length, 2);
     const r = out.children[0].m / (out.children[0].m + out.children[1].m);
     // Tolerance ~5% accounts for the small phase rotation in the test polygon.
@@ -394,7 +450,7 @@ test('end-to-end: head-on hit ⇒ areas ≈ 50/50 (within 5%)', () => {
 test('end-to-end: equivalent radius R_i = √(A_i / π_eff)', () => {
     const R = 0.083;
     const parent = regularPolygon(R, 10);
-    const out = fragmentPolygon(parent, R, 0, 0, 0, 0, 0);
+    const out = fragmentPolygon(parent, R, 0, 0, 0, 0, 0, FRACTURE_ON_CONFIG);
     for (const c of out.children) {
         const Ai = (c.m / out.M) * out.A_parent;
         const expectedR = Math.sqrt(Ai / out.pi_eff);
@@ -406,7 +462,7 @@ test('end-to-end: 1-child branch when small piece below MIN_ASTEROID_RADIUS', ()
     // R close to MIN, with a glancing offset producing a tiny chip.
     const R = 0.03; // just above MIN_ASTEROID_RADIUS=0.025
     const parent = regularPolygon(R, 10);
-    const out = fragmentPolygon(parent, R, 0, 0, 0, 0.95, 0);
+    const out = fragmentPolygon(parent, R, 0, 0, 0, 0.95, 0, FRACTURE_ON_CONFIG);
     assert.equal(out.children.length, 1);
     // The surviving piece's mass should be the larger area's share.
     assert.ok(out.children[0].m > 0.5 * out.M);

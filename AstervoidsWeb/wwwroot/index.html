@@ -1071,6 +1071,9 @@
         MASS_SPLIT_BIAS: 0.6,
 
         // ─── Fracture geometry (visual + clip) ──────────────────────────────
+        // Master switch for fracture split logic. OFF by default so the legacy
+        // disk split path is preserved unless explicitly enabled (URL/session).
+        FRACTURE_ENABLED: false,
         // Children of a split inherit their parent's outer silhouette on their
         // side of the impact, and a jagged FRACTURE polyline closes the cut.
         // The number of intermediate jag-points along the fracture chord is
@@ -1166,6 +1169,94 @@
         // the transition and forward velocity quietly absorbs the offset.
         SPAWN_CATCHUP_DURATION: 300,   // ms over which the renderError visual offset decays to zero
     };
+
+    function parseBooleanLike(value) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') {
+            if (value === 1) return true;
+            if (value === 0) return false;
+            return undefined;
+        }
+        if (typeof value !== 'string') return undefined;
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true' || normalized === '1' || normalized === 'on') return true;
+        if (normalized === 'false' || normalized === '0' || normalized === 'off') return false;
+        return undefined;
+    }
+
+    function coerceConfigOverrideValue(rawValue, currentValue) {
+        if (typeof currentValue === 'boolean') {
+            return parseBooleanLike(rawValue);
+        }
+        if (typeof currentValue === 'number') {
+            const numeric = typeof rawValue === 'number' ? rawValue : Number(rawValue);
+            return Number.isFinite(numeric) ? numeric : undefined;
+        }
+        const booleanLike = parseBooleanLike(rawValue);
+        if (booleanLike !== undefined) return booleanLike;
+        if (typeof rawValue === 'number' && Number.isFinite(rawValue)) return rawValue;
+        return undefined;
+    }
+
+    function applyConfigOverride(config, key, rawValue) {
+        if (!Object.prototype.hasOwnProperty.call(config, key)) return false;
+        const value = coerceConfigOverrideValue(rawValue, config[key]);
+        if (value === undefined) return false;
+        config[key] = value;
+        return true;
+    }
+
+    function applyUrlConfigOverrides(config, search = window.location.search) {
+        const params = new URLSearchParams(search);
+        for (const [paramKey, rawValue] of params.entries()) {
+            if (!paramKey.startsWith('cfg.')) continue;
+            const configKey = paramKey.slice(4);
+            applyConfigOverride(config, configKey, rawValue);
+        }
+    }
+
+    const SESSION_CONFIG_KEYS = [
+        'FRACTURE_ENABLED',
+    ];
+
+    function snapshotConfigValues(config, keys) {
+        const out = {};
+        for (const key of keys) {
+            out[key] = config[key];
+        }
+        return out;
+    }
+
+    function buildSessionConfigMetadata(config = CONFIG) {
+        return snapshotConfigValues(config, SESSION_CONFIG_KEYS);
+    }
+
+    function applySessionConfigMetadata(metadata, config = CONFIG) {
+        if (!metadata || typeof metadata !== 'object') return;
+        const overrides = metadata.config;
+        if (!overrides || typeof overrides !== 'object') return;
+        for (const key of SESSION_CONFIG_KEYS) {
+            if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+                applyConfigOverride(config, key, overrides[key]);
+            }
+        }
+    }
+
+    // Baseline config is defaults + URL overrides. Session metadata may override
+    // this while in a session; leaving session restores this local baseline.
+    applyUrlConfigOverrides(CONFIG);
+    const LOCAL_CONFIG_BASELINE = snapshotConfigValues(CONFIG, SESSION_CONFIG_KEYS);
+
+    function restoreLocalConfigBaseline(config = CONFIG) {
+        for (const key of SESSION_CONFIG_KEYS) {
+            config[key] = LOCAL_CONFIG_BASELINE[key];
+        }
+    }
+
+    function adoptSessionConfig(metadata, config = CONFIG) {
+        restoreLocalConfigBaseline(config);
+        applySessionConfigMetadata(metadata, config);
+    }
 
     // ============================================
     // SECTION 1B: MULTIPLAYER CONSTANTS
@@ -3364,6 +3455,7 @@
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
         'MASS_SPLIT_BIAS',
+        'FRACTURE_ENABLED',
         'FRACTURE_VERTEX_DENSITY',
         'FRACTURE_JAGGEDNESS',
         'DEFLECTION_TIME_LIMIT',
@@ -3377,9 +3469,8 @@
         }
         if (data && data.type === 'config-update'
             && DEBUG_OVERRIDABLE_KEYS.has(data.key)
-            && typeof data.value === 'number'
-            && Number.isFinite(data.value)) {
-            CONFIG[data.key] = data.value;
+            && data.value !== undefined) {
+            applyConfigOverride(CONFIG, data.key, data.value);
         }
     };
 
@@ -4430,7 +4521,8 @@
      * **independent** deflection and separation knobs (no shared energy budget).
      *
      * Two paths:
-     *   1. **Polygon-fracture path** (default). The parent's actual polygon is
+     *   1. **Polygon-fracture path** (when CONFIG.FRACTURE_ENABLED). The parent's
+     *      actual polygon is
      *      clipped by the chord { p : n̂·p = b } where b = offsetN·R, with the
      *      chord replaced by a jagged FRACTURE polyline. Each child inherits
      *      its slice of the parent silhouette plus the fracture as its closing
@@ -4523,116 +4615,118 @@
         // (pre-rotation angles already folded in). All distances in normalized
         // ref-dim units, same as asteroid.radius.
         let children = null;
-        const parentPoly = asteroid.vertices.map(v => ({
-            x: Math.cos(v.angle + asteroid.angle) * v.distance,
-            y: Math.sin(v.angle + asteroid.angle) * v.distance,
-        }));
-        const A_parent = Math.abs(polygonArea(parentPoly));
-        const pi_eff = A_parent > 0 ? A_parent / (R * R) : Math.PI;
+        if (CONFIG.FRACTURE_ENABLED) {
+            const parentPoly = asteroid.vertices.map(v => ({
+                x: Math.cos(v.angle + asteroid.angle) * v.distance,
+                y: Math.sin(v.angle + asteroid.angle) * v.distance,
+            }));
+            const A_parent = Math.abs(polygonArea(parentPoly));
+            const pi_eff = A_parent > 0 ? A_parent / (R * R) : Math.PI;
 
-        // Probe-clip with an empty jag to discover entry/exit and validate that
-        // the chord cleanly cuts the polygon.
-        const probe = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, []);
-        if (probe) {
-            // Match the parent's perimeter vertex spacing (~ 2πR / N) along
-            // the chord, scaled by FRACTURE_VERTEX_DENSITY.
-            const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
-                                        probe.exit.y - probe.entry.y);
-            const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentPoly.length);
-            const density = Math.max(0, CONFIG.FRACTURE_VERTEX_DENSITY);
-            const jagCount = parentSpacing > 0
-                ? Math.max(0, Math.floor((chordLen / parentSpacing) * density))
-                : 0;
-            const jagAmplitude = Math.max(0, CONFIG.FRACTURE_JAGGEDNESS) * R;
-            // Deterministic seed so independent regenerations agree.
-            const seedFrac = ((asteroid.seed || 0) * 0x100000000) >>> 0;
-            const jagSeed = (seedFrac
-                ^ (Math.floor((bulletAngle + 10) * 1e6) >>> 0)
-                ^ (Math.floor((offsetN + 10) * 1e6) >>> 0)) >>> 0;
-            const jagRng = makeSeededRandom(jagSeed);
-            const jagPath = buildFracturePolyline(probe.entry, probe.exit,
-                                                  jagCount, jagAmplitude, jagRng);
-            const split = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, jagPath);
-            if (split) {
-                const A_pos = Math.abs(polygonArea(split.positive));
-                const A_neg = Math.abs(polygonArea(split.negative));
-                if (A_pos > 0 && A_neg > 0 && A_parent > 0) {
-                    const smallSide = A_pos <= A_neg
-                        ? { poly: split.positive, area: A_pos }
-                        : { poly: split.negative, area: A_neg };
-                    const largeSide = A_pos <= A_neg
-                        ? { poly: split.negative, area: A_neg }
-                        : { poly: split.positive, area: A_pos };
+            // Probe-clip with an empty jag to discover entry/exit and validate that
+            // the chord cleanly cuts the polygon.
+            const probe = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, []);
+            if (probe) {
+                // Match the parent's perimeter vertex spacing (~ 2πR / N) along
+                // the chord, scaled by FRACTURE_VERTEX_DENSITY.
+                const chordLen = Math.hypot(probe.exit.x - probe.entry.x,
+                                            probe.exit.y - probe.entry.y);
+                const parentSpacing = (2 * Math.PI * R) / Math.max(1, parentPoly.length);
+                const density = Math.max(0, CONFIG.FRACTURE_VERTEX_DENSITY);
+                const jagCount = parentSpacing > 0
+                    ? Math.max(0, Math.floor((chordLen / parentSpacing) * density))
+                    : 0;
+                const jagAmplitude = Math.max(0, CONFIG.FRACTURE_JAGGEDNESS) * R;
+                // Deterministic seed so independent regenerations agree.
+                const seedFrac = ((asteroid.seed || 0) * 0x100000000) >>> 0;
+                const jagSeed = (seedFrac
+                    ^ (Math.floor((bulletAngle + 10) * 1e6) >>> 0)
+                    ^ (Math.floor((offsetN + 10) * 1e6) >>> 0)) >>> 0;
+                const jagRng = makeSeededRandom(jagSeed);
+                const jagPath = buildFracturePolyline(probe.entry, probe.exit,
+                                                    jagCount, jagAmplitude, jagRng);
+                const split = fractureSplitPolygon(parentPoly, { x: nx, y: ny }, b, jagPath);
+                if (split) {
+                    const A_pos = Math.abs(polygonArea(split.positive));
+                    const A_neg = Math.abs(polygonArea(split.negative));
+                    if (A_pos > 0 && A_neg > 0 && A_parent > 0) {
+                        const smallSide = A_pos <= A_neg
+                            ? { poly: split.positive, area: A_pos }
+                            : { poly: split.negative, area: A_neg };
+                        const largeSide = A_pos <= A_neg
+                            ? { poly: split.negative, area: A_neg }
+                            : { poly: split.positive, area: A_pos };
 
-                    const cSmall = polygonCentroid(smallSide.poly);
-                    const cLarge = polygonCentroid(largeSide.poly);
-                    const rSmall = Math.sqrt(smallSide.area / pi_eff);
-                    const rLarge = Math.sqrt(largeSide.area / pi_eff);
-                    const mSmall = (smallSide.area / A_parent) * M;
-                    const mLarge = (largeSide.area / A_parent) * M;
+                        const cSmall = polygonCentroid(smallSide.poly);
+                        const cLarge = polygonCentroid(largeSide.poly);
+                        const rSmall = Math.sqrt(smallSide.area / pi_eff);
+                        const rLarge = Math.sqrt(largeSide.area / pi_eff);
+                        const mSmall = (smallSide.area / A_parent) * M;
+                        const mLarge = (largeSide.area / A_parent) * M;
 
-                    const recenter = (poly, c) => verticesFromXY(
-                        poly.map(p => ({ x: p.x - c.x, y: p.y - c.y }))
-                    );
-                    const vertsSmall = recenter(smallSide.poly, cSmall);
-                    const vertsLarge = recenter(largeSide.poly, cLarge);
+                        const recenter = (poly, c) => verticesFromXY(
+                            poly.map(p => ({ x: p.x - c.x, y: p.y - c.y }))
+                        );
+                        const vertsSmall = recenter(smallSide.poly, cSmall);
+                        const vertsLarge = recenter(largeSide.poly, cLarge);
 
-                    if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
-                        // 1-child case: chip is debris, surviving large piece
-                        // keeps the new fractured silhouette and inherits all
-                        // post-impulse parent momentum. (The chip's tiny share
-                        // is dropped — same accounting as the disk fallback.)
-                        const v_rigid = {
-                            vx: vxP + (-omegaP) * cLarge.y,
-                            vy: vyP + ( omegaP) * cLarge.x,
-                        };
-                        children = [{
-                            r: rLarge, m: mLarge,
-                            cx: cLarge.x, cy: cLarge.y,
-                            vx: v_rigid.vx, vy: v_rigid.vy,
-                            omega: omegaP,
-                            vertices: vertsLarge,
-                        }];
-                    } else {
-                        // 2-child case. Inherited rigid velocities at each
-                        // centroid; equal-and-opposite separation impulse along
-                        // n̂_sep balanced by mass ratio so total Δp = 0.
-                        const v_rigid_small = {
-                            vx: vxP + (-omegaP) * cSmall.y,
-                            vy: vyP + ( omegaP) * cSmall.x,
-                        };
-                        const v_rigid_large = {
-                            vx: vxP + (-omegaP) * cLarge.y,
-                            vy: vyP + ( omegaP) * cLarge.x,
-                        };
-                        const s = E_sep > 0
-                            ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M))
-                            : 0;
-                        // Pick the separation direction so the small child flies
-                        // outward from the parent COM (its centroid sits on its
-                        // own side of the chord; we just project onto n̂_sep).
-                        const proj = cSmall.x * sx + cSmall.y * sy;
-                        const sepDir = proj >= 0 ? 1 : -1;
-                        const sepX = sepDir * sx, sepY = sepDir * sy;
-
-                        children = [
-                            {
-                                r: rSmall, m: mSmall,
-                                cx: cSmall.x, cy: cSmall.y,
-                                vx: v_rigid_small.vx + sepX * s,
-                                vy: v_rigid_small.vy + sepY * s,
-                                omega: omegaP,
-                                vertices: vertsSmall,
-                            },
-                            {
+                        if (rSmall < CONFIG.MIN_ASTEROID_RADIUS) {
+                            // 1-child case: chip is debris, surviving large piece
+                            // keeps the new fractured silhouette and inherits all
+                            // post-impulse parent momentum. (The chip's tiny share
+                            // is dropped — same accounting as the disk fallback.)
+                            const v_rigid = {
+                                vx: vxP + (-omegaP) * cLarge.y,
+                                vy: vyP + ( omegaP) * cLarge.x,
+                            };
+                            children = [{
                                 r: rLarge, m: mLarge,
                                 cx: cLarge.x, cy: cLarge.y,
-                                vx: v_rigid_large.vx - sepX * s * (mSmall / mLarge),
-                                vy: v_rigid_large.vy - sepY * s * (mSmall / mLarge),
+                                vx: v_rigid.vx, vy: v_rigid.vy,
                                 omega: omegaP,
                                 vertices: vertsLarge,
-                            },
-                        ];
+                            }];
+                        } else {
+                            // 2-child case. Inherited rigid velocities at each
+                            // centroid; equal-and-opposite separation impulse along
+                            // n̂_sep balanced by mass ratio so total Δp = 0.
+                            const v_rigid_small = {
+                                vx: vxP + (-omegaP) * cSmall.y,
+                                vy: vyP + ( omegaP) * cSmall.x,
+                            };
+                            const v_rigid_large = {
+                                vx: vxP + (-omegaP) * cLarge.y,
+                                vy: vyP + ( omegaP) * cLarge.x,
+                            };
+                            const s = E_sep > 0
+                                ? Math.sqrt(2 * E_sep * mLarge / (mSmall * M))
+                                : 0;
+                            // Pick the separation direction so the small child flies
+                            // outward from the parent COM (its centroid sits on its
+                            // own side of the chord; we just project onto n̂_sep).
+                            const proj = cSmall.x * sx + cSmall.y * sy;
+                            const sepDir = proj >= 0 ? 1 : -1;
+                            const sepX = sepDir * sx, sepY = sepDir * sy;
+
+                            children = [
+                                {
+                                    r: rSmall, m: mSmall,
+                                    cx: cSmall.x, cy: cSmall.y,
+                                    vx: v_rigid_small.vx + sepX * s,
+                                    vy: v_rigid_small.vy + sepY * s,
+                                    omega: omegaP,
+                                    vertices: vertsSmall,
+                                },
+                                {
+                                    r: rLarge, m: mLarge,
+                                    cx: cLarge.x, cy: cLarge.y,
+                                    vx: v_rigid_large.vx - sepX * s * (mSmall / mLarge),
+                                    vy: v_rigid_large.vy - sepY * s * (mSmall / mLarge),
+                                    omega: omegaP,
+                                    vertices: vertsLarge,
+                                },
+                            ];
+                        }
                     }
                 }
             }
@@ -6083,6 +6177,7 @@
                     role: result.member.role,
                     metadata: result.session.metadata
                 };
+                adoptSessionConfig(result.session.metadata);
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = result.member.role === 'Server';
                 // Derive gameStarted from presence of GameState object in session objects
@@ -6119,7 +6214,10 @@
 
             // Capture the current aspect ratio at the moment of session creation
             const currentAspectRatio = canvas.width / canvas.height;
-            const result = await SessionClient.createSession({ aspectRatio: currentAspectRatio });
+            const result = await SessionClient.createSession({
+                aspectRatio: currentAspectRatio,
+                config: buildSessionConfigMetadata(),
+            });
             if (result) {
                 // Enter lobby state as server
                 game.state = 'lobby';
@@ -6131,6 +6229,7 @@
                     role: result.member.role,
                     metadata: result.session.metadata
                 };
+                adoptSessionConfig(result.session.metadata);
                 sessionPicker.currentSessionId = result.session.id;
                 sessionPicker.isServer = true; // Creator is always server
                 sessionPicker.gameStarted = false; // New session, game not started
@@ -6167,6 +6266,7 @@
         
         game.mode = 'solo';
         game.sessionInfo = null;
+        restoreLocalConfigBaseline();
         startGameFromPicker();
     }
 
@@ -6225,6 +6325,7 @@
             game.state = 'start';
             game.mode = 'solo';
             game.sessionInfo = null;
+            restoreLocalConfigBaseline();
         
         // Recalculate viewport for solo mode
         resizeCanvas(true);
@@ -6282,6 +6383,7 @@
             // Reset game mode
             game.mode = 'solo';
             game.sessionInfo = null;
+            restoreLocalConfigBaseline();
 
         // Reset game state
         game.state = 'start';
@@ -6483,6 +6585,7 @@
                             role: result.member.role,
                             metadata: result.session.metadata
                         };
+                        adoptSessionConfig(result.session.metadata);
                         sessionPicker.currentSessionId = result.session.id;
                         sessionPicker.isServer = result.member.role === 'Server';
                         sessionPicker.gameStarted = (result.session.objects || []).some(
