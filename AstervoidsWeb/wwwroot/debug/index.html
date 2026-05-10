@@ -266,6 +266,13 @@
                 help: '1 = current behavior (50/50 head-on, skewed for glancing). 0 = always 50/50 regardless of impact offset.',
             },
             {
+                key: 'FRACTURE_ENABLED',
+                label: 'Fracture split enabled (0/1)',
+                min: 0, max: 1, step: 1, default: 0,
+                fmt: v => `${Math.round(v)}`,
+                help: 'Master switch for fracture splits. 0 = legacy disk split path, 1 = polygon fracture path.',
+            },
+            {
                 key: 'FRACTURE_VERTEX_DENSITY',
                 label: 'Fracture vertex density (× parent spacing)',
                 min: 0, max: 3, step: 0.05, default: 1.0,
