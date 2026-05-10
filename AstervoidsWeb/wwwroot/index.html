@@ -3470,7 +3470,8 @@
         if (data && data.type === 'config-update'
             && DEBUG_OVERRIDABLE_KEYS.has(data.key)
             && data.value !== undefined) {
-            applyConfigOverride(CONFIG, data.key, data.value);
+            const applied = applyConfigOverride(CONFIG, data.key, data.value);
+            if (!applied) return;
         }
     };
 

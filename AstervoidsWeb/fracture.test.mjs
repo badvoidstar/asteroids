@@ -381,7 +381,7 @@ function fragmentPolygon(parentVerts, R, vx, vy, omega, offsetN, bulletAngle, cf
         out.children.push({ r: rLarge, m: mLarge, cx: 0, cy: 0, vx: vxP, vy: vyP, omega: omegaP, vertices: null });
         return out;
     }
-    const dSmall = +R * fLarge;
+    const dSmall = R * fLarge;
     const dLarge = -R * fSmall;
     const rigidVelocityAt = (d) => ({
         vx: vxP + (-omegaP) * (d * sy),
