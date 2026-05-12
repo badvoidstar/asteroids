@@ -1155,8 +1155,15 @@
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
         SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
-        MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
+        MAX_EXTRAPOLATION: 2.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
+        // Spawn-bridge: on OnObjectReplaced (e.g. asteroid split), synthesize an
+        // additional snapshot at "local render time" carrying the parent's last
+        // interpolated position with the child's identity. Bracket-search then
+        // interpolates from parent_pos → child authority_pos over one display
+        // delay, eliminating the position discontinuity at spawn.
+        // 1 = enabled (default), 0 = disabled (revert to single-authority install).
+        SPAWN_BRIDGE_ENABLED: 1,
     };
 
     function parseBooleanLike(value) {
@@ -3362,6 +3369,8 @@
         'FRACTURE_JAGGEDNESS',
         'DEFLECTION_TIME_LIMIT',
         'DEFLECTION_SCALE',
+        'MAX_EXTRAPOLATION',
+        'SPAWN_BRIDGE_ENABLED',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -5925,6 +5934,85 @@
                     if (obj.data?.type === OBJECT_TYPES.GAME_STATE && sessionPicker.currentSessionId) {
                         sessionPicker.gameStarted = true;
                         updatePickerButtons();
+                    }
+                });
+                // Spawn-bridge for OnObjectReplaced (e.g. asteroid splits, fracture
+                // children). Without a bridge, a freshly-spawned remote child has
+                // only one snapshot at its authoritative collision moment, so
+                // bracket-search either clamps it at collision_pos (LAN case,
+                // targetTime ≤ snap[0].time) or extrapolates with child_vel
+                // (high-latency case). Either path produces a visible position
+                // discontinuity vs. the parent's last-rendered position — the
+                // "spawn hitch" the user observed, growing with network latency.
+                //
+                // Fix: synthesize a second snapshot at "local render time"
+                // carrying the parent's last-interpolated x/y/angle but with
+                // the child's identity (including velocity) for everything else.
+                // Bracket-search then has TWO snaps to interpolate between,
+                // smoothly walking the renderer from parent_pos to child's
+                // authority position over one display delay. After authority.time
+                // the EXTRAPOLATE arm continues along child's authoritative vel.
+                //
+                // LAN case (bridge older than authority): bridge installed first,
+                // authority second — bracket [bridge, authority] gives smooth
+                // transition. PERFECT smoothing.
+                //
+                // High-latency case (bridge newer than authority): authority
+                // installed first, bridge second — bracket [authority, bridge]
+                // means the renderer is past the bridge and EXTRAPOLATES from
+                // bridge using child_vel. The discontinuity is deferred (~one
+                // send_interval) instead of eliminated, but the bridge.pos
+                // anchor point is parent_interp_pos, so the renderer doesn't
+                // jump to collision_pos at install time — it walks forward from
+                // parent's last visual position. SOFTENED smoothing.
+                //
+                // Locally-owned children are skipped: they're driven by local
+                // physics (the adopt branch in updateAstervoidsFromSync), not
+                // by interpolation, so a bridge would be ignored.
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, validAt) => {
+                    if (!CONFIG.SPAWN_BRIDGE_ENABLED || validAt == null) return;
+                    if (!RemoteObjects.isClockOffsetInitialized()) return;
+                    const myMemberId = SessionClient.getCurrentMember()?.id;
+                    const renderTime = performance.now();
+                    const parentInterp = RemoteObjects.getInterpolated(deletedObjectId, renderTime);
+                    if (!parentInterp) return;
+                    for (const child of createdObjects) {
+                        // Skip locally-owned children — local game physics drives
+                        // their position, not the interpolator.
+                        if (child.ownerMemberId === myMemberId) continue;
+                        // Bridge anchor in server-time: "where the renderer is
+                        // currently displaying objects from this owner".
+                        const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
+                        const bridgeValidAt = Math.round(RemoteObjects.serverNowMs() - delay);
+                        const bridgeData = {
+                            ...child.data,
+                            x: parentInterp.x,
+                            y: parentInterp.y,
+                            angle: parentInterp.angle,
+                            // Keep child's velocity/rotationSpeed so:
+                            //   - LAN bracket [bridge, auth] interpolates linearly
+                            //     from parent_pos to auth_pos (endpoint-driven; the
+                            //     velocity tangent is the same at both ends, no
+                            //     spurious spline overshoot).
+                            //   - High-latency extrapolate-past-bridge arm uses
+                            //     CHILD'S velocity, so the renderer walks toward
+                            //     the authoritative trajectory rather than drifting
+                            //     in parent's direction.
+                        };
+                        const childValidAt = child.validAt ?? validAt;
+                        if (bridgeValidAt <= childValidAt) {
+                            // LAN: bridge older than authority → bridge first.
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt);
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt);
+                        } else {
+                            // High latency: authority older than bridge → authority first.
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt);
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt);
+                        }
+                        // Pre-set lastVersions so the next frame's
+                        // updateAstervoidsFromSync (or updateBulletsFromSync) skips
+                        // a duplicate authority install — we already did it.
+                        RemoteObjects.lastVersions.set(child.id, child.version);
                     }
                 });
                 // Handle reconciliation failure after auto-reconnect: the transport

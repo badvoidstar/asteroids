@@ -392,3 +392,214 @@ test('wallToPerfDelta refresh sequence: monotonic snapshot times preserved', () 
     assert.ok(state.snapshots[1].time >= state.snapshots[0].time,
         'monotonic invariant must hold even across delta refresh');
 });
+
+
+// ── Spawn-bridge: parent → child continuity ──────────────────────────────
+
+/**
+ * Mirror of the spawn-bridge integration callback in connectToSessionHub.
+ *
+ * Synthesizes a bridge snapshot (parent's interpolated x/y/angle + child's
+ * velocity/identity) and installs both bridge and authority into the child's
+ * snapshot ring in monotonic time order.
+ *
+ * Returns { bridgeData, bridgeValidAt } so tests can assert against the
+ * bridge values directly.
+ */
+function installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock) {
+    const renderTime = clock.perfNow();
+    const parentInterp = getInterpolated(parentState, renderTime, baseDelay);
+    if (!parentInterp) return null;
+    const bridgeValidAt = Math.round(clock.serverNowMs() - baseDelay);
+    const bridgeData = {
+        ...childData,
+        x: parentInterp.x,
+        y: parentInterp.y,
+        angle: parentInterp.angle,
+        // velocityX/Y/rotationSpeed kept from child.data on purpose
+    };
+    if (bridgeValidAt <= childValidAt) {
+        // LAN: bridge older than authority — install bridge first.
+        updateState(childState, bridgeData, bridgeValidAt, clock);
+        updateState(childState, childData, childValidAt, clock);
+    } else {
+        // High latency: authority older than bridge — install authority first.
+        updateState(childState, childData, childValidAt, clock);
+        updateState(childState, bridgeData, bridgeValidAt, clock);
+    }
+    return { bridgeData, bridgeValidAt };
+}
+
+test('spawn bridge: LAN case — renderer interpolates from parent_pos to authority_pos', () => {
+    // Setup: parent has been moving for 100ms (snap[0] at validAt=900,
+    // x=0 vx=100). Renderer is at "now" wall=1000 with baseDelay=50, so
+    // targetTime=950 → parent extrapolates to x = 0 + 100 * 0.05 = 5.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50;
+
+    // Replace event lands. Authority for child: x=10 vx=200, validAt=1100
+    // (collision is in the receiver's near future, classic LAN spawn case).
+    const childData = { x: 10, velocityX: 200 };
+    const childValidAt = 1100;
+    const childState = newState();
+    const result = installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    // Bridge must be the OLDER snapshot (LAN case).
+    assert.equal(result.bridgeValidAt, 950); // serverNowMs(1000) - 50
+    assert.ok(result.bridgeValidAt < childValidAt, 'LAN: bridge older than authority');
+    assert.equal(childState.snapshots.length, 2);
+    assert.ok(childState.snapshots[0].time < childState.snapshots[1].time,
+        'LAN: install order produces monotonic snapshots [bridge, authority]');
+
+    // Bridge.pos = parent's interpolated pos (= 5) — NOT child's authority (10).
+    assert.equal(childState.snapshots[0].data.x, 5,
+        'bridge.x must equal parent extrapolated position (5), not child authority (10)');
+
+    // Render right after install: targetTime=950 = bridge.time → clamp to bridge.
+    const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
+    assert.equal(interpAtInstall.x, 5, 'just-after-install renderer sits at parent_pos');
+
+    // Advance halfway through the bridge interval and verify smooth interpolation.
+    clock.advance(75); // perfNow=1075, targetTime=1025
+    const interpMid = getInterpolated(childState, clock.perfNow(), baseDelay);
+    // span=150, t=(1025-950)/150=0.5; x = 5 + (10-5)*0.5 = 7.5
+    assert.equal(interpMid.x, 7.5, 'midway through bridge interval renderer interpolates linearly');
+
+    // Advance to past authority: should now extrapolate from authority with child_vel.
+    clock.advance(100); // perfNow=1175, targetTime=1125
+    const interpAfter = getInterpolated(childState, clock.perfNow(), baseDelay);
+    // latest=authority at time=1100, x=10 vx=200; extrapolate (1125-1100)/1000=0.025s
+    // x = 10 + 200 * 0.025 = 15
+    assert.equal(interpAfter.x, 15, 'past authority: extrapolates with child velocity');
+});
+
+test('spawn bridge: WITHOUT bridge — control test showing the spawn jump', () => {
+    // Same setup as the LAN test, but DON'T install a bridge — just authority.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const baseDelay = 50;
+
+    const childData = { x: 10, velocityX: 200 };
+    const childValidAt = 1100;
+    const childState = newState();
+    updateState(childState, childData, childValidAt, clock);
+
+    // Render right after install: targetTime=950 ≤ snap[0].time=1100 → clamp to authority.
+    const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
+    assert.equal(interpAtInstall.x, 10,
+        'WITHOUT bridge, renderer JUMPS to authority position (10) — this is the hitch');
+    // Parent was at x=5 just before. With bridge, renderer would be at x=5.
+    // Without bridge, renderer is at x=10. That 5-unit discontinuity (in normalized
+    // coords; equivalent to parent_vel × baseDelay = 100 × 0.05 = 5) is the
+    // visible spawn hitch the bridge fix eliminates for the LAN case.
+});
+
+test('spawn bridge: high-latency case — bridge extrapolates with child velocity', () => {
+    // Parent has been moving (validAt=900, x=0, vx=100). Renderer is now
+    // at wall=1300 with baseDelay=50, so targetTime=1250 → parent
+    // extrapolates to x = 0 + 100 * 0.35 = 35.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1300, perfStart: 1300 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50;
+
+    // Replace event lands AFTER the renderer's targetTime: authority validAt=1000
+    // (collision happened 250ms ago in server time; high latency / bursty network).
+    const childData = { x: 10, velocityX: 50 };
+    const childValidAt = 1000;
+    const childState = newState();
+    const result = installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    // Bridge is the NEWER snapshot (high-latency case).
+    assert.equal(result.bridgeValidAt, 1250);
+    assert.ok(result.bridgeValidAt > childValidAt, 'high-latency: bridge newer than authority');
+    assert.equal(childState.snapshots.length, 2);
+    assert.ok(childState.snapshots[0].time < childState.snapshots[1].time,
+        'high-latency: install order produces monotonic snapshots [authority, bridge]');
+
+    // Bridge data still anchors at parent_pos (=35), NOT child authority (=10).
+    assert.equal(childState.snapshots[1].data.x, 35,
+        'bridge.x = parent extrapolated position even when bridge is newer');
+
+    // Render right after install: targetTime=1250 = bridge.time → clamp/extrapolate.
+    const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
+    assert.equal(interpAtInstall.x, 35,
+        'just-after-install renderer sits at parent_pos (no jump to child authority)');
+
+    // Advance 30ms and verify bridge extrapolates with CHILD'S velocity.
+    clock.advance(30); // perfNow=1330, targetTime=1280
+    const interpAfter = getInterpolated(childState, clock.perfNow(), baseDelay);
+    // latest=bridge at time=1250, x=35, velocityX=50 (child's vel, kept in bridgeData)
+    // extrapolate (1280-1250)/1000=0.030s → x = 35 + 50*0.030 = 36.5
+    assert.equal(interpAfter.x, 36.5,
+        'bridge extrapolation uses CHILD velocity (50), not parent velocity (100)');
+});
+
+test('spawn bridge: install order preserves both timestamps under monotonic-cap', () => {
+    // Verify the LAN case order: bridge installed first means authority's
+    // (newer) timestamp is preserved as-is by updateState.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50;
+
+    const childData = { x: 10, velocityX: 200 };
+    const childValidAt = 1100;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    assert.equal(childState.snapshots.length, 2);
+    assert.equal(childState.snapshots[0].time, 950, 'bridge time preserved');
+    assert.equal(childState.snapshots[1].time, 1100, 'authority time preserved (no monotonic clamp)');
+});
+
+test('spawn bridge: high-latency install order preserves both timestamps', () => {
+    // Verify the high-latency case: authority installed first means bridge's
+    // (newer) timestamp is preserved.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1300, perfStart: 1300 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50;
+
+    const childData = { x: 10, velocityX: 50 };
+    const childValidAt = 1000;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    assert.equal(childState.snapshots.length, 2);
+    assert.equal(childState.snapshots[0].time, 1000, 'authority time preserved');
+    assert.equal(childState.snapshots[1].time, 1250, 'bridge time preserved (no monotonic clamp)');
+});
+
+test('spawn bridge: skipped when parent has no snapshots (no-parent case)', () => {
+    // Edge case: parent never had any snapshots (e.g. spawn-then-immediate-replace,
+    // or parent already cleaned up). installSpawnBridge returns null.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const parentState = newState(); // empty
+    const childState = newState();
+    const result = installSpawnBridge(parentState, childState, { x: 10, velocityX: 100 }, 1100, 50, clock);
+    assert.equal(result, null, 'no parent → skip bridge');
+    assert.equal(childState.snapshots.length, 0, 'no install when bridge is skipped');
+});
+
+test('spawn bridge: simultaneous-time fallback (bridge == authority validAt)', () => {
+    // When bridge and authority have the same validAt (e.g. perfectly-zero-latency
+    // case — admittedly rare), the LAN-case install order applies (bridge ≤ auth).
+    // Both snapshots end up at the same time; bracket-search returns curr.data
+    // for the equal-time bracket.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1050, perfStart: 1050 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 1000, clock);
+    const baseDelay = 50;
+
+    // Authority validAt = 1000. bridgeValidAt = serverNowMs(1050) - 50 = 1000. EQUAL.
+    const childData = { x: 5, velocityX: 200 };
+    const childValidAt = 1000;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    assert.equal(childState.snapshots.length, 2);
+    assert.equal(childState.snapshots[0].time, 1000);
+    assert.equal(childState.snapshots[1].time, 1000);
+});
