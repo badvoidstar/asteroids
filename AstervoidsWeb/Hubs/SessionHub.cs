@@ -143,6 +143,34 @@ public class SessionHub : Hub
         return obj;
     }
 
+    /// <summary>
+    /// Sanity bound for owner-stamped <c>clientValidAt</c> values. If the client's
+    /// estimate diverges from the server's hub-entry timestamp by more than this
+    /// many milliseconds, we assume the client's clock estimate is unreliable
+    /// (clock not yet initialized, glitched, or hostile) and fall back to the
+    /// server's timestamp. 2s comfortably exceeds any realistic
+    /// RTT + clock-skew combination on a real game session.
+    /// </summary>
+    private const long ValidAtSanityBoundMs = 2000;
+
+    /// <summary>
+    /// Resolve the broadcast-time <c>validAt</c> from an owner-stamped
+    /// <paramref name="clientValidAt"/> and the server's hub-entry
+    /// <paramref name="serverTimestamp"/>. Within ±<see cref="ValidAtSanityBoundMs"/>
+    /// the client value wins (eliminates the owner→server upload-time bias from
+    /// motion-related receiver math). Outside the window or when null, falls
+    /// back to the server timestamp so receivers always have a usable value.
+    /// </summary>
+    private static long ResolveValidAt(long? clientValidAt, long serverTimestamp)
+    {
+        if (clientValidAt.HasValue
+            && Math.Abs(clientValidAt.Value - serverTimestamp) <= ValidAtSanityBoundMs)
+        {
+            return clientValidAt.Value;
+        }
+        return serverTimestamp;
+    }
+
     private static MemberInfo ToMemberInfo(Member member) =>
         new(member.Id, member.Role.ToString(), member.JoinedAt);
 
@@ -239,8 +267,9 @@ public class SessionHub : Hub
     {
         // Capture serverTimestamp at hub-method entry so it represents the
         // moment the action was authoritatively realized, not the moment the
-        // broadcast was assembled. Receivers use this for spawn-position
-        // projection (see RemoteObjects.spawnAt) and adaptive-delay tracking.
+        // broadcast was assembled. Receivers use this for adaptive-delay
+        // tracking and as the fallback validAt when the owner's clientValidAt
+        // is null or fails the ±2s sanity clamp.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         var result = _sessionService.JoinSession(sessionId, Context.ConnectionId, evictMemberId);
@@ -434,16 +463,35 @@ public class SessionHub : Hub
     /// but SignalR reconnection could cause this), the sender's local state would diverge
     /// until reconciliation recovers it. See trackMemberSequence() in object-sync.js.
     /// </summary>
-    public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null)
+    /// <summary>
+    /// Creates a new synchronized object in the session.
+    /// Broadcast uses OthersInGroup — the sender registers the object from the
+    /// invoke response (response-first, since server-assigned ID is needed).
+    /// This means the sender's own memberSequence for this
+    /// event is not delivered via broadcast; it is returned in the response instead.
+    /// Trade-off: if the invoke response is lost (rare — TCP/WebSocket guarantees delivery,
+    /// but SignalR reconnection could cause this), the sender's local state would diverge
+    /// until reconciliation recovers it. See trackMemberSequence() in object-sync.js.
+    /// </summary>
+    /// <param name="clientValidAt">
+    /// Owner's NTP-aligned server-time estimate of the simulation tick that
+    /// produced this object's initial state. Forwarded to receivers as the
+    /// broadcast's <c>validAt</c> after a ±2s sanity clamp so they can place
+    /// the snapshot on the unified server-time interpolation axis. Null when
+    /// the owner's clock isn't yet initialized; server falls back to its
+    /// hub-entry timestamp (upload-biased but always usable).
+    /// </param>
+    public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId));
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId, clientValidAt));
 
         var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId));
         if (obj == null)
@@ -458,8 +506,10 @@ public class SessionHub : Hub
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
+        // validAt is the unified server-time anchor for receiver-side interpolation;
+        // serverTimestamp is retained for receiver-side packet-arrival / RTT instrumentation.
         await BroadcastToOthersAsync(session, member.Id, "OnObjectCreated",
-            objectInfo, member.Id, memberSequence, serverTimestamp);
+            objectInfo, member.Id, memberSequence, serverTimestamp, validAt);
 
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, obj.Scope);
 
@@ -471,18 +521,27 @@ public class SessionHub : Hub
     /// Ownership is enforced inside the service layer (atomically with the update) so
     /// correctness does not depend on this hub's pre-checks.
     /// </summary>
-    public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? clientTimestamp = null, long? senderSendIntervalMs = null)
+    /// <param name="clientValidAt">
+    /// Owner's NTP-aligned server-time estimate of the simulation tick that
+    /// produced this batch of updates. Forwarded to receivers as the
+    /// broadcast's <c>validAt</c> after a ±2s sanity clamp so they can place
+    /// each snapshot on the unified server-time interpolation axis. Null when
+    /// the owner's clock isn't yet initialized; server falls back to its
+    /// hub-entry timestamp.
+    /// </param>
+    public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? senderSendIntervalMs = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale. Always
         // populated (even when no objects are updated) so the response carries
         // a valid timestamp the client's clock-offset estimator can use.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, clientTimestamp, senderSendIntervalMs));
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, senderSendIntervalMs, clientValidAt));
 
         // Map hub request type to service type; ownership enforcement is inside the service.
         var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data));
@@ -504,9 +563,14 @@ public class SessionHub : Hub
                 .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version))
                 .ToList();
 
-            // Broadcast to other members only — sender gets versions/RTT from the response
+            // Broadcast to other members only — sender gets versions/RTT from the response.
+            // validAt is the unified server-time anchor for receiver-side interpolation;
+            // serverTimestamp is retained for receiver-side packet-arrival / jitter
+            // instrumentation. The legacy clientTimestamp echo was removed: it was only
+            // useful to the sender, who never received the broadcast (OthersInGroup),
+            // so every byte of it on the wire was wasted.
             await BroadcastToOthersAsync(session, member.Id, "OnObjectsUpdated",
-                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs);
+                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt);
         }
 
         var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
@@ -562,46 +626,44 @@ public class SessionHub : Hub
     /// Ownership check, creation of replacements, and deletion of the original all happen
     /// atomically under the session lock inside the service layer.
     /// </summary>
-    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null, long? clientSpawnServerTime = null)
+    /// <summary>
+    /// Atomically deletes an object and creates replacement objects in a single broadcast.
+    /// Used for splitting objects where all members need to see the deletion and creation together.
+    /// Ownership check, creation of replacements, and deletion of the original all happen
+    /// atomically under the session lock inside the service layer.
+    /// </summary>
+    /// <param name="clientValidAt">
+    /// Owner's NTP-aligned server-time estimate of the simulation tick that
+    /// produced the replacement (for asteroid splits this is the moment of
+    /// collision detection on the owner). Forwarded to receivers as the
+    /// broadcast's <c>validAt</c> after a ±2s sanity clamp so they can place
+    /// each new child snapshot on the unified server-time interpolation axis,
+    /// eliminating the owner→server upload-time bias from spawn placement.
+    /// Null when the owner's clock isn't yet initialized; server falls back
+    /// to its hub-entry timestamp.
+    /// </param>
+    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — used by recordPacketArrival (network arrival
         // timing, includes server processing time). NOT used as the spawn anchor;
-        // see spawnServerTime below for the owner-stamped value used by spawn
-        // projection.
+        // see validAt below for the owner-stamped value used by interpolation.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-        // Spawn anchor for receiver-side projection. The asteroid OWNER stamps
-        // their best estimate of "server time at collision detection" using their
-        // Phase 1 clock-offset (RemoteObjects.serverNowMs). This eliminates the
-        // owner→server upload-time bias that plagued using serverTimestamp alone:
+        // validAt is the unified server-time anchor for receiver-side interpolation.
+        // The asteroid OWNER stamps their best estimate of "server time at collision
+        // detection" using their Phase 1 clock-offset (RemoteObjects.serverNowMs).
+        // This eliminates the owner→server upload-time bias that plagued using
+        // serverTimestamp alone:
         //   * serverTimestamp = T_collision_owner + upload_time_owner_to_server
-        //   * clientSpawnServerTime = T_collision_owner   (modulo NTP residual)
-        // Receivers compute staleness = serverNow_recv − spawnServerTime − delay,
-        // so using clientSpawnServerTime makes children spawn at the position the
-        // bracket-renderer was actually showing the parent at.
-        //
-        // Sanity bound: if the client-stamped value is more than 2s away from the
-        // hub-entry timestamp, we assume the client's clock estimate is bogus
-        // (clock not yet initialized, glitched, or hostile) and fall back to
-        // serverTimestamp. 2s comfortably exceeds any realistic
-        // RTT + clock-skew combination on a real game session.
-        const long SpawnTimeSanityBoundMs = 2000;
-        long spawnServerTime;
-        if (clientSpawnServerTime.HasValue
-            && Math.Abs(clientSpawnServerTime.Value - serverTimestamp) <= SpawnTimeSanityBoundMs)
-        {
-            spawnServerTime = clientSpawnServerTime.Value;
-        }
-        else
-        {
-            spawnServerTime = serverTimestamp;
-        }
+        //   * clientValidAt   = T_collision_owner   (modulo NTP residual)
+        // Receivers then bracket-search at validAt, so children spawn at the
+        // position the bracket-renderer was actually showing the parent at.
+        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
         var (member, session) = ctx.Value;
 
-        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(deleteObjectId, replacements, scope, ownerMemberId, clientSpawnServerTime));
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(deleteObjectId, replacements, scope, ownerMemberId, clientValidAt));
 
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
@@ -629,7 +691,7 @@ public class SessionHub : Hub
         // to refactor replaceObject to process the invoke response locally first.
         var replaceEvent = new ObjectReplacedEvent(deleteObjectId, createdInfos);
         await BroadcastToAllAsync(session, "OnObjectReplaced",
-            replaceEvent, member.Id, memberSequence, serverTimestamp, spawnServerTime);
+            replaceEvent, member.Id, memberSequence, serverTimestamp, validAt);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
             deleteObjectId, createdObjects.Count, member.SessionId);

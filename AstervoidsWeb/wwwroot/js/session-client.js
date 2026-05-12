@@ -230,23 +230,21 @@ const SessionClient = (function() {
         }));
 
         // Object events
-        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
+        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             if (callbacks.onObjectCreated) {
-                // Forward serverTimestamp as the spawn anchor for non-Replaced
-                // creations (e.g. wave-spawn asteroids, ship joins). Without this,
-                // observer-side wave asteroids rendered ~OWD ms behind reality
-                // because handleRemoteObjectCreated had no spawn-time reference
-                // and fell back to arrivalTime. CreateObject doesn't carry an
-                // owner-stamped clientSpawnServerTime (unlike ReplaceObject), so
-                // the server's hub-entry timestamp is the best anchor available
-                // — strictly better than no anchor at all.
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, serverTimestamp);
+                // Forward validAt as the unified server-time interpolation anchor.
+                // The server resolves it from the owner's clientValidAt (preferred,
+                // upload-time-bias-free) or its own hub-entry serverTimestamp
+                // (fallback when the owner's clock isn't yet initialized).
+                // Either way receivers can place snap[0] on the same axis they
+                // bracket-search, eliminating the spawn-vs-render axis seam.
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
-        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, clientTimestamp, senderSendIntervalMs) => {
+        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs, validAt);
             }
         }));
 
@@ -256,9 +254,9 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime) => {
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
             }
         }));
 
@@ -453,16 +451,28 @@ const SessionClient = (function() {
      * Create an object in the current session.
      * @param {object} data - Object data
      * @param {string} scope - 'Member' or 'Session'
+     * @param {string|null} [ownerMemberId=null]
+     * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
+     *   estimate of "now" at creation. Server clamps to ±2s of its own UtcNow
+     *   before forwarding as the broadcast's validAt. Pass null to fall back to
+     *   the server's hub-entry timestamp (slightly upload-biased).
      */
-    async function createObject(data, scope = 'Member', ownerMemberId = null) {
-        return invokeHub('CreateObject', data, scope, ownerMemberId);
+    async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null) {
+        return invokeHub('CreateObject', data, scope, ownerMemberId, clientValidAt);
     }
 
     /**
      * Update multiple objects atomically.
+     * @param {Array} updates
+     * @param {number|null} [senderSequence=null]
+     * @param {number|null} [senderSendIntervalMs=null]
+     * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
+     *   estimate of the simulation tick that produced this batch. Server clamps
+     *   to ±2s before forwarding as the broadcast's validAt. Null falls back to
+     *   the server's hub-entry timestamp.
      */
-    async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null) {
-        return invokeHub('UpdateObjects', updates, senderSequence, Date.now(), senderSendIntervalMs);
+    async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null, clientValidAt = null) {
+        return invokeHub('UpdateObjects', updates, senderSequence, senderSendIntervalMs, clientValidAt);
     }
 
     /**
@@ -471,13 +481,14 @@ const SessionClient = (function() {
      * @param {Array} replacements
      * @param {string} [scope='Session']
      * @param {string|null} [ownerMemberId=null]
-     * @param {number|null} [clientSpawnServerTime=null] - Owner's best estimate
-     *   (via clock-offset) of "server time at this moment". Server clamps to
-     *   ±2000ms of its own UtcNow before forwarding as the spawn anchor. Pass
-     *   null to fall back to server's hub-entry timestamp (less accurate).
+     * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
+     *   estimate of "server time at this moment" (e.g. collision detection).
+     *   Server clamps to ±2000ms of its own UtcNow before forwarding as the
+     *   broadcast's validAt. Pass null to fall back to server's hub-entry
+     *   timestamp (less accurate).
      */
-    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientSpawnServerTime = null) {
-        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId, clientSpawnServerTime);
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null) {
+        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId, clientValidAt);
     }
 
     /**

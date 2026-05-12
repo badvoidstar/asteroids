@@ -322,3 +322,77 @@ test('without min-RTT selection, average of biased samples drifts off true offse
     assert.ok(minRttError < randomError,
         `min-RTT error (${minRttError}) should be less than random pick error (${randomError})`);
 });
+
+// ── wallToPerfDelta ───────────────────────────────────────────────────────
+//
+// `wallToPerfDelta = performance.now() - Date.now()` is captured on every
+// successful ping burst. Together with `offsetMs` it lets the receiver
+// convert any owner-stamped server-time `validAt` into a perf.now-domain
+// snapshot key without leaking network jitter into the bracket axis. The
+// delta is stable to a few ms over hours because both `performance.now`
+// and `Date.now` advance together with the OS timer; only an explicit OS
+// NTP-daemon slew of `Date.now` (typically ≤ a few ms per slew event)
+// can push the delta off, and the next ping burst refreshes it.
+
+/**
+ * Mirror of the wallToPerfDelta capture: snapshot the relationship between
+ * the high-resolution monotonic clock and the wall clock at a particular
+ * instant. Pure helper for tests.
+ */
+function captureWallToPerfDelta(perfNow, dateNow) {
+    return perfNow - dateNow;
+}
+
+test('wallToPerfDelta: zero when perf.now equals Date.now', () => {
+    assert.equal(captureWallToPerfDelta(1000, 1000), 0);
+});
+
+test('wallToPerfDelta: positive when perf.now exceeds Date.now (typical post-boot)', () => {
+    // performance.now is monotonic from process start; Date.now is wall clock.
+    // In practice perf.now often grows much smaller than Date.now (Date.now
+    // is many days large), so delta is large negative. But the helper math
+    // is symmetric — what matters is the constant offset, not its sign.
+    assert.equal(captureWallToPerfDelta(5000, 3000), 2000);
+});
+
+test('wallToPerfDelta: large negative when Date.now is many days large', () => {
+    // Realistic numbers: Date.now ~1.7e12 ms (Jan 2024 era), perf.now ~5000 ms (5s after process start).
+    const delta = captureWallToPerfDelta(5000, 1_700_000_000_000);
+    assert.equal(delta, 5000 - 1_700_000_000_000);
+});
+
+test('wallToPerfDelta: synchronous advance preserves the delta exactly', () => {
+    // When both clocks advance by the same amount of real time, the delta
+    // is conserved. This is the steady-state behavior between NTP slews.
+    const before = captureWallToPerfDelta(5000, 1_700_000_000_000);
+    const after = captureWallToPerfDelta(5000 + 12345, 1_700_000_000_000 + 12345);
+    assert.equal(before, after);
+});
+
+test('wallToPerfDelta: OS NTP slew of Date.now changes the delta by exactly the slew', () => {
+    // The NTP daemon adjusts wall clock forward by 5ms while perf.now
+    // continues monotonically. Re-capturing the delta yields a value
+    // smaller (more negative) by exactly 5ms.
+    const before = captureWallToPerfDelta(5000, 1_700_000_000_000);
+    const after = captureWallToPerfDelta(5000, 1_700_000_000_000 + 5);
+    assert.equal(after - before, -5);
+});
+
+test('wallToPerfDelta + offsetMs: round-trip validAt → perf.now → validAt is exact', () => {
+    // The round trip is the conversion that powers the snapshot bracket key.
+    //   perfTime  = validAt - offsetMs + wallToPerfDelta
+    //   validAt   = perfTime + offsetMs - wallToPerfDelta
+    const offsetMs = 87;
+    const dateNow = 1_700_000_000_000;
+    const perfNow = 5000;
+    const wallToPerfDelta = captureWallToPerfDelta(perfNow, dateNow);
+
+    const validAt = dateNow + offsetMs + 250; // owner stamp 250ms after their captured ping
+    const perfTime = validAt - offsetMs + wallToPerfDelta;
+    const recovered = perfTime + offsetMs - wallToPerfDelta;
+
+    assert.equal(recovered, validAt, 'round-trip must be exact');
+    assert.equal(perfTime, perfNow + 250,
+        'perfTime must be perfNow advanced by exactly the same 250ms the validAt was offset from "now"');
+});
+

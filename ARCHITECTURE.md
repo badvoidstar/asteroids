@@ -74,13 +74,13 @@ All wrappers route through `invokeHub()`, which enforces session membership and 
 | `joinSession(sessionId, evictMemberId?)` | `JoinSession` | `sessionId, evictMemberId?` | `{ session, member }` or `null` |
 | `leaveSession()` | `LeaveSession` | — | `void` (broadcast only) |
 | `getActiveSessions()` | `GetActiveSessions` | — | `{ sessions[], maxSessions, canCreateSession }` |
-| `createObject(data, scope, ownerMemberId?)` | `CreateObject` | `data, scope, ownerMemberId?` | `{ objectInfo, memberSequence }` |
-| `updateObjects(updates, senderSequence, senderSendIntervalMs)` | `UpdateObjects` | `updates[], senderSequence, clientTimestamp†, senderSendIntervalMs` | `{ versions{}, memberSequence, serverTimestamp }` |
-| `replaceObject(deleteObjectId, replacements, scope, ownerMemberId?)` | `ReplaceObject` | `deleteObjectId, replacements[], scope, ownerMemberId?` | `createdInfos[]` |
+| `createObject(data, scope, ownerMemberId?, clientValidAt?)` | `CreateObject` | `data, scope, ownerMemberId?, clientValidAt?` | `{ objectInfo, memberSequence }` |
+| `updateObjects(updates, senderSequence, senderSendIntervalMs, clientValidAt?)` | `UpdateObjects` | `updates[], senderSequence, senderSendIntervalMs, clientValidAt?` | `{ versions{}, memberSequence, serverTimestamp }` |
+| `replaceObject(deleteObjectId, replacements, scope, ownerMemberId?, clientValidAt?)` | `ReplaceObject` | `deleteObjectId, replacements[], scope, ownerMemberId?, clientValidAt?` | `createdInfos[]` |
 | `deleteObject(objectId)` | `DeleteObject` | `objectId` | `{ success, memberSequence }` |
 | `getSessionState()` | `GetSessionState` | — | `{ members[], objects[], memberSequences{} }` |
 
-† `clientTimestamp = Date.now()` is injected by the `updateObjects` wrapper; the JS caller does not pass it.
+† `clientValidAt` is the owner's NTP-aligned server-time estimate of the simulation tick that authored this state. The server clamps it to ±2s of its own UtcNow and forwards as the broadcast's `validAt` field; if `null` (e.g. clock not yet initialized), the server falls back to its own hub-entry timestamp. Receivers use `validAt` as the unified interpolation snapshot key — see "Networking: validAt Axis" below.
 
 #### Lifecycle and State Methods
 
@@ -757,18 +757,18 @@ sequenceDiagram
     OS->>OS: Check inFlightCount > 0? → skip (backpressure)
     OS->>OS: inFlightCount++, senderSequence++
     OS->>SC: updateObjects(updates, senderSeq, senderSendIntervalMs)
-    SC->>HUB: Invoke UpdateObjects(updates, senderSeq, clientTimestamp, senderSendIntervalMs)
+    SC->>HUB: Invoke UpdateObjects(updates, senderSeq, senderSendIntervalMs, clientValidAt?)
 
-    Note over HUB: Server processes batch atomically<br/>Version check per object<br/>memberSequence = Interlocked.Increment
+    Note over HUB: Server processes batch atomically<br/>Version check per object<br/>memberSequence = Interlocked.Increment<br/>validAt = clamp(clientValidAt, ServerTimestamp ± 2s) ?? ServerTimestamp
 
     par Response to sender
         HUB-->>SC: Response {versions{}, memberSequence, serverTimestamp}
         SC-->>OS: Apply versions, track own memberSequence
         OS-->>OS: inFlightCount--
-        Note over OS: RTT = Date.now() - clientTimestamp
+        Note over OS: RTT = responseTimestamp - clientTimestamp (locally captured)
     and Broadcast to others
-        HUB->>R: OnObjectsUpdated(objects[], senderMemberId,<br/>senderSeq, memberSeq, serverTimestamp,<br/>null, senderSendIntervalMs)
-        Note over R: clientTimestamp = null (discriminator:<br/>null = remote broadcast,<br/>set = own invoke response)
+        HUB->>R: OnObjectsUpdated(objects[], senderMemberId,<br/>senderSeq, memberSeq, serverTimestamp,<br/>senderSendIntervalMs, validAt)
+        Note over R: validAt is the unified interpolation axis:<br/>receiver converts validAt → perf.now via<br/>validAt - offsetMs + wallToPerfDelta<br/>and stores as snapshot.time
     end
 ```
 
@@ -799,7 +799,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph "RTT Estimation"
-        SAMPLE["RTT sample =<br/>Date.now() - clientTimestamp"]
+        SAMPLE["RTT sample =<br/>responseTimestamp - clientTimestamp<br/>(captured locally on each invoke)"]
         EMA["Asymmetric EMA:<br/>spike: α=0.3 (fast up)<br/>decay: α=0.1 (slow down)<br/>rtt += α × (sample - rtt)"]
         SAMPLE --> EMA
     end
@@ -848,6 +848,38 @@ flowchart TB
     REC --> CALC
     CALC --> EX
 ```
+
+## Networking: Unified `validAt` Interpolation Axis
+
+Every owner-authored object event (`CreateObject`, `UpdateObjects`, `ReplaceObject`) carries a single timestamp `validAt`: the owner's NTP-aligned server-time estimate of the simulation tick that produced this state. All receiver-side machinery — interpolation snapshot keys, spawn handling, ownership-migration handoff — operates on this one axis.
+
+```mermaid
+flowchart LR
+    subgraph "Owner (sender)"
+        SIM["Local sim tick<br/>produces state"]
+        STAMP["clientValidAt =<br/>Math.round(serverNowMs())<br/>or null if NTP not yet bootstrapped"]
+        SIM --> STAMP
+    end
+
+    subgraph "Server hub"
+        CLAMP["validAt =<br/>±2s clamp(clientValidAt) ?? hub-entry ServerTimestamp"]
+    end
+
+    subgraph "Receiver"
+        CONV["snapshot.time =<br/>validAt - clock.offsetMs + wallToPerfDelta"]
+        BRACKET["Bracket search runs in<br/>perf.now domain<br/>(monotonic, immune to wall-clock slewing)"]
+        CONV --> BRACKET
+    end
+
+    STAMP -->|"clientValidAt"| CLAMP
+    CLAMP -->|"validAt"| CONV
+```
+
+* **`clock.offsetMs`** is the NTP-style estimate `serverTime - wall` (5-ping bootstrap, 30 s refresh, min-RTT-per-burst selection). Lets every client compute `serverNowMs() = Date.now() + offsetMs` to within a few ms of the server's UTC.
+* **`clock.wallToPerfDelta = performance.now() - Date.now()`** is refreshed on every accepted ping burst. The conversion `validAt → snapshot.time` runs through it so bracket-search stays on a monotonic clock while the snapshot key still encodes the global server-time agreement.
+* **No spawn projection on observers.** With snap[0].time = validAtToPerfNow(validAt), a freshly-created remote object's targetTime (= renderTime − baseDelay) typically lies before snap[0].time. The bracket clamp returns snap[0].data unchanged until either the next snapshot lands or extrapolation kicks in. No model switch, no transient smoother needed.
+* **Local-owner spawn projection.** The shooter who fires `replaceObject` adopts the resulting children ~RTT later. `updateAstervoidsFromSync` forward-projects from `obj.validAt` to `serverNowMs()` so the local sim asteroid's starting position matches the parent's continued motion (interpolation is not active for owned objects).
+* **Migration handoff.** When ownership migrates to the local member (previous owner left), `RemoteObjects.getMigrationSeed(objectId)` returns the latest snapshot dead-reckoned to `serverNowMs()`. The local game-object is seeded with that state, so the first authored snap on the new owner matches what every observer's bracket interpolation was already extrapolating — motion remains continuous through the handoff.
 
 ## Ring Buffer Interpolation
 
