@@ -5984,11 +5984,23 @@
                         // currently displaying objects from this owner".
                         const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
                         const bridgeValidAt = Math.round(RemoteObjects.serverNowMs() - delay);
+                        // Angle override is conditional: fracture children store
+                        // vertices already in world-aligned frame (parent rotation
+                        // pre-applied) and use angle=0 structurally. Overriding
+                        // their angle with parentInterp.angle would DOUBLE-rotate
+                        // the rendered polygon during the bridge interval,
+                        // producing a visible spawn glitch. Disk children (no
+                        // vertices array, polygon regenerated from seed) carry
+                        // angle = parent's angle at collision and DO benefit
+                        // from a parentInterp.angle bridge for smooth angular
+                        // continuity.
+                        const isFractureChild = Array.isArray(child.data.vertices)
+                            && child.data.vertices.length > 0;
                         const bridgeData = {
                             ...child.data,
                             x: parentInterp.x,
                             y: parentInterp.y,
-                            angle: parentInterp.angle,
+                            ...(isFractureChild ? {} : { angle: parentInterp.angle }),
                             // Keep child's velocity/rotationSpeed so:
                             //   - LAN bracket [bridge, auth] interpolates linearly
                             //     from parent_pos to auth_pos (endpoint-driven; the

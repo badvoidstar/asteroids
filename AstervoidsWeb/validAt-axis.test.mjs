@@ -603,3 +603,63 @@ test('spawn bridge: simultaneous-time fallback (bridge == authority validAt)', (
     assert.equal(childState.snapshots[0].time, 1000);
     assert.equal(childState.snapshots[1].time, 1000);
 });
+
+// ── Spawn-bridge: angle handling for fracture vs disk children ────────────
+
+/**
+ * Mirror of the production bridge's conditional angle override.
+ * Fracture children store vertices already in world-aligned frame (angle=0
+ * structurally); disk children inherit parent.angle (polygon regenerated).
+ */
+function buildBridgeData(childData, parentInterp) {
+    const isFractureChild = Array.isArray(childData.vertices) && childData.vertices.length > 0;
+    return {
+        ...childData,
+        x: parentInterp.x,
+        y: parentInterp.y,
+        ...(isFractureChild ? {} : { angle: parentInterp.angle }),
+    };
+}
+
+test('spawn bridge: fracture child preserves angle=0 (no double-rotation)', () => {
+    // Fracture child: vertices array present, angle=0 structurally because
+    // the vertices already carry parent's rotation. The bridge MUST NOT
+    // override angle — doing so would double-rotate the rendered polygon
+    // for the bridge interval (a visible spawn glitch).
+    const childData = {
+        x: 10, y: 20, angle: 0, velocityX: 50, velocityY: 0,
+        vertices: [{ angle: 0, distance: 1 }, { angle: 1, distance: 1 }, { angle: 2, distance: 1 }],
+    };
+    const parentInterp = { x: 5, y: 15, angle: 1.234, velocityX: 100 };
+    const bridge = buildBridgeData(childData, parentInterp);
+
+    assert.equal(bridge.x, 5, 'bridge.x = parent_pos');
+    assert.equal(bridge.y, 15, 'bridge.y = parent_pos');
+    assert.equal(bridge.angle, 0, 'fracture child bridge.angle MUST stay 0 to avoid double-rotation');
+    assert.deepEqual(bridge.vertices, childData.vertices, 'vertices passed through');
+});
+
+test('spawn bridge: disk child inherits parentInterp.angle for smooth angular continuity', () => {
+    // Disk child: no vertices array (polygon regenerated from seed). Its
+    // angle = parent.angle at collision. Bridging with parentInterp.angle
+    // gives smooth angular continuation matching parent's last-rendered
+    // rotation.
+    const childData = {
+        x: 10, y: 20, angle: 0.8, velocityX: 50, velocityY: 0, seed: 42,
+        // no vertices field
+    };
+    const parentInterp = { x: 5, y: 15, angle: 0.7, velocityX: 100 };
+    const bridge = buildBridgeData(childData, parentInterp);
+
+    assert.equal(bridge.angle, 0.7, 'disk child bridge.angle = parentInterp.angle');
+    assert.equal(bridge.seed, 42, 'static fields passed through');
+});
+
+test('spawn bridge: empty vertices array treated as disk (defensive)', () => {
+    // Edge case: vertices: [] (falsy length) → treat as disk so angle
+    // override applies. Vertices: undefined → also disk.
+    const childData = { x: 10, y: 20, angle: 0.5, vertices: [] };
+    const parentInterp = { x: 5, y: 15, angle: 0.9 };
+    const bridge = buildBridgeData(childData, parentInterp);
+    assert.equal(bridge.angle, 0.9, 'empty vertices array → angle override applies');
+});
