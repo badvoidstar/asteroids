@@ -2061,12 +2061,27 @@
                 let dAngle = state.current.angle - state.previous.angle;
                 while (dAngle > Math.PI) dAngle -= Math.PI * 2;
                 while (dAngle < -Math.PI) dAngle += Math.PI * 2;
-                const a0 = state.previous.angle;
-                const a1 = a0 + dAngle;
-                const rpsToPerSec = CONFIG.TARGET_FPS;
-                const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
-                const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
-                result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+                // Short-circuit when both endpoints have the same angle (e.g.
+                // spawn-bridge for fracture children: bridge.angle=auth.angle=0
+                // because vertices are pre-rotated to world frame). Without
+                // this guard, Hermite uses the non-zero rotationSpeed tangents
+                // (auth's rotSpeed for extrapolation past auth, kept on the
+                // bridge snapshot too) and the cubic curves spuriously through
+                // the middle — producing a ~1° wobble for ~3 frames after
+                // spawn that the user perceives as a "1-frame rotation
+                // glitch". Constant-angle => constant-rendered-angle is the
+                // physically correct behaviour; tangent matching is irrelevant
+                // when the slope between endpoints is zero.
+                if (Math.abs(dAngle) < 1e-6) {
+                    result.angle = state.current.angle;
+                } else {
+                    const a0 = state.previous.angle;
+                    const a1 = a0 + dAngle;
+                    const rpsToPerSec = CONFIG.TARGET_FPS;
+                    const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
+                    const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
+                    result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+                }
             }
             
             return result;

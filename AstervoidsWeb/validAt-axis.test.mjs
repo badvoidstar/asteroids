@@ -663,3 +663,80 @@ test('spawn bridge: empty vertices array treated as disk (defensive)', () => {
     const bridge = buildBridgeData(childData, parentInterp);
     assert.equal(bridge.angle, 0.9, 'empty vertices array → angle override applies');
 });
+
+// ── Hermite angle short-circuit (fracture-bridge mid-curve glitch) ────────
+
+/**
+ * Mirror of the production Hermite angle interp with the equal-angle
+ * short-circuit. Verifies that constant-angle endpoints produce a constant
+ * rendered angle regardless of tangent (rotationSpeed) values — which is the
+ * fracture-bridge case where bridge.angle=auth.angle=0 but rotationSpeed is
+ * non-zero (kept for extrapolation past auth).
+ */
+function hermiteAngle(prev, curr, prevRotSpeed, currRotSpeed, t, timeDiffMs, targetFps = 60) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    const dt = timeDiffMs / 1000;
+    let dAngle = curr - prev;
+    while (dAngle > Math.PI) dAngle -= Math.PI * 2;
+    while (dAngle < -Math.PI) dAngle += Math.PI * 2;
+    if (Math.abs(dAngle) < 1e-6) return curr;
+    const a0 = prev;
+    const a1 = a0 + dAngle;
+    const am0 = (prevRotSpeed || 0) * targetFps * dt;
+    const am1 = (currRotSpeed || 0) * targetFps * dt;
+    return h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+}
+
+test('Hermite angle: fracture bridge (equal angle, non-zero tangent) → constant angle', () => {
+    // The 1-frame glitch case: bridge.angle=auth.angle=0, both have child's
+    // rotationSpeed (kept for extrapolation past auth). Without short-circuit,
+    // Hermite produces ~1.35° spurious deviation at t=0.32, oscillating to
+    // -1.35° at t=0.68. With short-circuit, must stay at 0 throughout.
+    const rotSpeed = 0.1; // rad/frame, high spin from collision
+    for (const t of [0.0, 0.1, 0.32, 0.5, 0.68, 0.9, 1.0]) {
+        const a = hermiteAngle(0, 0, rotSpeed, rotSpeed, t, 50);
+        assert.strictEqual(a, 0, 'Hermite angle must be 0 for equal-angle endpoints');
+    }
+});
+
+test('Hermite angle: fracture bridge (any tangent, equal angle non-zero) → constant', () => {
+    // Same short-circuit applies if endpoints both equal some non-zero angle
+    // (e.g. fracture child rendered after the very first authority refresh).
+    const rotSpeed = 0.05;
+    const angle = 1.234;
+    for (const t of [0.0, 0.32, 0.5, 0.68, 1.0]) {
+        const a = hermiteAngle(angle, angle, rotSpeed, rotSpeed, t, 80);
+        assert.strictEqual(a, angle, 'Hermite angle must be constant for equal-angle endpoints');
+    }
+});
+
+test('Hermite angle: disk bridge (small dAngle) STILL uses Hermite (no short-circuit)', () => {
+    // Disk children: bridge.angle = parentInterp.angle, auth.angle = parent.angle
+    // at split. Difference = parent.rotSpeed * timeDiff. NON-zero, so Hermite
+    // applies. Verify we get a value between endpoints.
+    const prev = 0.0, curr = 0.06; // 0.02 rad/frame * 60 * 0.05s = 0.06
+    const a = hermiteAngle(prev, curr, 0.02, 0.02, 0.32, 50);
+    assert.ok(a > 0 && a < curr, 'disk-bridge Hermite returns interpolated value');
+});
+
+test('Hermite angle: normal frame-to-frame interp unaffected by short-circuit', () => {
+    // Normal interp: ω rad/frame * timeDiff = noticeable dAngle. Hermite
+    // applies and reduces to linear when tangents match the slope.
+    const dt = 50;
+    const omega = 0.02;
+    const dAngle = omega * 60 * (dt / 1000); // = 0.06 rad
+    const result = hermiteAngle(0, dAngle, omega, omega, 0.5, dt);
+    // For pure constant rotation, Hermite reduces to linear at t=0.5 → 0.5 * dAngle
+    assert.ok(Math.abs(result - 0.5 * dAngle) < 1e-9, 'Hermite linear-equivalent at t=0.5');
+});
+
+test('Hermite angle: equal-angle near zero (epsilon below threshold) short-circuits', () => {
+    // dAngle = 1e-7 < 1e-6 threshold → short-circuit fires.
+    const a = hermiteAngle(1.0, 1.0 + 1e-7, 0.1, 0.1, 0.32, 50);
+    assert.strictEqual(a, 1.0 + 1e-7, 'epsilon-equal angles short-circuit to current');
+});
