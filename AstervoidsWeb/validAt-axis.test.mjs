@@ -411,14 +411,38 @@ function installSpawnBridge(parentState, childState, childData, childValidAt, ba
     const parentInterp = getInterpolated(parentState, renderTime, baseDelay);
     if (!parentInterp) return null;
     const bridgeValidAt = Math.round(clock.serverNowMs() - baseDelay);
+    const timeDiffSec = (childValidAt - bridgeValidAt) / 1000;
+    const bridgeIsBeforeAuth = bridgeValidAt <= childValidAt;
+    // bridgeV serves dual roles:
+    //   - back-projection anchor for bridge.x/y from the child's authoritative
+    //     COM to where the fragment was at bridge.time;
+    //   - bridge snapshot velocity used for Hermite tangent (LAN bracket) and
+    //     for extrapolation past the bridge (high-latency).
+    const bridgeVx = bridgeIsBeforeAuth
+        ? (parentInterp.velocityX || 0)
+        : (childData.velocityX || 0);
+    const bridgeVy = bridgeIsBeforeAuth
+        ? (parentInterp.velocityY || 0)
+        : (childData.velocityY || 0);
+    // Back-project child's authoritative COM to bridge.time. For DISK
+    // children (centroid offset = 0, childData.x ≡ parent.x_at_validAt),
+    // this REDUCES TO parentInterp.x exactly. For FRACTURE children
+    // (centroid offset ≠ 0, childData.x ≡ parent.x_at_validAt + centroid),
+    // the result is parentInterp.x + centroid — the position at which the
+    // fragment's polygon (whose vertices already encode the centroid)
+    // renders at the SAME world coordinates as before the split.
+    const bridgeX = (childData.x || 0) - bridgeVx * timeDiffSec;
+    const bridgeY = (childData.y || 0) - bridgeVy * timeDiffSec;
+    const isFractureChild = Array.isArray(childData.vertices) && childData.vertices.length > 0;
     const bridgeData = {
         ...childData,
-        x: parentInterp.x,
-        y: parentInterp.y,
-        angle: parentInterp.angle,
-        // velocityX/Y/rotationSpeed kept from child.data on purpose
+        x: bridgeX,
+        y: bridgeY,
+        velocityX: bridgeVx,
+        velocityY: bridgeVy,
+        ...(isFractureChild ? {} : { angle: parentInterp.angle }),
     };
-    if (bridgeValidAt <= childValidAt) {
+    if (bridgeIsBeforeAuth) {
         // LAN: bridge older than authority — install bridge first.
         updateState(childState, bridgeData, bridgeValidAt, clock);
         updateState(childState, childData, childValidAt, clock);
@@ -439,9 +463,11 @@ test('spawn bridge: LAN case — renderer interpolates from parent_pos to author
     updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
     const baseDelay = 50;
 
-    // Replace event lands. Authority for child: x=10 vx=200, validAt=1100
-    // (collision is in the receiver's near future, classic LAN spawn case).
-    const childData = { x: 10, velocityX: 200 };
+    // Replace event lands. Authority for child: x=20 (= parent's predicted COM
+    // at validAt=1100, since 0 + 100*0.2 = 20 — physically realistic disk
+    // child) vx=200, validAt=1100 (collision is in the receiver's near future,
+    // classic LAN spawn case).
+    const childData = { x: 20, velocityX: 200 };
     const childValidAt = 1100;
     const childState = newState();
     const result = installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
@@ -453,9 +479,12 @@ test('spawn bridge: LAN case — renderer interpolates from parent_pos to author
     assert.ok(childState.snapshots[0].time < childState.snapshots[1].time,
         'LAN: install order produces monotonic snapshots [bridge, authority]');
 
-    // Bridge.pos = parent's interpolated pos (= 5) — NOT child's authority (10).
+    // Bridge.x = back-projected from child.x by parent.vel:
+    //   bridge.x = 20 - 100 * (1100-950)/1000 = 20 - 15 = 5 = parent_interp.x.
+    // For DISK children this reduces to parent's interpolated position
+    // exactly — no regression vs. the old anchor formula.
     assert.equal(childState.snapshots[0].data.x, 5,
-        'bridge.x must equal parent extrapolated position (5), not child authority (10)');
+        'bridge.x = parent extrapolated position (5) for disk child');
 
     // Render right after install: targetTime=950 = bridge.time → clamp to bridge.
     const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
@@ -464,15 +493,15 @@ test('spawn bridge: LAN case — renderer interpolates from parent_pos to author
     // Advance halfway through the bridge interval and verify smooth interpolation.
     clock.advance(75); // perfNow=1075, targetTime=1025
     const interpMid = getInterpolated(childState, clock.perfNow(), baseDelay);
-    // span=150, t=(1025-950)/150=0.5; x = 5 + (10-5)*0.5 = 7.5
-    assert.equal(interpMid.x, 7.5, 'midway through bridge interval renderer interpolates linearly');
+    // span=150, t=(1025-950)/150=0.5; x = 5 + (20-5)*0.5 = 12.5
+    assert.equal(interpMid.x, 12.5, 'midway through bridge interval renderer interpolates linearly');
 
     // Advance to past authority: should now extrapolate from authority with child_vel.
     clock.advance(100); // perfNow=1175, targetTime=1125
     const interpAfter = getInterpolated(childState, clock.perfNow(), baseDelay);
-    // latest=authority at time=1100, x=10 vx=200; extrapolate (1125-1100)/1000=0.025s
-    // x = 10 + 200 * 0.025 = 15
-    assert.equal(interpAfter.x, 15, 'past authority: extrapolates with child velocity');
+    // latest=authority at time=1100, x=20 vx=200; extrapolate (1125-1100)/1000=0.025s
+    // x = 20 + 200 * 0.025 = 25
+    assert.equal(interpAfter.x, 25, 'past authority: extrapolates with child velocity');
 });
 
 test('spawn bridge: WITHOUT bridge — control test showing the spawn jump', () => {
@@ -480,22 +509,24 @@ test('spawn bridge: WITHOUT bridge — control test showing the spawn jump', () 
     const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
     const baseDelay = 50;
 
-    const childData = { x: 10, velocityX: 200 };
+    // Authority: child.x = parent.x_at_validAt = 20 (realistic disk child).
+    const childData = { x: 20, velocityX: 200 };
     const childValidAt = 1100;
     const childState = newState();
     updateState(childState, childData, childValidAt, clock);
 
     // Render right after install: targetTime=950 ≤ snap[0].time=1100 → clamp to authority.
     const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
-    assert.equal(interpAtInstall.x, 10,
-        'WITHOUT bridge, renderer JUMPS to authority position (10) — this is the hitch');
+    assert.equal(interpAtInstall.x, 20,
+        'WITHOUT bridge, renderer JUMPS to authority position (20) — this is the hitch');
     // Parent was at x=5 just before. With bridge, renderer would be at x=5.
-    // Without bridge, renderer is at x=10. That 5-unit discontinuity (in normalized
-    // coords; equivalent to parent_vel × baseDelay = 100 × 0.05 = 5) is the
-    // visible spawn hitch the bridge fix eliminates for the LAN case.
+    // Without bridge, renderer is at x=20. That 15-unit discontinuity (in
+    // normalized coords; equivalent to parent_vel × (validAt - bridgeValidAt)
+    // = 100 × 0.15 = 15) is the visible spawn hitch the bridge fix
+    // eliminates for the LAN case.
 });
 
-test('spawn bridge: high-latency case — bridge extrapolates with child velocity', () => {
+test('spawn bridge: high-latency case — bridge back-projects child position', () => {
     // Parent has been moving (validAt=900, x=0, vx=100). Renderer is now
     // at wall=1300 with baseDelay=50, so targetTime=1250 → parent
     // extrapolates to x = 0 + 100 * 0.35 = 35.
@@ -506,6 +537,7 @@ test('spawn bridge: high-latency case — bridge extrapolates with child velocit
 
     // Replace event lands AFTER the renderer's targetTime: authority validAt=1000
     // (collision happened 250ms ago in server time; high latency / bursty network).
+    // child.x = 10 = parent.x_at_validAt(1000) = 0 + 100 * 0.1 (realistic disk child).
     const childData = { x: 10, velocityX: 50 };
     const childValidAt = 1000;
     const childState = newState();
@@ -518,21 +550,28 @@ test('spawn bridge: high-latency case — bridge extrapolates with child velocit
     assert.ok(childState.snapshots[0].time < childState.snapshots[1].time,
         'high-latency: install order produces monotonic snapshots [authority, bridge]');
 
-    // Bridge data still anchors at parent_pos (=35), NOT child authority (=10).
-    assert.equal(childState.snapshots[1].data.x, 35,
-        'bridge.x = parent extrapolated position even when bridge is newer');
+    // Bridge.x = back-projected (forward-projected since timeDiff < 0) from child:
+    //   bridge.x = 10 - 50 * (1000-1250)/1000 = 10 + 12.5 = 22.5.
+    // This is the PHYSICALLY-CORRECT position of the child at bridge.time
+    // along its post-collision trajectory. Old anchor (= parent_interp.x = 35)
+    // produced a "deferred jerk" when the next regular update landed and
+    // forced a backward bracket [35 → child.x_at_t]. The new formula keeps
+    // motion physically continuous from bridge.time onward at the cost of
+    // one install-time correction (35 → 22.5).
+    assert.equal(childState.snapshots[1].data.x, 22.5,
+        'bridge.x = back-projected child position (22.5) for high-latency case');
 
-    // Render right after install: targetTime=1250 = bridge.time → clamp/extrapolate.
+    // Render right after install: targetTime=1250 = bridge.time → clamp to bridge.
     const interpAtInstall = getInterpolated(childState, clock.perfNow(), baseDelay);
-    assert.equal(interpAtInstall.x, 35,
-        'just-after-install renderer sits at parent_pos (no jump to child authority)');
+    assert.equal(interpAtInstall.x, 22.5,
+        'just-after-install renderer sits at back-projected child position');
 
     // Advance 30ms and verify bridge extrapolates with CHILD'S velocity.
     clock.advance(30); // perfNow=1330, targetTime=1280
     const interpAfter = getInterpolated(childState, clock.perfNow(), baseDelay);
-    // latest=bridge at time=1250, x=35, velocityX=50 (child's vel, kept in bridgeData)
-    // extrapolate (1280-1250)/1000=0.030s → x = 35 + 50*0.030 = 36.5
-    assert.equal(interpAfter.x, 36.5,
+    // latest=bridge at time=1250, x=22.5, velocityX=50 (child's vel, kept in bridgeData)
+    // extrapolate (1280-1250)/1000=0.030s → x = 22.5 + 50*0.030 = 24.0
+    assert.equal(interpAfter.x, 24,
         'bridge extrapolation uses CHILD velocity (50), not parent velocity (100)');
 });
 
@@ -544,7 +583,7 @@ test('spawn bridge: install order preserves both timestamps under monotonic-cap'
     updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
     const baseDelay = 50;
 
-    const childData = { x: 10, velocityX: 200 };
+    const childData = { x: 20, velocityX: 200 };
     const childValidAt = 1100;
     const childState = newState();
     installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
@@ -610,13 +649,15 @@ test('spawn bridge: simultaneous-time fallback (bridge == authority validAt)', (
  * Mirror of the production bridge's conditional angle override.
  * Fracture children store vertices already in world-aligned frame (angle=0
  * structurally); disk children inherit parent.angle (polygon regenerated).
+ *
+ * x/y back-projection is exercised by the installSpawnBridge tests above;
+ * this helper is intentionally simplified to focus on the angle conditional.
  */
 function buildBridgeData(childData, parentInterp) {
     const isFractureChild = Array.isArray(childData.vertices) && childData.vertices.length > 0;
     return {
         ...childData,
-        x: parentInterp.x,
-        y: parentInterp.y,
+        // x/y omitted here on purpose — back-projection is tested elsewhere.
         ...(isFractureChild ? {} : { angle: parentInterp.angle }),
     };
 }
@@ -633,8 +674,6 @@ test('spawn bridge: fracture child preserves angle=0 (no double-rotation)', () =
     const parentInterp = { x: 5, y: 15, angle: 1.234, velocityX: 100 };
     const bridge = buildBridgeData(childData, parentInterp);
 
-    assert.equal(bridge.x, 5, 'bridge.x = parent_pos');
-    assert.equal(bridge.y, 15, 'bridge.y = parent_pos');
     assert.equal(bridge.angle, 0, 'fracture child bridge.angle MUST stay 0 to avoid double-rotation');
     assert.deepEqual(bridge.vertices, childData.vertices, 'vertices passed through');
 });
@@ -662,6 +701,133 @@ test('spawn bridge: empty vertices array treated as disk (defensive)', () => {
     const parentInterp = { x: 5, y: 15, angle: 0.9 };
     const bridge = buildBridgeData(childData, parentInterp);
     assert.equal(bridge.angle, 0.9, 'empty vertices array → angle override applies');
+});
+
+// ── Fragment-centroid back-projection (the dominant remote-spawn glitch) ──
+
+test('spawn bridge: fracture child position back-projects from child.data along parent velocity', () => {
+    // The bug: in splitAsteroid, fracture children have child.data.x =
+    // parent.x_at_validAt + fragment_centroid. Vertices are stored in the
+    // child-relative frame (centroid at origin, parent rotation pre-applied).
+    // The polygon's WORLD vertices are therefore:
+    //   world_vertex_i = bridge.x + (vertex_i_local).
+    // For visual continuity at bridge.time, the polygon's world vertices
+    // must coincide with where they were on the parent — which means
+    // bridge.x must equal parent.x_at_bridgeTime + fragment_centroid.
+    // The OLD anchor (bridge.x = parent_interp.x) gave bridge.x =
+    // parent.x_at_bridgeTime, MISSING the centroid → polygon teleported by
+    // -centroid for the first ~3 frames of the bridge interval.
+    // The NEW formula (bridge.x = child.x - parent.vel * timeDiff)
+    // recovers parent.x_at_bridgeTime + centroid because:
+    //   child.x = parent.x_at_validAt + centroid
+    //   parent.x_at_validAt - parent.vel * timeDiff = parent.x_at_bridgeTime
+    //   ⇒ bridge.x = parent.x_at_bridgeTime + centroid. ✓
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock); // parent at validAt=1100: x=20
+    const baseDelay = 50; // bridge.time = 950, parent_interp.x = 5
+
+    // Fracture child with centroid offset cx = 3:
+    //   child.x = parent.x_at_validAt(1100) + cx = 20 + 3 = 23.
+    const childData = {
+        x: 23, velocityX: 200,
+        vertices: [{ angle: 0, distance: 1 }, { angle: 1, distance: 1 }, { angle: 2, distance: 1 }],
+    };
+    const childValidAt = 1100;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    // Expected bridge.x = child.x - parent.vel * timeDiff
+    //                   = 23 - 100 * 0.15 = 8 = parent_interp.x(5) + centroid(3).
+    assert.equal(childState.snapshots[0].data.x, 8,
+        'bridge.x must include the fragment centroid offset (parent_interp.x + cx)');
+    // Centroid teleport check: with the OLD formula bridge.x would be 5
+    // (parent_interp.x), causing the polygon to render at world position
+    // 5 + vertex_local instead of 8 + vertex_local — a -3 unit (in
+    // normalized coords) teleport for the first ~3 frames of the bridge
+    // interval. The new formula eliminates this teleport.
+    assert.notEqual(childState.snapshots[0].data.x, 5,
+        'NOT the old (parent_interp.x) anchor — that would teleport the polygon by -cx');
+});
+
+test('spawn bridge: disk child (centroid=0) bridge.x reduces to parentInterp.x (no regression)', () => {
+    // Sanity check: for disk children the centroid offset is zero, so
+    // child.x = parent.x_at_validAt and bridge.x = child.x - parent.vel ×
+    // timeDiff = parent_interp.x exactly. Same value as the OLD formula.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50; // parent_interp.x = 5
+
+    // Disk child (no vertices array): child.x = parent.x_at_validAt(1100) = 20.
+    const childData = { x: 20, velocityX: 200 };
+    const childValidAt = 1100;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    // bridge.x = 20 - 100 * 0.15 = 5 = parent_interp.x. No regression.
+    assert.equal(childState.snapshots[0].data.x, 5,
+        'disk child: bridge.x reduces to parent_interp.x exactly (no regression)');
+});
+
+test('spawn bridge: high-latency case uses child.velocity for back-projection', () => {
+    // For high-latency (bridge after auth), the fragment is already on its
+    // post-collision trajectory at bridge.time. Forward-projecting along
+    // child.vel from authoritative position yields the physically-correct
+    // child position at bridge.time.
+    const clock = makeClock({ offsetMs: 0, wallClockNow: 1300, perfStart: 1300 });
+    const parentState = newState();
+    updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+    const baseDelay = 50; // bridge.time = 1250
+
+    const childData = { x: 10, velocityX: 50 }; // disk: child.x = parent.x_at_1000 = 10
+    const childValidAt = 1000;
+    const childState = newState();
+    installSpawnBridge(parentState, childState, childData, childValidAt, baseDelay, clock);
+
+    // bridge.x = 10 - 50 * (1000-1250)/1000 = 10 + 12.5 = 22.5.
+    // Physically-correct: child has been moving at vx=50 for 250ms post-
+    // collision, so it's at 10 + 50*0.25 = 22.5 at bridge.time.
+    // Bridge snapshot is at index 1 (newer than auth in install order).
+    assert.equal(childState.snapshots[1].data.x, 22.5,
+        'high-latency: bridge.x uses child.velocity for forward projection');
+});
+
+test('spawn bridge: bridge.velocityX = parent.vel for LAN, child.vel for high-latency', () => {
+    // Bridge snapshot's velocity drives Hermite tangent (LAN bracket) and
+    // extrapolation past bridge (high-latency). LAN should use parent.vel
+    // so the tangent matches parent's last-rendered motion; high-latency
+    // should use child.vel so the past-bridge extrapolation walks along
+    // the authoritative trajectory.
+
+    // LAN case: bridge before auth.
+    {
+        const clock = makeClock({ offsetMs: 0, wallClockNow: 1000, perfStart: 1000 });
+        const parentState = newState();
+        updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+        const childData = { x: 20, velocityX: 200 };
+        const childState = newState();
+        installSpawnBridge(parentState, childState, childData, 1100, 50, clock);
+        // snapshots[0] = bridge (LAN: bridge first)
+        assert.equal(childState.snapshots[0].velocity.x, 100,
+            'LAN: bridge.velocityX = parent.velocity');
+        assert.equal(childState.snapshots[1].velocity.x, 200,
+            'LAN: authority.velocityX = child.velocity (unchanged)');
+    }
+    // High-latency case: bridge after auth.
+    {
+        const clock = makeClock({ offsetMs: 0, wallClockNow: 1300, perfStart: 1300 });
+        const parentState = newState();
+        updateState(parentState, { x: 0, velocityX: 100 }, 900, clock);
+        const childData = { x: 10, velocityX: 50 };
+        const childState = newState();
+        installSpawnBridge(parentState, childState, childData, 1000, 50, clock);
+        // snapshots[1] = bridge (high-latency: bridge second)
+        assert.equal(childState.snapshots[1].velocity.x, 50,
+            'high-latency: bridge.velocityX = child.velocity');
+        assert.equal(childState.snapshots[0].velocity.x, 50,
+            'high-latency: authority.velocityX = child.velocity (unchanged)');
+    }
 });
 
 // ── Hermite angle short-circuit (fracture-bridge mid-curve glitch) ────────

@@ -5991,6 +5991,12 @@
                     const renderTime = performance.now();
                     const parentInterp = RemoteObjects.getInterpolated(deletedObjectId, renderTime);
                     if (!parentInterp) return;
+
+                    // Velocity-based back-projection scales for normalized x/y.
+                    const refDim = getReferenceDimension();
+                    const velScaleX = refDim / getGameWidth();
+                    const velScaleY = refDim / getGameHeight();
+
                     for (const child of createdObjects) {
                         // Skip locally-owned children — local game physics drives
                         // their position, not the interpolator.
@@ -5999,35 +6005,64 @@
                         // currently displaying objects from this owner".
                         const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
                         const bridgeValidAt = Math.round(RemoteObjects.serverNowMs() - delay);
+                        const childValidAt = child.validAt ?? validAt;
+                        const timeDiffSec = (childValidAt - bridgeValidAt) / 1000;
+                        const bridgeIsBeforeAuth = bridgeValidAt <= childValidAt;
+
+                        // Velocity used both as the back-projection anchor for
+                        // bridge.x/y and as the bridge snapshot's velocity:
+                        //   - LAN (bridge before auth): pre-split state — fragment
+                        //     was moving with PARENT's velocity. Storing parent's
+                        //     velocity also makes the Hermite tangent at the bridge
+                        //     end match parent's motion, so the bracket [bridge,
+                        //     auth] smoothly transitions from parent_vel at t=0 to
+                        //     child_vel at t=1.
+                        //   - High-latency (bridge after auth): post-split state —
+                        //     fragment is already on its child trajectory. Storing
+                        //     child's velocity drives the extrapolation past the
+                        //     bridge (which becomes the latest snapshot) along the
+                        //     authoritative trajectory.
+                        const bridgeVx = bridgeIsBeforeAuth
+                            ? (parentInterp.velocityX || 0)
+                            : (child.data.velocityX || 0);
+                        const bridgeVy = bridgeIsBeforeAuth
+                            ? (parentInterp.velocityY || 0)
+                            : (child.data.velocityY || 0);
+
+                        // Back-project child's authoritative COM by `bridgeV` over
+                        // the bridge interval. For DISK children (cx=cy=0 in
+                        // splitAsteroid), this reduces to parent.x_at_bridgeTime
+                        // exactly. For FRACTURE children the result includes the
+                        // fragment's centroid offset so the polygon's WORLD
+                        // VERTICES align with where they were on the parent at
+                        // bridge.time. Without this, bridge.x = parentInterp.x
+                        // produced a visible "centroid teleport" — the fragment
+                        // polygon rendered offset by ~0.68 × centroid for the
+                        // first ~3 frames of the bridge interval (the dominant
+                        // remote-spawn glitch).
+                        const bridgeX = child.data.x - bridgeVx * velScaleX * timeDiffSec;
+                        const bridgeY = child.data.y - bridgeVy * velScaleY * timeDiffSec;
+
                         // Angle override is conditional: fracture children store
                         // vertices already in world-aligned frame (parent rotation
                         // pre-applied) and use angle=0 structurally. Overriding
                         // their angle with parentInterp.angle would DOUBLE-rotate
-                        // the rendered polygon during the bridge interval,
-                        // producing a visible spawn glitch. Disk children (no
-                        // vertices array, polygon regenerated from seed) carry
-                        // angle = parent's angle at collision and DO benefit
-                        // from a parentInterp.angle bridge for smooth angular
-                        // continuity.
+                        // the rendered polygon during the bridge interval. Disk
+                        // children (no vertices array, polygon regenerated from
+                        // seed) carry angle = parent's angle at collision and DO
+                        // benefit from a parentInterp.angle bridge for smooth
+                        // angular continuity.
                         const isFractureChild = Array.isArray(child.data.vertices)
                             && child.data.vertices.length > 0;
                         const bridgeData = {
                             ...child.data,
-                            x: parentInterp.x,
-                            y: parentInterp.y,
+                            x: bridgeX,
+                            y: bridgeY,
+                            velocityX: bridgeVx,
+                            velocityY: bridgeVy,
                             ...(isFractureChild ? {} : { angle: parentInterp.angle }),
-                            // Keep child's velocity/rotationSpeed so:
-                            //   - LAN bracket [bridge, auth] interpolates linearly
-                            //     from parent_pos to auth_pos (endpoint-driven; the
-                            //     velocity tangent is the same at both ends, no
-                            //     spurious spline overshoot).
-                            //   - High-latency extrapolate-past-bridge arm uses
-                            //     CHILD'S velocity, so the renderer walks toward
-                            //     the authoritative trajectory rather than drifting
-                            //     in parent's direction.
                         };
-                        const childValidAt = child.validAt ?? validAt;
-                        if (bridgeValidAt <= childValidAt) {
+                        if (bridgeIsBeforeAuth) {
                             // LAN: bridge older than authority → bridge first.
                             RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt);
                             RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt);
