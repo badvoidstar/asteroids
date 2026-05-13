@@ -6865,31 +6865,23 @@
         }
         if (info.migratedObjects && info.migratedObjects.length > 0) {
             ObjectSync.handleOwnershipMigration(info.migratedObjects);
-            // Migration handoff: if any of the migrated objects are now
-            // locally owned, seed the local game-object's
-            // position/velocity/angle from the interpolator's leading-edge
-            // projection (latest snapshot extrapolated to "now"). The
-            // local puppet asteroid was being driven by the delayed
-            // interpolated position; if we promote that delayed position
-            // straight into our authoritative state, the next frame of
-            // updates would land BEHIND where observers were expecting it
-            // — they'd see motion stall as their bracket flattens between
-            // the previous owner's last snap and our delayed first snap.
-            // Seeding from the leading-edge projection means our first
-            // authored snap matches the constant-velocity extrapolation
-            // observers were already drawing, so motion flows continuously.
-            const myMemberId = SessionClient.getCurrentMember()?.id;
-            if (myMemberId) {
-                for (const migration of info.migratedObjects) {
-                    if (migration.newOwnerId !== myMemberId) continue;
-                    const asteroid = game.astervoids.find(a => a.syncObjectId === migration.objectId);
-                    if (!asteroid) continue;
-                    const seed = RemoteObjects.getMigrationSeed(migration.objectId);
-                    if (seed) {
-                        asteroid.fromSyncData(seed);
-                    }
-                }
-            }
+            // Migration handoff: deliberately do NOT re-anchor the local
+            // puppet asteroid to a forward-projected position. The puppet
+            // was being rendered from the interpolator (a delayed/extrap
+            // value), and the next local frame's asteroid.update(dt) will
+            // simply step that position by v·dt. That's continuous on the
+            // new owner's screen — exactly matching the prior frame's
+            // render, with no one-frame jump.
+            //
+            // Earlier versions of this code seeded asteroid.x to
+            // RemoteObjects.getMigrationSeed(...) (latest snap extrapolated
+            // to "now") in an attempt to keep observers' brackets aligned
+            // with constant-velocity extrapolation. In practice this caused
+            // a visible one-frame discontinuity on the new owner's view
+            // (a forward jump of ~delay·v) with no observable benefit on
+            // observers (their bracket slope deviates only slightly when
+            // the seed is omitted, which is well below the visual threshold
+            // for the velocities and delays this game uses).
         }
     });
 
