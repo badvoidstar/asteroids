@@ -240,16 +240,16 @@
             {
                 key: 'ASTEROID_MAX_SPEED',
                 label: 'Asteroid max linear speed',
-                min: 0, max: 5, step: 0.05, default: 0.8,
-                fmt: v => v.toFixed(2),
-                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.8 matches the ship cap. 0 = no cap. Applied after split impulses so chains of close-range hits cannot compound past the limit.',
+                min: 0, max: 2, step: 0.025, default: 0.8,
+                fmt: v => v.toFixed(3),
+                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.8 matches the ship cap. Realistic asteroid speeds in normal play peak around 0.4–0.6 (initial spawn ≈ 0.15–0.25 plus ~0.09 added per split via SEPARATION_ENERGY); to see visible capping you typically need to drag below 0.5. 0 = no cap. Note: only locally-owned asteroids are clamped — in multiplayer this affects the asteroids you currently own; remote ones reflect their owner\'s setting.',
             },
             {
                 key: 'ASTEROID_MAX_SPIN',
                 label: 'Asteroid max spin (rad/frame)',
-                min: 0, max: 2, step: 0.01, default: Math.PI / 6,
+                min: 0, max: 1, step: 0.005, default: Math.PI / 6,
                 fmt: v => `${v.toFixed(3)} (${(v * 60 / (2 * Math.PI)).toFixed(2)} rot/s)`,
-                help: 'Per-frame cap on |rotationSpeed| of locally-owned asteroids (same units as SHIP_TURN_SPEED — radians per 60fps frame). Default π/6 ≈ 0.524 corresponds to 5 full rotations per second. 0 = no cap.',
+                help: 'Per-frame cap on |rotationSpeed| of locally-owned asteroids (same units as SHIP_TURN_SPEED — radians per 60fps frame). Default π/6 ≈ 0.524 corresponds to 5 full rotations per second. 0 = no cap. Only affects locally-owned asteroids.',
             },
             {
                 key: 'DEFLECTION_KICK',
