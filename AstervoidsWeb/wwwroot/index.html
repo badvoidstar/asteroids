@@ -1018,6 +1018,15 @@
         ASTEROID_BASE_COUNT: 1,     // Starting astervoids in wave 1
         ASTEROID_BASE_SPEED: 0.15,  // Base asteroid speed per second (normalized)
         ASTEROID_SPEED_VARIANCE: 0.1, // Random speed variation (normalized)
+        // Per-frame caps applied to locally-owned asteroids in Asteroid.update().
+        // ASTEROID_MAX_SPEED uses the same units as SHIP_MAX_SPEED (normalized
+        // reference-dim per second). ASTEROID_MAX_SPIN uses the same units as
+        // SHIP_TURN_SPEED (radians per 60fps frame); the default π/6 corresponds
+        // to 5 full rotations per second (5 · 2π rad/s ÷ 60 frames/s = π/6).
+        // Caps apply after split impulses, so chains of close-range hits can no
+        // longer compound velocity/spin past these limits.
+        ASTEROID_MAX_SPEED: 0.4,
+        ASTEROID_MAX_SPIN: Math.PI / 6,
         ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
         ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
         MIN_ASTEROID_RADIUS: 0.025, // Min radius before no split (normalized)
@@ -1071,9 +1080,11 @@
         MASS_SPLIT_BIAS: 0.6,
 
         // ─── Fracture geometry (visual + clip) ──────────────────────────────
-        // Master switch for fracture split logic. OFF by default so the legacy
-        // disk split path is preserved unless explicitly enabled (URL/session).
-        FRACTURE_ENABLED: false,
+        // Master switch for fracture split logic. ON by default so children of
+        // a split inherit the parent silhouette closed by a jagged fracture
+        // polyline. Set to false (or via URL/session override) to fall back to
+        // the legacy disk split path.
+        FRACTURE_ENABLED: true,
         // Children of a split inherit their parent's outer silhouette on their
         // side of the impact, and a jagged FRACTURE polyline closes the cut.
         // The number of intermediate jag-points along the fracture chord is
@@ -1154,20 +1165,16 @@
         ADAPTIVE_DELAY_SMOOTHING: 0.1, // EMA alpha for delay transitions (lower = smoother, 0.1 ≈ 10-sample convergence)
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
-        SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
-        MAX_EXTRAPOLATION: 1.0,        // Max extrapolation time in seconds to prevent overshoot
+        SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (in reference-dimension units, isotropic)
+        MAX_EXTRAPOLATION: 2.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
-        // When a freshly-created remote object has only one snapshot the
-        // interpolator runs at zero buffered delay (leading edge) so the
-        // object is dead-reckoned forward from its broadcast velocity/
-        // rotationSpeed instead of freezing on the spawn pixel for one
-        // buffer-delay. The arrival of the 2nd snapshot then needs to switch
-        // to buffered (baseDelay-behind) output; doing so naively snaps the
-        // rendered position backward by ~v·(baseDelay + net_delay). Instead
-        // we capture that visual delta on the 1→2 transition and decay it
-        // linearly to zero over this window — output stays continuous across
-        // the transition and forward velocity quietly absorbs the offset.
-        SPAWN_CATCHUP_DURATION: 300,   // ms over which the renderError visual offset decays to zero
+        // Spawn-bridge: on OnObjectReplaced (e.g. asteroid split), synthesize an
+        // additional snapshot at "local render time" carrying the parent's last
+        // interpolated position with the child's identity. Bracket-search then
+        // interpolates from parent_pos → child authority_pos over one display
+        // delay, eliminating the position discontinuity at spawn.
+        // 1 = enabled (default), 0 = disabled (revert to single-authority install).
+        SPAWN_BRIDGE_ENABLED: 1,
     };
 
     function parseBooleanLike(value) {
@@ -1331,6 +1338,13 @@
         clock: {
             offsetMs: 0,
             offsetInitialized: false,
+            // Difference between performance.now() and Date.now() captured at
+            // each ping burst. Used by validAtToPerfNow to convert server-time
+            // ms (the unified interpolation axis) into the perf.now domain
+            // that bracket-search runs in. Refreshed every ping so OS-level
+            // wall-clock slewing (NTP daemon) doesn't drift the snapshot key
+            // off the bracket axis. ~ms-stable over hours in practice.
+            wallToPerfDelta: null,
             lastSampleRtt: Infinity,
             sampleCount: 0,
             rejectedCount: 0,
@@ -1389,13 +1403,24 @@
         },
 
         /**
-         * Create a fresh adaptive delay state for a member
+         * Create a fresh adaptive delay state for a member.
+         *
+         * `packetIntervals` tracks server-side packet spacing (used by the
+         * legacy interval-based estimate as a fallback). `lagSamples` is the
+         * preferred metric: arrivalServerTime − sampleTime (validAt) per
+         * snapshot, which directly measures the send-jitter + queue delay
+         * the owner is currently injecting into our render axis. When we have
+         * enough lagSamples we compute `rawDelay = lagMean + JITTER_MULT ×
+         * lagStddev + intervalStddev` so the renderer always trails the
+         * owner by enough to cover their worst recent jitter.
          */
         createMemberDelay() {
             return {
                 packetIntervals: [],
+                lagSamples: [],
                 computedDelay: CONFIG.INTERPOLATION_DELAY,
                 lastServerTimestamp: 0,
+                lastValidAt: 0,
                 remoteSendInterval: 0
             };
         },
@@ -1418,16 +1443,42 @@
          * @param {string} objectId - Object ID
          * @param {object} data - New object data from ObjectSync
          * @param {string} ownerMemberId - Owner member ID (for per-member delay lookup)
-         * @param {number} [arrivalTime] - Wall-clock time the data actually arrived
-         *   from the network (performance.now()-domain). Defaults to now() if omitted,
-         *   but callers should pass the value captured by ObjectSync's network
-         *   handler so the snapshot is anchored to true arrival time and not to
-         *   the next game-loop frame's detection time. The latter introduces 0–16ms
-         *   of variable jitter that produces visible discontinuities at each
-         *   snapshot boundary during interpolation/extrapolation handoff.
+         * @param {number} [validAt] - Owner-stamped server-time ms (NTP-aligned),
+         *   resolved by the server (clamped clientValidAt or hub-entry fallback).
+         *   This is THE unified interpolation axis. Converted to perf.now-domain
+         *   via validAtToPerfNow so bracket-search remains on a monotonic clock
+         *   while the snapshot key encodes the global server-time agreement —
+         *   network jitter no longer enters the snapshot key.
+         *   When omitted (legacy callers), falls back to performance.now() which
+         *   anchors the snapshot to receiver-local time as before.
+         * @param {number} [arrivalServerTime] - Receiver's server-time estimate
+         *   captured INSIDE the SignalR event handler (object-sync.js stamps it
+         *   on `obj.arrivalServerTime`). Used as the "now" reference for the
+         *   lag-based adaptive-delay sample so the sample reflects only
+         *   network/queue delay, not game-loop processing latency. Falls back
+         *   to `this.serverNowMs()` when not provided.
+         * @param {boolean} [recordSample=true] - When false, the snapshot is
+         *   pushed into the bracket buffer but NOT fed into the lag-based
+         *   adaptive delay metric. Used for synthetic spawn-bridge snapshots
+         *   whose validAt is back-projected (`serverNowMs - delay`) — sampling
+         *   them would create a positive feedback loop where each spawn nudges
+         *   the computed delay up toward the current delay value.
          */
-        updateState(objectId, data, ownerMemberId, arrivalTime) {
-            const now = (arrivalTime != null) ? arrivalTime : performance.now();
+        updateState(objectId, data, ownerMemberId, validAt, arrivalServerTime, recordSample = true) {
+            const now = (validAt != null)
+                ? this.validAtToPerfNow(validAt)
+                : performance.now();
+            // Per-object lag observation (Phase B): the cleanest signal of
+            // owner→receiver delay. Skipped silently when clock isn't
+            // initialized yet (serverNowMs would be a guess). Bridge snapshots
+            // pass recordSample=false to avoid biasing the metric with
+            // synthetic timestamps. arrivalServerTime is preferred over
+            // serverNowMs() because it was captured at the SignalR event
+            // boundary, not after game-loop dispatch.
+            if (recordSample && validAt != null && ownerMemberId && this.isClockOffsetInitialized()) {
+                const arrival = (arrivalServerTime != null) ? arrivalServerTime : this.serverNowMs();
+                this.recordObjectSample(ownerMemberId, validAt, arrival);
+            }
             const existing = this.states.get(objectId);
             const snapshot = {
                 data: { ...data },
@@ -1438,63 +1489,15 @@
             
             if (existing) {
                 existing.ownerMemberId = ownerMemberId;
-                // Keep snapshots strictly monotonic in time. If a caller passes
-                // an arrivalTime older than the most recent snapshot (e.g. due
-                // to clock skew between batches or out-of-order frame
-                // detection), advance to the latest known time so the bracket
-                // search stays valid.
+                // Keep snapshots strictly monotonic in time. With validAt as
+                // the source axis this is a tight invariant (owner serverNowMs
+                // is monotonic modulo NTP slewing, which is far below send
+                // interval), but we still guard against pathological reorders
+                // (e.g. SignalR delivering a delayed older batch after a fresh
+                // one) so the bracket search stays valid.
                 const latest = existing.snapshots[existing.snapshots.length - 1];
                 if (latest && snapshot.time < latest.time) {
                     snapshot.time = latest.time;
-                }
-                // On the 1→2 snapshot transition, the interpolator switches
-                // from leading-edge extrapolation (delay=0) to buffered output
-                // (delay=baseDelay). The instantaneous models disagree by
-                // ~v·(baseDelay + net_delay) and would yank the rendered
-                // position backward in a single frame. Capture that visual
-                // offset BEFORE pushing the new snapshot, then again AFTER,
-                // and store the delta on the state. getInterpolated decays it
-                // to zero over SPAWN_CATCHUP_DURATION so the rendered output
-                // remains continuous (no backward snap) while forward velocity
-                // smoothly absorbs the offset.
-                if (existing.snapshots.length === 1 && existing.renderError == null) {
-                    const prev = this.getInterpolated(objectId, snapshot.time);
-                    existing.snapshots.push(snapshot);
-                    if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
-                        existing.snapshots.shift();
-                    }
-                    // Install a zero-valued sentinel renderError so the base
-                    // interpolator uses the catchup-ramp model (effectiveDelay
-                    // = baseDelay·progress, which is 0 at progress=0 → leading
-                    // edge from the freshest snapshot) when computing `next`
-                    // below. Without this sentinel, the capture call would see
-                    // renderError=null and return the post-window bracket
-                    // value, causing the wrong offset to be captured.
-                    // Overwritten with real values immediately.
-                    existing.renderError = { x: 0, y: 0, angle: 0, startTime: snapshot.time };
-                    const next = this.getInterpolated(objectId, snapshot.time);
-                    if (prev && next && prev.x !== undefined && next.x !== undefined) {
-                        const dx = prev.x - next.x;
-                        const dy = (prev.y || 0) - (next.y || 0);
-                        // Skip smoothing when the delta suggests a screen-wrap
-                        // teleport (normalized coords are in [0,1]; a real
-                        // motion-induced offset in 50ms is far below 0.5).
-                        // Smoothing across a wrap would slowly drag the object
-                        // back across the screen — far worse than just snapping.
-                        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
-                            existing.renderError = {
-                                x: dx,
-                                y: dy,
-                                angle: (prev.angle || 0) - (next.angle || 0),
-                                startTime: snapshot.time
-                            };
-                        } else {
-                            existing.renderError = null;
-                        }
-                    } else {
-                        existing.renderError = null;
-                    }
-                    return;
                 }
                 existing.snapshots.push(snapshot);
                 if (existing.snapshots.length > CONFIG.SNAPSHOT_BUFFER_SIZE) {
@@ -1503,8 +1506,7 @@
             } else {
                 this.states.set(objectId, {
                     ownerMemberId: ownerMemberId,
-                    snapshots: [snapshot],
-                    renderError: null
+                    snapshots: [snapshot]
                 });
             }
         },
@@ -1573,14 +1575,81 @@
         },
 
         /**
-         * Record a packet interval for a specific member's adaptive delay
+         * Record a packet interval for a specific member's adaptive delay.
+         * Used when the lag-based estimate doesn't have enough samples yet
+         * (warm-up window). Once `lagSamples` reaches MIN_SAMPLES the
+         * lag-based path in `recomputeAdaptiveDelay` takes precedence.
          */
         recordMemberPacketInterval(ad, interval) {
             ad.packetIntervals.push(interval);
             if (ad.packetIntervals.length > CONFIG.ADAPTIVE_DELAY_SAMPLES) {
                 ad.packetIntervals.shift();
             }
-            if (ad.packetIntervals.length >= CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES) {
+            this.recomputeAdaptiveDelay(ad);
+        },
+
+        /**
+         * Record an owner-stamped sample (validAt) and the receiver's server-time
+         * estimate of when it arrived. The lag = arrival − validAt is the most
+         * direct measure of the send-jitter + queue delay we need to cover with
+         * interpolation delay; it absorbs send-interval skew, NTP-residual, and
+         * network queue depth all in one number.
+         *
+         * Skipped when the receiver clock isn't initialized (offset would be
+         * meaningless) or when validAt is missing on a snapshot.
+         */
+        recordObjectSample(memberId, validAt, arrivalServerTime) {
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
+            if (!memberId || validAt == null || arrivalServerTime == null) return;
+            const ad = this.getMemberDelay(memberId);
+            const lag = arrivalServerTime - validAt;
+            if (!Number.isFinite(lag) || lag < 0 || lag > 5000) return;
+            ad.lagSamples.push(lag);
+            if (ad.lagSamples.length > CONFIG.ADAPTIVE_DELAY_SAMPLES) {
+                ad.lagSamples.shift();
+            }
+            // Track per-member sample-time monotonicity → packet-interval fallback.
+            if (ad.lastValidAt > 0) {
+                const interval = validAt - ad.lastValidAt;
+                if (interval > 0 && interval < 5000) {
+                    this.recordMemberPacketInterval(ad, interval);
+                } else {
+                    this.recomputeAdaptiveDelay(ad);
+                }
+            } else {
+                this.recomputeAdaptiveDelay(ad);
+            }
+            ad.lastValidAt = validAt;
+        },
+
+        /**
+         * Recompute `ad.computedDelay` from current sample buffers. Lag-based
+         * path takes priority once we have ≥ MIN_SAMPLES lag observations:
+         * delay covers lag mean + JITTER_MULT × lag stddev, plus an
+         * additional interval-stddev cushion to stay ahead of bursty send
+         * spacing. Falls back to the interval-based formula during warm-up.
+         */
+        recomputeAdaptiveDelay(ad) {
+            const minSamples = CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES;
+            const useLagBased = ad.lagSamples.length >= minSamples;
+
+            if (useLagBased) {
+                const lagMean = ad.lagSamples.reduce((s, v) => s + v, 0) / ad.lagSamples.length;
+                const lagVar = ad.lagSamples.reduce((s, v) => s + (v - lagMean) ** 2, 0) / ad.lagSamples.length;
+                const lagStddev = Math.sqrt(lagVar);
+                let intervalStddev = 0;
+                if (ad.packetIntervals.length >= minSamples) {
+                    const iMean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
+                    const iVar = ad.packetIntervals.reduce((s, v) => s + (v - iMean) ** 2, 0) / ad.packetIntervals.length;
+                    intervalStddev = Math.sqrt(iVar);
+                }
+                const rawDelay = Math.max(CONFIG.ADAPTIVE_DELAY_MIN,
+                    lagMean + CONFIG.ADAPTIVE_DELAY_JITTER_MULT * lagStddev + intervalStddev);
+                ad.computedDelay += CONFIG.ADAPTIVE_DELAY_SMOOTHING * (rawDelay - ad.computedDelay);
+                return;
+            }
+
+            if (ad.packetIntervals.length >= minSamples) {
                 const observedMean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - observedMean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
@@ -1648,6 +1717,32 @@
          */
         serverNowMs() {
             return Date.now() + this.clock.offsetMs;
+        },
+
+        /**
+         * Convert an owner-stamped server-time ms (the unified interpolation
+         * axis) into the receiver's performance.now() domain so it can be used
+         * as a snapshot key in the bracket-search ring buffer.
+         *
+         *   server_time_ms = Date.now() + offsetMs
+         *   wall_time_ms   = server_time_ms - offsetMs
+         *   perf_now_ms    = wall_time_ms + (perf.now - Date.now)
+         *
+         * If the offset isn't yet initialized we still produce a usable value
+         * by assuming offsetMs=0 — at worst a few-ms visual offset that snaps
+         * to the right place on the first ping burst. If wallToPerfDelta is
+         * missing we compute it on the fly.
+         *
+         * @param {number} validAt - Owner-stamped server-time ms (NTP-aligned)
+         * @returns {number} performance.now-domain ms equivalent
+         */
+        validAtToPerfNow(validAt) {
+            if (validAt == null || !isFinite(validAt)) return performance.now();
+            const delta = (this.clock.wallToPerfDelta != null)
+                ? this.clock.wallToPerfDelta
+                : (performance.now() - Date.now());
+            const offset = this.clock.offsetInitialized ? this.clock.offsetMs : 0;
+            return validAt - offset + delta;
         },
 
         /**
@@ -1745,6 +1840,11 @@
                     this.clock.offsetMs, candidate, this.clock.emaAlpha);
             }
             this.clock.lastSampleRtt = winner.rtt;
+            // Refresh wallToPerfDelta on every accepted burst. Stable to within
+            // a few ms over hours but the OS may slew Date.now() (NTP daemon)
+            // while perf.now() continues monotonic, so capping drift to one
+            // refresh interval keeps the snapshot-key conversion honest.
+            this.clock.wallToPerfDelta = performance.now() - Date.now();
             this.clock.sampleCount++;
             return winner;
         },
@@ -1828,52 +1928,42 @@
             this.clock.loopPromise = null;
         },
 
-        // ── Spawn-position projection (Phase 2 of spawn-latency fix) ──────
+        // ── Local-owner spawn projection helpers ───────────────────────────
         //
-        // When OnObjectReplaced delivers child objects (e.g. asteroid splits),
-        // the snapshot data carries the parent's position at T_collision in
-        // SERVER TIME. Without projection:
-        //   * The shooter sees the parent move locally for ~RTT, then the
-        //     children pop into existence at the older position.
-        //   * Other observers see the children appear at the snapshot data
-        //     position, which is roughly per_member_delay-velocity ahead of
-        //     where their bracket-interpolated parent was rendered.
+        // After validAt unification, REMOTE observers no longer need spawn
+        // projection — the bracket-search/extrapolate path on the validAt
+        // axis handles spawn timing automatically because snap[0].time is
+        // the owner's authored timeline.
         //
-        // computeSpawnStaleness returns the seconds to forward-extrapolate a
-        // child from data.x at spawnServerTime to "where the parent was being
-        // rendered the moment before the split" on this client. Two distinct
-        // formulas — see comments below.
-        //
-        // staleness can be negative for remote-owned children (when a client's
-        // per_member_delay exceeds network latency, the parent was being
-        // rendered slightly behind T_collision in server time). Capped to
-        // ±MAX_EXTRAPOLATION to avoid runaway projection from a poor clock
-        // estimate.
+        // The LOCAL OWNER (e.g. the shooter who fired the bullet that split
+        // an asteroid) still needs forward projection: their local game
+        // object is created when the OnObjectReplaced echo lands, ~RTT after
+        // the collision. Without projection, the local Asteroid would start
+        // ~RTT * velocity behind where it should be in the local sim. These
+        // helpers compute that forward correction. Used only by
+        // updateAstervoidsFromSync's adopt branch.
 
         /**
-         * Pure: computes the projection time (seconds) for a spawn event.
-         * For locally-owned children, ownerDelaySec should be 0 (shooter
-         * renders own objects in real time without delay). For remote-owned
-         * children, ownerDelaySec is the per-member display delay for the
-         * owner's stream from this client's perspective.
+         * Pure: compute the seconds to forward-extrapolate an owner-authored
+         * spawn snapshot from validAt to "right now" in server time. Capped
+         * to ±MAX_EXTRAPOLATION to avoid runaway projection from a poor
+         * clock estimate.
          */
-        computeSpawnStaleness(serverNowMsValue, spawnServerTime, ownerDelaySec) {
-            const elapsedSec = (serverNowMsValue - spawnServerTime) / 1000;
-            const stalenessSec = elapsedSec - ownerDelaySec;
+        computeSpawnStaleness(serverNowMsValue, validAt) {
+            const elapsedSec = (serverNowMsValue - validAt) / 1000;
             const cap = CONFIG.MAX_EXTRAPOLATION;
-            if (stalenessSec > cap) return cap;
-            if (stalenessSec < -cap) return -cap;
-            return stalenessSec;
+            if (elapsedSec > cap) return cap;
+            if (elapsedSec < -cap) return -cap;
+            return elapsedSec;
         },
 
         /**
          * Project a spawn data position forward (or backward) by
          * `stalenessSec` of constant-velocity motion, applying toroidal wrap
          * with the matching radius-aware margins. Mirrors the
-         * `_baseInterpolated` extrapolation branch (line ~1796) for the
-         * normalized-coordinate convention, so projected snapshots and
-         * subsequent interpolated snapshots remain in the same coordinate
-         * frame.
+         * `_baseInterpolated` extrapolation branch so projected snapshots
+         * and subsequent interpolated snapshots remain in the same
+         * coordinate frame.
          */
         projectSpawnData(data, stalenessSec) {
             if (!stalenessSec) return data;
@@ -1891,49 +1981,36 @@
         },
 
         /**
-         * Install the FIRST snapshot for a newly-spawned remote-owned object,
-         * with its position projected to where the parent was being rendered
-         * at the spawn moment on this client. Called from the
-         * `onObjectReplaced` handler (index.html → connectToSessionHub).
+         * Compute the seed state to install on the local game-object when
+         * ownership of an interpolated remote object migrates to the local
+         * member (typically because the previous owner left the session).
          *
-         * spawnServerTime is the OWNER's clock-corrected estimate of "server
-         * time at collision detection" (set by the owner's
-         * ObjectSync.replaceObject and forwarded by SessionHub after a ±2s
-         * sanity clamp). When the owner's clock isn't yet initialized, the
-         * server falls back to its hub-entry timestamp; in that mode the
-         * projection is still correct modulo the owner's upload time.
+         * The seed is the latest snapshot's data forward-projected to "now"
+         * in server time (constant-velocity dead-reckoning). This is the
+         * extrapolation that every observer's bracket-search would arrive
+         * at over the next few frames — so once the new owner starts
+         * authoring updates with this position as the baseline, observers'
+         * bracket interpolation flows continuously from the previous owner's
+         * last snapshot to the new owner's first snapshot with no visible
+         * hiccup. Velocity, rotation and other non-positional fields are
+         * carried straight from the latest snapshot's data.
          *
-         * If our own clock offset hasn't initialized yet, we skip projection
-         * (no projection is better than wrong projection with a garbage
-         * offset). This is rare in practice — Phase 1's bootstrap burst
-         * lands well before the player's first shot.
-         *
-         * Idempotent: if a state already exists for this objectId, we no-op
-         * (the next updateState call from updateAstervoidsFromSync will push
-         * the second snapshot and the renderError smoother will engage).
+         * Returns null if no snapshots exist (object was just created and
+         * we never received an authored snapshot from any prior owner).
          */
-        spawnAt(objectId, data, ownerMemberId, spawnServerTime, arrivalTime) {
-            if (this.states.has(objectId)) return;
-            const canProject = this.clock.offsetInitialized && spawnServerTime != null;
-            let snapshotData = data;
-            if (canProject) {
-                const ownerDelaySec = (this.getDelayForMember(ownerMemberId) || 0) / 1000;
-                const stalenessSec = this.computeSpawnStaleness(
-                    this.serverNowMs(), spawnServerTime, ownerDelaySec);
-                snapshotData = this.projectSpawnData(data, stalenessSec);
-            }
-            this.updateState(objectId, snapshotData, ownerMemberId, arrivalTime);
-            // Mark this state NTP-anchored so the interpolator knows snap[0]
-            // already represents the observer's bracket-rendered timeline (via
-            // ownerDelay subtraction in computeSpawnStaleness). With this flag,
-            // _baseInterpolated uses delay=baseDelay even in single-snap mode
-            // (clamps to / extrapolates from projected position), reducing the
-            // 1→2 model-switch jump while the renderError smoother still runs
-            // to absorb any residual offset. Idea pulled from PR #87.
-            if (canProject) {
-                const state = this.states.get(objectId);
-                if (state) state.ntpAnchored = true;
-            }
+        getMigrationSeed(objectId) {
+            const state = this.states.get(objectId);
+            if (!state || state.snapshots.length === 0) return null;
+            const latest = state.snapshots[state.snapshots.length - 1];
+            // Convert the latest snapshot's perf.now-domain time back to
+            // server-time so we can compute staleness against serverNowMs().
+            const offset = this.clock.offsetInitialized ? this.clock.offsetMs : 0;
+            const delta = (this.clock.wallToPerfDelta != null)
+                ? this.clock.wallToPerfDelta
+                : (performance.now() - Date.now());
+            const latestValidAt = latest.time - delta + offset;
+            const stalenessSec = (this.serverNowMs() - latestValidAt) / 1000;
+            return this.projectSpawnData(latest.data, stalenessSec);
         },
 
         /**
@@ -1947,39 +2024,21 @@
         getInterpolated(objectId, renderTime) {
             const state = this.states.get(objectId);
             if (!state || state.snapshots.length === 0) return null;
-
-            const result = this._baseInterpolated(state, renderTime);
-
-            // Apply decaying render-error offset captured at the 1→2 snapshot
-            // transition (see updateState). At progress=0 the offset exactly
-            // cancels the model switch, keeping rendered position continuous;
-            // at progress=1 the offset is zero and we render the pure buffered
-            // interpolation. Forward velocity covers the offset over the
-            // window, so rendered motion is always forward (provided
-            // SPAWN_CATCHUP_DURATION ≥ baseDelay + net_delay, which holds for
-            // typical 100ms baseDelay and 100ms net_delay vs the 300ms window).
-            if (state.renderError && result) {
-                const elapsed = renderTime - state.renderError.startTime;
-                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
-                if (progress >= 1) {
-                    state.renderError = null;
-                } else {
-                    const w = 1 - progress;
-                    return {
-                        ...result,
-                        x: result.x + state.renderError.x * w,
-                        y: (result.y || 0) + state.renderError.y * w,
-                        angle: (result.angle || 0) + state.renderError.angle * w
-                    };
-                }
-            }
-            return result;
+            return this._baseInterpolated(state, renderTime);
         },
 
         /**
-         * Base interpolation: snapshot bracket-search + Hermite blend, with
-         * leading-edge extrapolation for the single-snapshot case. The
-         * render-error smoothing layer in getInterpolated wraps this output.
+         * Base interpolation: snapshot bracket-search + Hermite blend.
+         *
+         * After validAt unification the single-snap and multi-snap regimes
+         * live on the SAME server-time axis: snapshot.time is computed via
+         * validAtToPerfNow(validAt). With one snapshot, targetTime
+         * (= renderTime − baseDelay) typically lies before snapshot[0].time
+         * (the owner's authored moment is in the receiver's near future
+         * relative to its display delay), so bracket search clamps to
+         * snap[0].data and the receiver renders the spawn in place until
+         * either the next snapshot lands or extrapolation kicks in. No
+         * model switch, no renderError smoother needed.
          */
         _baseInterpolated(state, renderTime) {
             const snapshots = state.snapshots;
@@ -1989,45 +2048,7 @@
                 return latest.data;
             }
 
-            // Single snapshot → delay 0 (extrapolate from snapshot[0]).
-            // Otherwise → full per-member adaptive delay. The transition from
-            // 0 to baseDelay would normally yank position backward; the
-            // renderError smoothing layer in getInterpolated absorbs that.
-            //
-            // While the catchup smoother is active (state.renderError set), we
-            // ramp the effective delay smoothly from 0 (lead from the freshest
-            // known snapshot) at progress=0 to the full baseDelay (bracket
-            // regime) at progress=1. This achieves the "lead from snapshot[1]"
-            // accuracy improvement during catchup — eliminates the stale
-            // snap[0].velocity Hermite tangent and the receiver-arrival-timing
-            // jitter in timeDiff — while guaranteeing position continuity at
-            // the moment renderError clears (effectiveDelay = baseDelay matches
-            // the post-window bracket regime exactly, so no backward jump).
-            const baseDelay = this.getDelayForMember(state.ownerMemberId);
-            let delay;
-            if (snapshots.length === 1) {
-                // NTP-anchored: snap[0].data is already projected to the
-                // observer's bracket-rendered timeline (server time
-                // serverNow − ownerDelay), so render at delay=baseDelay just
-                // like the bracket regime will. targetTime ≤ snap[0].time
-                // clamps to snap[0].data — the projected position renders
-                // stably until snap[1] arrives, then bracket continues from
-                // the same timeline (no model-switch jump). PR #87 idea.
-                // The renderError smoother is still captured/decayed at the
-                // 1→2 transition to absorb any residual projection error.
-                //
-                // Non-anchored (legacy): delay=0 extrapolates forward in
-                // real-time during single-snap, then 1→2 transition triggers
-                // renderError capture which absorbs the model-switch over
-                // SPAWN_CATCHUP_DURATION.
-                delay = state.ntpAnchored ? baseDelay : 0;
-            } else if (state.renderError) {
-                const elapsed = renderTime - state.renderError.startTime;
-                const progress = Math.max(0, Math.min(1, elapsed / CONFIG.SPAWN_CATCHUP_DURATION));
-                delay = baseDelay * progress;
-            } else {
-                delay = baseDelay;
-            }
+            const delay = this.getDelayForMember(state.ownerMemberId);
             const targetTime = renderTime - delay;
 
             // Before the oldest snapshot: return oldest (clamped)
@@ -2088,7 +2109,20 @@
         },
 
         /**
-         * Check if positions are far enough apart to warrant a snap
+         * Check if positions are far enough apart to warrant a snap.
+         *
+         * Both x and y are stored in normalized coordinates BUT in DIFFERENT
+         * units — x is a fraction of game width, y is a fraction of height.
+         * Combining them with √(dx² + dy²) and comparing to a single scalar
+         * threshold is non-isotropic at non-square aspect ratios. Convert both
+         * deltas to reference-dimension units (the same isotropic spatial unit
+         * used by velocityX/Y, bullet impact physics, and the Hermite tangent
+         * conversion) before computing the magnitude. SNAP_THRESHOLD is then
+         * interpreted as a ref-dim distance — on a square viewport behaviour
+         * is unchanged; on a wide viewport horizontal snaps trigger at a
+         * smaller normalized-X delta and vertical snaps trigger at the same
+         * normalized-Y delta, so a given visual pixel jump triggers the same
+         * way regardless of direction.
          */
         shouldSnap(a, b) {
             if (a.x === undefined || b.x === undefined) return false;
@@ -2100,7 +2134,11 @@
             // Wrap-aware distance using extended range
             if (dx > rangeX / 2) dx -= rangeX; else if (dx < -rangeX / 2) dx += rangeX;
             if (dy > rangeY / 2) dy -= rangeY; else if (dy < -rangeY / 2) dy += rangeY;
-            return Math.sqrt(dx * dx + dy * dy) > CONFIG.SNAP_THRESHOLD;
+            // Convert per-axis normalized deltas to ref-dim before combining.
+            const refDim = getReferenceDimension();
+            const dxRef = dx * getGameWidth() / refDim;
+            const dyRef = dy * getGameHeight() / refDim;
+            return Math.sqrt(dxRef * dxRef + dyRef * dyRef) > CONFIG.SNAP_THRESHOLD;
         },
         
         /**
@@ -2152,12 +2190,27 @@
                 let dAngle = state.current.angle - state.previous.angle;
                 while (dAngle > Math.PI) dAngle -= Math.PI * 2;
                 while (dAngle < -Math.PI) dAngle += Math.PI * 2;
-                const a0 = state.previous.angle;
-                const a1 = a0 + dAngle;
-                const rpsToPerSec = CONFIG.TARGET_FPS;
-                const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
-                const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
-                result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+                // Short-circuit when both endpoints have the same angle (e.g.
+                // spawn-bridge for fracture children: bridge.angle=auth.angle=0
+                // because vertices are pre-rotated to world frame). Without
+                // this guard, Hermite uses the non-zero rotationSpeed tangents
+                // (auth's rotSpeed for extrapolation past auth, kept on the
+                // bridge snapshot too) and the cubic curves spuriously through
+                // the middle — producing a ~1° wobble for ~3 frames after
+                // spawn that the user perceives as a "1-frame rotation
+                // glitch". Constant-angle => constant-rendered-angle is the
+                // physically correct behaviour; tangent matching is irrelevant
+                // when the slope between endpoints is zero.
+                if (Math.abs(dAngle) < 1e-6) {
+                    result.angle = state.current.angle;
+                } else {
+                    const a0 = state.previous.angle;
+                    const a1 = a0 + dAngle;
+                    const rpsToPerSec = CONFIG.TARGET_FPS;
+                    const am0 = (state.previousRotationSpeed || 0) * rpsToPerSec * dt;
+                    const am1 = (state.rotationSpeed || 0) * rpsToPerSec * dt;
+                    result.angle = h00 * a0 + h10 * am0 + h01 * a1 + h11 * am1;
+                }
             }
             
             return result;
@@ -3204,6 +3257,26 @@
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
         update(dt = 1) {
+            // Cap linear speed (same units as SHIP_MAX_SPEED). Compare squared
+            // magnitudes to skip the sqrt when under the cap.
+            const maxSpeed = CONFIG.ASTEROID_MAX_SPEED;
+            if (maxSpeed > 0) {
+                const speedSq = this.velocityX * this.velocityX + this.velocityY * this.velocityY;
+                const maxSpeedSq = maxSpeed * maxSpeed;
+                if (speedSq > maxSpeedSq) {
+                    const speed = Math.sqrt(speedSq);
+                    const k = maxSpeed / speed;
+                    this.velocityX *= k;
+                    this.velocityY *= k;
+                }
+            }
+
+            // Cap angular speed (same units as SHIP_TURN_SPEED — radians per frame).
+            const maxSpin = CONFIG.ASTEROID_MAX_SPIN;
+            if (maxSpin > 0 && Math.abs(this.rotationSpeed) > maxSpin) {
+                this.rotationSpeed = this.rotationSpeed > 0 ? maxSpin : -maxSpin;
+            }
+
             // Move asteroid using aspect-ratio-aware conversion
             this.x += velocityToNormalizedDeltaX(this.velocityX) * dt;
             this.y += velocityToNormalizedDeltaY(this.velocityY) * dt;
@@ -3451,6 +3524,8 @@
     // numeric tunables prevents stray messages from mutating arbitrary CONFIG fields.
     const DEBUG_OVERRIDABLE_KEYS = new Set([
         'ASTEROID_DENSITY',
+        'ASTEROID_MAX_SPEED',
+        'ASTEROID_MAX_SPIN',
         'DEFLECTION_KICK',
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
@@ -3460,6 +3535,8 @@
         'FRACTURE_JAGGEDNESS',
         'DEFLECTION_TIME_LIMIT',
         'DEFLECTION_SCALE',
+        'MAX_EXTRAPOLATION',
+        'SPAWN_BRIDGE_ENABLED',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -3667,18 +3744,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // Reconciliation snapshots are stale by ~RTT and would
-                    // step the rendered position backward if pushed. Advance
-                    // the version cursor without snapshotting; the next live
-                    // OnObjectsUpdated broadcast (with proper arrival-time
-                    // anchoring) will resume normal interpolation.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Get or create remote ship instance
@@ -3832,18 +3899,18 @@
                 if (!existing) {
                     const asteroid = Asteroid.fromSyncData(obj.data);
                     asteroid.syncObjectId = obj.id;
-                    // Spawn-position projection for locally-owned children of an
-                    // OnObjectReplaced event (asteroid splits we just shot).
-                    // obj.spawnServerTime was stamped in
-                    // object-sync.js handleRemoteObjectCreated. The shooter
-                    // renders own objects in real time (no per-member delay),
-                    // so ownerDelaySec=0 and staleness ≈ RTT — exactly the
-                    // time the local sim of the parent kept moving while we
-                    // waited for the OnObjectReplaced echo.
-                    if (obj.spawnServerTime != null && !obj.spawnHandled
+                    // Forward-project the LOCAL game asteroid for locally-owned
+                    // children of an OnObjectReplaced event (asteroid splits we
+                    // just shot). obj.validAt was the moment of authority; we
+                    // adopt the child here ~RTT later. Without projection the
+                    // local asteroid would lag forever by RTT * velocity vs the
+                    // simulator. (Remote observers don't need projection — the
+                    // interpolator handles that automatically via snap[0]
+                    // anchored at validAt on the unified axis.)
+                    if (obj.validAt != null && !obj.spawnHandled
                         && RemoteObjects.isClockOffsetInitialized()) {
                         const stalenessSec = RemoteObjects.computeSpawnStaleness(
-                            RemoteObjects.serverNowMs(), obj.spawnServerTime, 0);
+                            RemoteObjects.serverNowMs(), obj.validAt);
                         const projected = RemoteObjects.projectSpawnData(obj.data, stalenessSec);
                         asteroid.x = projected.x;
                         asteroid.y = projected.y;
@@ -3859,15 +3926,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // See updateRemoteShips for rationale: skip pushing a
-                    // stale reconciliation snapshot into the interpolator.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Find existing asteroid by sync ID
@@ -3969,15 +4029,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // See updateRemoteShips for rationale: skip pushing a
-                    // stale reconciliation snapshot into the interpolator.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.arrivalTime);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Find existing bullet by sync ID
@@ -6024,23 +6077,139 @@
                         sessionPicker.gameStarted = true;
                         updatePickerButtons();
                     }
-                    // Spawn-position projection for wave-spawn asteroids (and any
-                    // other remote-owned asteroid created via raw OnObjectCreated
-                    // rather than OnObjectReplaced). Mirrors the onObjectReplaced
-                    // handler below — but the spawn anchor here is the server's
-                    // hub-entry timestamp (no owner-stamp on CreateObject), so the
-                    // projection still includes the creator's upload time as a
-                    // bias. That's strictly better than no projection at all
-                    // (which used to leave wave asteroids ~OWD ms behind reality
-                    // on observers).
+                });
+                // Spawn-bridge for OnObjectReplaced (e.g. asteroid splits, fracture
+                // children). Without a bridge, a freshly-spawned remote child has
+                // only one snapshot at its authoritative collision moment, so
+                // bracket-search either clamps it at collision_pos (LAN case,
+                // targetTime ≤ snap[0].time) or extrapolates with child_vel
+                // (high-latency case). Either path produces a visible position
+                // discontinuity vs. the parent's last-rendered position — the
+                // "spawn hitch" the user observed, growing with network latency.
+                //
+                // Fix: synthesize a second snapshot at "local render time"
+                // carrying the parent's last-interpolated x/y/angle but with
+                // the child's identity (including velocity) for everything else.
+                // Bracket-search then has TWO snaps to interpolate between,
+                // smoothly walking the renderer from parent_pos to child's
+                // authority position over one display delay. After authority.time
+                // the EXTRAPOLATE arm continues along child's authoritative vel.
+                //
+                // LAN case (bridge older than authority): bridge installed first,
+                // authority second — bracket [bridge, authority] gives smooth
+                // transition. PERFECT smoothing.
+                //
+                // High-latency case (bridge newer than authority): authority
+                // installed first, bridge second — bracket [authority, bridge]
+                // means the renderer is past the bridge and EXTRAPOLATES from
+                // bridge using child_vel. The discontinuity is deferred (~one
+                // send_interval) instead of eliminated, but the bridge.pos
+                // anchor point is parent_interp_pos, so the renderer doesn't
+                // jump to collision_pos at install time — it walks forward from
+                // parent's last visual position. SOFTENED smoothing.
+                //
+                // Locally-owned children are skipped: they're driven by local
+                // physics (the adopt branch in updateAstervoidsFromSync), not
+                // by interpolation, so a bridge would be ignored.
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects) => {
+                    if (!CONFIG.SPAWN_BRIDGE_ENABLED) return;
+                    if (!RemoteObjects.isClockOffsetInitialized()) return;
                     const myMemberId = SessionClient.getCurrentMember()?.id;
-                    if (obj.spawnServerTime != null
-                        && obj.ownerMemberId !== myMemberId
-                        && obj.data?.type === OBJECT_TYPES.ASTEROID) {
-                        const arrivalTime = (typeof performance !== 'undefined' && performance.now)
-                            ? performance.now() : Date.now();
-                        RemoteObjects.spawnAt(
-                            obj.id, obj.data, obj.ownerMemberId, obj.spawnServerTime, arrivalTime);
+                    const renderTime = performance.now();
+                    const parentInterp = RemoteObjects.getInterpolated(deletedObjectId, renderTime);
+                    if (!parentInterp) return;
+
+                    // Velocity-based back-projection scales for normalized x/y.
+                    const refDim = getReferenceDimension();
+                    const velScaleX = refDim / getGameWidth();
+                    const velScaleY = refDim / getGameHeight();
+
+                    for (const child of createdObjects) {
+                        // Skip locally-owned children — local game physics drives
+                        // their position, not the interpolator.
+                        if (child.ownerMemberId === myMemberId) continue;
+                        // Each child's validAt is server-validated and stamped per
+                        // ObjectInfo (all replacement children share the parent's
+                        // collision moment). Skip if absent.
+                        const childValidAt = child.validAt;
+                        if (childValidAt == null) continue;
+                        // Bridge anchor in server-time: "where the renderer is
+                        // currently displaying objects from this owner".
+                        const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
+                        const bridgeValidAt = Math.round(RemoteObjects.serverNowMs() - delay);
+                        const timeDiffSec = (childValidAt - bridgeValidAt) / 1000;
+                        const bridgeIsBeforeAuth = bridgeValidAt <= childValidAt;
+
+                        // Velocity used both as the back-projection anchor for
+                        // bridge.x/y and as the bridge snapshot's velocity:
+                        //   - LAN (bridge before auth): pre-split state — fragment
+                        //     was moving with PARENT's velocity. Storing parent's
+                        //     velocity also makes the Hermite tangent at the bridge
+                        //     end match parent's motion, so the bracket [bridge,
+                        //     auth] smoothly transitions from parent_vel at t=0 to
+                        //     child_vel at t=1.
+                        //   - High-latency (bridge after auth): post-split state —
+                        //     fragment is already on its child trajectory. Storing
+                        //     child's velocity drives the extrapolation past the
+                        //     bridge (which becomes the latest snapshot) along the
+                        //     authoritative trajectory.
+                        const bridgeVx = bridgeIsBeforeAuth
+                            ? (parentInterp.velocityX || 0)
+                            : (child.data.velocityX || 0);
+                        const bridgeVy = bridgeIsBeforeAuth
+                            ? (parentInterp.velocityY || 0)
+                            : (child.data.velocityY || 0);
+
+                        // Back-project child's authoritative COM by `bridgeV` over
+                        // the bridge interval. For DISK children (cx=cy=0 in
+                        // splitAsteroid), this reduces to parent.x_at_bridgeTime
+                        // exactly. For FRACTURE children the result includes the
+                        // fragment's centroid offset so the polygon's WORLD
+                        // VERTICES align with where they were on the parent at
+                        // bridge.time. Without this, bridge.x = parentInterp.x
+                        // produced a visible "centroid teleport" — the fragment
+                        // polygon rendered offset by ~0.68 × centroid for the
+                        // first ~3 frames of the bridge interval (the dominant
+                        // remote-spawn glitch).
+                        const bridgeX = child.data.x - bridgeVx * velScaleX * timeDiffSec;
+                        const bridgeY = child.data.y - bridgeVy * velScaleY * timeDiffSec;
+
+                        // Angle override is conditional: fracture children store
+                        // vertices already in world-aligned frame (parent rotation
+                        // pre-applied) and use angle=0 structurally. Overriding
+                        // their angle with parentInterp.angle would DOUBLE-rotate
+                        // the rendered polygon during the bridge interval. Disk
+                        // children (no vertices array, polygon regenerated from
+                        // seed) carry angle = parent's angle at collision and DO
+                        // benefit from a parentInterp.angle bridge for smooth
+                        // angular continuity.
+                        const isFractureChild = Array.isArray(child.data.vertices)
+                            && child.data.vertices.length > 0;
+                        const bridgeData = {
+                            ...child.data,
+                            x: bridgeX,
+                            y: bridgeY,
+                            velocityX: bridgeVx,
+                            velocityY: bridgeVy,
+                            ...(isFractureChild ? {} : { angle: parentInterp.angle }),
+                        };
+                        if (bridgeIsBeforeAuth) {
+                            // LAN: bridge older than authority → bridge first.
+                            // Bridge snapshot is synthetic (validAt back-projected
+                            // from current delay); EXCLUDED from adaptive-delay
+                            // sampling to prevent positive feedback (delay
+                            // estimate would otherwise feed itself on every spawn).
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt, null, false);
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt, child.arrivalServerTime);
+                        } else {
+                            // High latency: authority older than bridge → authority first.
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt, child.arrivalServerTime);
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt, null, false);
+                        }
+                        // Pre-set lastVersions so the next frame's
+                        // updateAstervoidsFromSync (or updateBulletsFromSync) skips
+                        // a duplicate authority install — we already did it.
+                        RemoteObjects.lastVersions.set(child.id, child.version);
                     }
                 });
                 // Handle reconciliation failure after auto-reconnect: the transport
@@ -6076,32 +6245,14 @@
                         reconnectingOverlay.classList.remove('visible');
                     }
                 });
-                // Spawn-position projection (Phase 2 of spawn-latency fix). When
-                // OnObjectReplaced delivers child objects (asteroid splits), each
-                // child carries spawnServerTime stamped by SessionHub.ReplaceObject
-                // at hub-method entry. We project the child's position from the
-                // parent's T_collision position to where the parent was being
-                // rendered the moment before the split:
-                //   * Remote-owned children → RemoteObjects.spawnAt installs the
-                //     first interpolation snapshot at the projected position.
-                //   * Locally-owned children (the shooter's own asteroid splits)
-                //     → updateAstervoidsFromSync's adopt branch reads
-                //     obj.spawnServerTime and projects the local Asteroid's
-                //     initial position (handled there, not here).
-                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, serverTimestamp) => {
-                    if (serverTimestamp == null) return;
-                    const myMemberId = SessionClient.getCurrentMember()?.id;
-                    const arrivalTime = (typeof performance !== 'undefined' && performance.now)
-                        ? performance.now() : Date.now();
-                    for (const objectInfo of createdObjects) {
-                        const obj = ObjectSync.getObject(objectInfo.id);
-                        if (!obj) continue;
-                        if (obj.ownerMemberId === myMemberId) continue;
-                        if (obj.data?.type !== OBJECT_TYPES.ASTEROID) continue;
-                        RemoteObjects.spawnAt(
-                            obj.id, obj.data, obj.ownerMemberId, serverTimestamp, arrivalTime);
-                    }
-                });
+                // Spawn-position projection is no longer needed for remote
+                // observers: validAt unification means snap[0].time is the
+                // owner's authored moment, and bracket-search clamps to that
+                // position until either the next snapshot arrives or
+                // extrapolation kicks in. The local-owner adopt branch still
+                // forward-projects from validAt to "now" (see
+                // updateAstervoidsFromSync), since the local game-physics
+                // path is not interpolated.
                 // Apply configured sync timing and field compression map
                 ObjectSync.configure({
                     nominalFrameTime: CONFIG.SYNC_NOMINAL_FRAME_TIME,
@@ -6764,6 +6915,23 @@
         }
         if (info.migratedObjects && info.migratedObjects.length > 0) {
             ObjectSync.handleOwnershipMigration(info.migratedObjects);
+            // Migration handoff: deliberately do NOT re-anchor the local
+            // puppet asteroid to a forward-projected position. The puppet
+            // was being rendered from the interpolator (a delayed/extrap
+            // value), and the next local frame's asteroid.update(dt) will
+            // simply step that position by v·dt. That's continuous on the
+            // new owner's screen — exactly matching the prior frame's
+            // render, with no one-frame jump.
+            //
+            // Earlier versions of this code seeded asteroid.x to
+            // RemoteObjects.getMigrationSeed(...) (latest snap extrapolated
+            // to "now") in an attempt to keep observers' brackets aligned
+            // with constant-velocity extrapolation. In practice this caused
+            // a visible one-frame discontinuity on the new owner's view
+            // (a forward jump of ~delay·v) with no observable benefit on
+            // observers (their bracket slope deviates only slightly when
+            // the seed is omitted, which is well below the visual threshold
+            // for the velocities and delays this game uses).
         }
     });
 

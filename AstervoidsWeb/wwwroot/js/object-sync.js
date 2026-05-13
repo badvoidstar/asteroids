@@ -209,6 +209,24 @@ const ObjectSync = (function() {
     function getSendRate() {
         return Math.round(1 / nominalFrameTime);
     }
+
+    /**
+     * Server-time estimate of "right now" in the same axis as validAt.
+     * Returns null when the NTP clock isn't bootstrapped — callers must
+     * guard so adaptive-delay metrics aren't fed pre-init guesses.
+     *
+     * Captured INSIDE network event handlers so the lag = arrival − validAt
+     * sample reflects only owner→receiver delivery delay, with zero
+     * contamination from game-loop processing latency (a frame's worth of
+     * raf jitter, 0–16ms, that would otherwise systematically inflate the
+     * computed jitter buffer).
+     */
+    function getArrivalServerTimeMs() {
+        if (clockSource && clockSource.initialized && clockSource.initialized()) {
+            return Math.round(clockSource.nowMs());
+        }
+        return null;
+    }
     
     /**
      * Add object to type index
@@ -400,8 +418,17 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object created.
+     *
+     * @param {object} objectInfo - Includes server-validated `validAt` (top-level
+     *   property): owner-stamped server-time ms (NTP-aligned), clamped within
+     *   ±2 s of hub-entry receive time and monotonically capped against the
+     *   object's previous ValidAt. This is THE unified interpolation axis:
+     *   snap[0] is keyed at validAt. Stored on `obj.validAt`; consumed by
+     *   RemoteObjects.updateState.
+     * @param {string} senderMemberId
+     * @param {number} memberSequence
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, spawnServerTime) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -412,15 +439,21 @@ const ObjectSync = (function() {
         const arrivalTime = (typeof performance !== 'undefined' && performance.now)
             ? performance.now()
             : Date.now();
+        // Server-time twin of arrivalTime (NTP-aligned), used by RemoteObjects
+        // for lag-based adaptive delay. Captured here so the lag estimate
+        // ignores game-loop processing latency entirely.
+        const arrivalServerTime = getArrivalServerTimeMs();
 
-        // Strip any legacy spawnTimestamp field (no longer used; receiver-side
-        // render-error smoothing absorbs the leading-edge → buffered handoff
-        // discontinuity instead). Cross-machine wall-clock skew made the
-        // back-date of arrivalTime by Date.now()-spawnTimestamp unreliable;
-        // it also amplified the discontinuity smoothing has to absorb.
+        // Strip any legacy spawnTimestamp field from the wire data. The
+        // current model uses validAt as the single owner-stamped timestamp;
+        // spawnTimestamp lingered on the field-compression map (`sp` → ...)
+        // but is never set or consumed by current code paths. Defensive
+        // delete in case an older client still sends it.
         if (objectInfo.data && objectInfo.data.spawnTimestamp !== undefined) {
             delete objectInfo.data.spawnTimestamp;
         }
+
+        const validAt = objectInfo.validAt;
 
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -433,6 +466,10 @@ const ObjectSync = (function() {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
                 existing.arrivalTime = arrivalTime;
+                existing.arrivalServerTime = arrivalServerTime;
+                if (validAt !== undefined && validAt !== null) {
+                    existing.validAt = validAt;
+                }
             } else if (objectInfo.data) {
                 // Even when the existing object's version is ahead (because an
                 // update arrived first via the fallback path), we still need to
@@ -454,8 +491,8 @@ const ObjectSync = (function() {
                     updateTypeIndex(existing, oldType, existing.data.type);
                 }
             }
-            if (spawnServerTime !== undefined && existing.spawnServerTime === undefined) {
-                existing.spawnServerTime = spawnServerTime;
+            if (validAt !== undefined && validAt !== null && existing.validAt === undefined) {
+                existing.validAt = validAt;
             }
             return;
         }
@@ -465,16 +502,13 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
-        // Stamp spawnServerTime so receiver-side projection
-        // (RemoteObjects.spawnAt and updateAstervoidsFromSync's adopt branch)
-        // can compensate for upload + queue + broadcast latency. Source:
-        //   * OnObjectReplaced path → owner-stamped clientSpawnServerTime
-        //     (best accuracy: no upload-time bias).
-        //   * OnObjectCreated path  → server hub-entry timestamp
-        //     (still better than arrivalTime: removes display-delay bias for
-        //     wave-spawn asteroids / non-Replaced creations on observers).
-        if (spawnServerTime !== undefined) {
-            obj.spawnServerTime = spawnServerTime;
+        obj.arrivalServerTime = arrivalServerTime;
+        // Stamp the unified server-time axis anchor. RemoteObjects.updateState
+        // converts validAt → perf.now-domain via validAtToPerfNow so bracket
+        // search remains monotonic while the snapshot key encodes the global
+        // server-time agreement (eliminates network-jitter contamination).
+        if (validAt !== undefined && validAt !== null) {
+            obj.validAt = validAt;
         }
 
         if (callbacks.onObjectCreated) {
@@ -484,6 +518,16 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote objects updated (from other members only — self-echo eliminated).
+     *
+     * @param {Array} updatedObjects - Each entry includes a server-validated
+     *   `validAt` top-level property (per-object: ±2 s clamp + monotonic cap).
+     *   Stamped on `existing.validAt` so RemoteObjects.updateState uses it
+     *   directly as the unified bracket-search axis anchor.
+     * @param {number} serverTimestamp - hub-entry ms (still used for batch metrics)
+     * @param {string} senderMemberId
+     * @param {number} senderSeq
+     * @param {number} memberSequence
+     * @param {number} senderSendIntervalMs
      */
     function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
         trackMemberSequence(senderMemberId, memberSequence);
@@ -497,14 +541,17 @@ const ObjectSync = (function() {
         const arrivalTime = (typeof performance !== 'undefined' && performance.now)
             ? performance.now()
             : Date.now();
+        // Server-time twin of arrivalTime (see handleRemoteObjectCreated for rationale).
+        const arrivalServerTime = getArrivalServerTimeMs();
 
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
-        // Updates contain only id, data, version (metadata stripped for bandwidth)
+        // Updates contain id, data, version, validAt (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
             update.data = expandData(update.data);
+            const updateValidAt = update.validAt;
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
@@ -513,6 +560,10 @@ const ObjectSync = (function() {
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
+                    existing.arrivalServerTime = arrivalServerTime;
+                    if (updateValidAt !== undefined && updateValidAt !== null) {
+                        existing.validAt = updateValidAt;
+                    }
 
                     // Update type index if type changed (only when type is present in delta)
                     if (update.data?.type !== undefined) {
@@ -533,7 +584,9 @@ const ObjectSync = (function() {
                     scope: null,
                     data: update.data || {},
                     version: update.version,
-                    arrivalTime: arrivalTime
+                    arrivalTime: arrivalTime,
+                    arrivalServerTime: arrivalServerTime,
+                    validAt: (updateValidAt !== undefined && updateValidAt !== null) ? updateValidAt : undefined
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -558,36 +611,30 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object replaced (atomic delete + create).
+     *
+     * Each ObjectInfo in event.createdObjects carries its own validated validAt
+     * (server stamps all children with the same collision-time value). The
+     * downstream onObjectReplaced callback consumers use createdObjects[i].validAt
+     * directly when synthesizing spawn-bridge snapshots.
+     *
      * @param {object} event - { deletedObjectId, createdObjects }
      * @param {string} senderMemberId
      * @param {number} memberSequence
-     * @param {number} [serverTimestamp] - server-captured ms at hub entry
-     *   (network-arrival anchor; carries server processing time).
-     * @param {number} [spawnServerTime] - owner-anchored ms (or server fallback)
-     *   representing "when did the spawn happen in server-time-space".
-     *   Forwarded to handleRemoteObjectCreated so each new child carries it
-     *   for downstream spawn-position projection (RemoteObjects.spawnAt).
-     *   When the owner's clock is initialized, this is upload-time-bias-free;
-     *   when it falls back to serverTimestamp, projection is still correct
-     *   modulo the owner's upload time.
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, serverTimestamp, spawnServerTime) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
         // Create all replacement objects (no sequence tracking — already tracked above).
-        // Pass spawnServerTime (owner-anchored) so each new obj is stamped with
-        // the moment the spawn was authoritatively realized — used for spawn
-        // projection. Falls back to serverTimestamp if the broadcast didn't
-        // include the new field (older servers).
-        const spawnAnchor = (spawnServerTime != null) ? spawnServerTime : serverTimestamp;
+        // validAt is per-child inside each ObjectInfo (all children share the same
+        // server-validated collision-time from ObjectService.ReplaceObject).
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo, undefined, undefined, spawnAnchor);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, spawnAnchor);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
         }
     }
 
@@ -680,19 +727,14 @@ const ObjectSync = (function() {
                         existing.data = obj.data || {};
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
-                        // Mark this object as updated by reconciliation. The
-                        // snapshot data is stale by ~RTT (it was the server's
-                        // state at GetSessionState time, not now). If the
-                        // interpolator pushes this position into its ring
-                        // buffer timestamped at performance.now(), it would
-                        // step the rendered asteroid backward by ~RTT × velocity
-                        // and disrupt ongoing extrapolation. Consumers
-                        // (updateAstervoidsFromSync, updateRemoteShips,
-                        // updateBulletsFromSync) check this flag and skip the
-                        // updateState() push for one cycle, letting live
-                        // OnObjectsUpdated broadcasts (with proper arrivalTime
-                        // anchoring) drive the interpolator instead.
-                        existing.fromReconciliation = true;
+                        // Reconciliation snapshots now carry the same validated
+                        // server-time validAt as live broadcasts (monotonically
+                        // capped, ±2 s clamped). The interpolator pushes them
+                        // onto the unified bracket-search axis at that anchor,
+                        // so they no longer need a skip-one-cycle hack: they
+                        // either ARE the latest known state (correct to render
+                        // from) or are dominated by newer live snapshots in
+                        // the ring buffer (no visual effect).
                     }
                 } else if (pendingDeletes.has(obj.id)) {
                     // Locally deleted but server hasn't processed yet — do NOT
@@ -763,7 +805,14 @@ const ObjectSync = (function() {
         }
 
         try {
-            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId);
+            // Stamp owner's NTP-aligned server-time estimate of NOW. Server
+            // clamps to ±2s of its own UtcNow before forwarding as the
+            // unified-axis validAt. Math.round is required (see replaceObject
+            // for the float64-vs-int64 MessagePack contract details).
+            const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
+                ? Math.round(clockSource.nowMs())
+                : null;
+            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId, clientValidAt);
             if (!response || !response.objectInfo) return null;
 
             const objectInfo = response.objectInfo;
@@ -810,9 +859,9 @@ const ObjectSync = (function() {
             const compressedReplacements = replacements.map(r => compressData(r));
             // Stamp owner's best estimate of server time NOW (collision moment).
             // Server clamps to ±2s of its own UtcNow before forwarding as the
-            // spawn anchor. If the clock isn't initialized yet, send null and
-            // server falls back to its hub-entry timestamp (less accurate but
-            // still bounded by upload_time).
+            // unified-axis validAt. If the clock isn't initialized yet, send
+            // null and the server falls back to its hub-entry timestamp (less
+            // accurate but still bounded by upload_time).
             //
             // Math.round is required: clockSource.nowMs() returns
             // Date.now() + offsetMs where offsetMs is a fractional EMA value
@@ -821,11 +870,11 @@ const ObjectSync = (function() {
             // "Type mismatch", causing the entire ReplaceObject invocation to
             // throw — leaving the asteroid undeletable. Rounding to an integer
             // forces MessagePack to encode as int64.
-            const clientSpawnServerTime = (clockSource && clockSource.initialized && clockSource.initialized())
+            const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
                 ? Math.round(clockSource.nowMs())
                 : null;
             const createdInfos = await SessionClient.replaceObject(
-                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientSpawnServerTime);
+                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientValidAt);
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {
@@ -997,13 +1046,20 @@ const ObjectSync = (function() {
         flushInProgress = true;
         const currentSenderSequence = ++senderSequence;
         const clientTimestamp = Date.now();
+        // Stamp owner's NTP-aligned server-time estimate of the simulation tick
+        // that produced this batch. Server clamps to ±2s and uses as the
+        // unified-axis validAt anchor for every snapshot in the broadcast.
+        // Math.round is required (see replaceObject for MessagePack int64 contract).
+        const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
+            ? Math.round(clockSource.nowMs())
+            : null;
         // Compress field names for the wire — game logic stays readable
         const wireUpdates = updates.map(u => ({
             objectId: u.objectId,
             data: compressData(u.data)
         }));
         try {
-            const response = await SessionClient.updateObjects(wireUpdates, currentSenderSequence, Math.round(nominalFrameTime * 1000));
+            const response = await SessionClient.updateObjects(wireUpdates, currentSenderSequence, Math.round(nominalFrameTime * 1000), clientValidAt);
             // Capture response timestamp immediately — before processing
             // versions or sequences — so RTT reflects only the network
             // round-trip and not client-side processing overhead.

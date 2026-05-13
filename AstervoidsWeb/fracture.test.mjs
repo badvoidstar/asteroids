@@ -284,7 +284,7 @@ const CONFIG = {
     INITIAL_ASTEROID_RADIUS: 0.083,
     ASTEROID_DENSITY: 5.0,
     SEPARATION_ENERGY_SIZE_BLEND: 1.0,
-    FRACTURE_ENABLED: false,
+    FRACTURE_ENABLED: true,
     FRACTURE_VERTEX_DENSITY: 1.0,
     FRACTURE_JAGGEDNESS: 0.35,
     MIN_SPLIT_RATIO: 0.1,
@@ -402,15 +402,16 @@ function fragmentPolygon(parentVerts, R, vx, vy, omega, offsetN, bulletAngle, cf
 }
 
 const FRACTURE_ON_CONFIG = { ...CONFIG, FRACTURE_ENABLED: true };
+const FRACTURE_OFF_CONFIG = { ...CONFIG, FRACTURE_ENABLED: false };
 
-test('fracture split master flag defaults to disabled', () => {
-    assert.equal(CONFIG.FRACTURE_ENABLED, false);
+test('fracture split master flag defaults to enabled', () => {
+    assert.equal(CONFIG.FRACTURE_ENABLED, true);
 });
 
 test('fragmentPolygon: fracture disabled uses disk split and null vertices', () => {
     const R = 0.083;
     const parent = regularPolygon(R, 10);
-    const out = fragmentPolygon(parent, R, 0, 0, 0, 0.2, Math.PI / 4);
+    const out = fragmentPolygon(parent, R, 0, 0, 0, 0.2, Math.PI / 4, FRACTURE_OFF_CONFIG);
     assert.equal(out.children.length, 2);
     assert.equal(out.children[0].vertices, null);
     assert.equal(out.children[1].vertices, null);

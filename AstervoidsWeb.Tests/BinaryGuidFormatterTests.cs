@@ -129,7 +129,7 @@ public class BinaryGuidFormatterTests
             new List<Guid> { Guid.NewGuid(), Guid.NewGuid() },
             new List<ObjectMigration>
             {
-                new(Guid.NewGuid(), Guid.NewGuid(), 5L)
+                new(Guid.NewGuid(), Guid.NewGuid(), 5L, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
             }
         );
 
@@ -166,7 +166,8 @@ public class BinaryGuidFormatterTests
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
             "Session",
             new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 1.5 },
-            42L);
+            42L,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
         var result = MessagePackSerializer.Deserialize<ObjectInfo>(bytes, Options);
@@ -176,18 +177,20 @@ public class BinaryGuidFormatterTests
         result.OwnerMemberId.Should().Be(dto.OwnerMemberId);
         result.Scope.Should().Be(dto.Scope);
         result.Version.Should().Be(dto.Version);
+        result.ValidAt.Should().Be(dto.ValidAt);
     }
 
     [Fact]
     public void ObjectMigration_RoundTrip()
     {
-        var dto = new ObjectMigration(Guid.NewGuid(), Guid.NewGuid(), 10L);
+        var dto = new ObjectMigration(Guid.NewGuid(), Guid.NewGuid(), 10L, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var bytes = MessagePackSerializer.Serialize(dto, Options);
         var result = MessagePackSerializer.Deserialize<ObjectMigration>(bytes, Options);
 
         result.ObjectId.Should().Be(dto.ObjectId);
         result.NewOwnerId.Should().Be(dto.NewOwnerId);
         result.NewVersion.Should().Be(dto.NewVersion);
+        result.ValidAt.Should().Be(dto.ValidAt);
     }
 
     [Fact]
@@ -195,7 +198,8 @@ public class BinaryGuidFormatterTests
     {
         var created = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Session", new Dictionary<string, object?> { ["type"] = "asteroid" }, 1L);
+            "Session", new Dictionary<string, object?> { ["type"] = "asteroid" }, 1L,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
         var dto = new ObjectReplacedEvent(Guid.NewGuid(), new List<ObjectInfo> { created });
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -212,7 +216,8 @@ public class BinaryGuidFormatterTests
         var member = new MemberInfo(Guid.NewGuid(), "Client", DateTime.UtcNow);
         var obj = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Member", new Dictionary<string, object?>(), 1L);
+            "Member", new Dictionary<string, object?>(), 1L,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
         var dto = new JoinSessionResponse(
             Guid.NewGuid(), "Banana", Guid.NewGuid(), "Client",
@@ -252,7 +257,8 @@ public class BinaryGuidFormatterTests
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
             "Session",
             new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 100.0, ["y"] = 200.0 },
-            42L);
+            42L,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
         // Binary GUIDs
         var binaryBytes = MessagePackSerializer.Serialize(dto, Options);

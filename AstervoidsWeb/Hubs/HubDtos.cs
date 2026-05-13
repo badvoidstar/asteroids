@@ -67,18 +67,21 @@ public record ObjectInfo(
     [property: Key("ownerMemberId")] Guid OwnerMemberId,
     [property: Key("scope")] string Scope,
     [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("version")] long Version);
+    [property: Key("version")] long Version,
+    [property: Key("validAt")] long ValidAt);
 
 [MessagePackObject]
 public record ObjectUpdateInfo(
     [property: Key("id")] Guid Id,
     [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("version")] long Version);
+    [property: Key("version")] long Version,
+    [property: Key("validAt")] long ValidAt);
 
 [MessagePackObject]
 public record ObjectUpdateRequest(
     [property: Key("objectId")] Guid ObjectId,
-    [property: Key("data")] Dictionary<string, object?> Data);
+    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("validAt")] long? ValidAt = null);
 
 [MessagePackObject]
 public record ObjectReplacedEvent(

@@ -381,18 +381,19 @@ public class SessionHubTests
         capturedMethod.Should().Be("OnObjectCreated");
         capturedArgs.Should().NotBeNull();
         // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp) = 4 args.
+        // validAt is now embedded in ObjectInfo (not a trailing arg).
         // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 4).
         capturedArgs!.Length.Should().Be(4,
             "broadcast helpers must spread args via SendCoreAsync, not wrap them through SendAsync(string, object?)");
     }
 
     /// <summary>
-    /// Phase 2 (owner-stamped spawn time): ReplaceObject should accept an optional
-    /// clientSpawnServerTime and forward it as the spawnServerTime broadcast arg
-    /// when within ±2s of the server's hub-entry timestamp.
+    /// Owner-stamped validAt (unified server-time interpolation axis): ReplaceObject
+    /// should accept an optional clientValidAt and stamp it on each child's
+    /// ObjectInfo.ValidAt when within ±2s of the server's hub-entry timestamp.
     /// </summary>
     [Fact]
-    public async Task ReplaceObject_ShouldUseClientSpawnServerTime_WhenWithinSanityBounds()
+    public async Task ReplaceObject_ShouldUseClientValidAt_WhenWithinSanityBounds()
     {
         // Arrange — create a session and an object owned by the connecting member.
         var createResult = _sessionService.CreateSession("connection-1");
@@ -411,9 +412,10 @@ public class SessionHubTests
 
         var hub = CreateHubWithProxy("connection-1", clientProxy);
 
-        // clientSpawnServerTime within sanity bounds (250ms before hub entry).
+        // clientValidAt within sanity bounds AND newer than the parent's stored
+        // ValidAt (which the monotonic cap protects against regression).
         var hubEntry = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var clientStamp = hubEntry - 250;
+        var clientStamp = hubEntry + 100;
 
         // Act
         var result = await hub.ReplaceObject(parent.Id,
@@ -423,16 +425,18 @@ public class SessionHubTests
             },
             scope: "Session",
             ownerMemberId: null,
-            clientSpawnServerTime: clientStamp);
+            clientValidAt: clientStamp);
 
-        // Assert — broadcast carries 5 args: replaceEvent, memberId, memberSeq, serverTimestamp, spawnServerTime.
+        // Assert — broadcast carries 4 args: replaceEvent, memberId, memberSeq, serverTimestamp.
+        // validAt is now embedded in each ObjectInfo inside replaceEvent.CreatedObjects.
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(5,
-            "OnObjectReplaced broadcast must include both serverTimestamp (hub-entry, for recordPacketArrival) and spawnServerTime (owner-anchored, for spawnAt projection)");
-        var broadcastSpawnServerTime = (long)capturedArgs[4]!;
-        broadcastSpawnServerTime.Should().Be(clientStamp,
-            "in-bounds clientSpawnServerTime should be forwarded verbatim as the spawn anchor");
+        capturedArgs!.Length.Should().Be(4,
+            "OnObjectReplaced broadcast must include serverTimestamp (hub-entry, for recordPacketArrival); validAt is per-child inside ObjectInfo");
+        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
+        replaceEvent.CreatedObjects.Should().NotBeEmpty();
+        replaceEvent.CreatedObjects[0].ValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each child");
     }
 
     [Fact]
@@ -467,16 +471,16 @@ public class SessionHubTests
             },
             scope: "Session",
             ownerMemberId: null,
-            clientSpawnServerTime: clientStamp);
+            clientValidAt: clientStamp);
 
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(5);
+        capturedArgs!.Length.Should().Be(4);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var spawnServerTime = (long)capturedArgs[4]!;
-        spawnServerTime.Should().Be(serverTimestamp,
-            "out-of-bounds clientSpawnServerTime must be rejected and spawnServerTime should fall back to the hub-entry serverTimestamp");
+        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
+        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "out-of-bounds clientValidAt must be rejected and the child's validAt should fall back to the hub-entry serverTimestamp");
     }
 
     [Fact]
@@ -499,7 +503,7 @@ public class SessionHubTests
 
         var hub = CreateHubWithProxy("connection-1", clientProxy);
 
-        // Act — omit clientSpawnServerTime (older clients, or unbootstrapped offset).
+        // Act — omit clientValidAt (older clients, or unbootstrapped offset).
         var result = await hub.ReplaceObject(parent.Id,
             new List<Dictionary<string, object?>>
             {
@@ -509,11 +513,253 @@ public class SessionHubTests
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(5);
+        capturedArgs!.Length.Should().Be(4);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var spawnServerTime = (long)capturedArgs[4]!;
-        spawnServerTime.Should().Be(serverTimestamp,
-            "null clientSpawnServerTime must fall back to the hub-entry serverTimestamp");
+        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
+        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "null clientValidAt must fall back to the hub-entry serverTimestamp");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CreateObject / UpdateObjects — clientValidAt clamp + fallback coverage
+    //
+    // These mirror the ReplaceObject tests above. The shared ValidateValidAt
+    // helper (in ObjectService) applies a ±2s sanity bound vs. the hub-entry
+    // serverTimestamp. Within bounds: client value wins (eliminates upload-time
+    // bias from the unified server-time interpolation axis). Out-of-bounds or
+    // null: fall back to serverTimestamp so receivers always have a usable
+    // anchor. The validated value is stored on SessionObject.ValidAt and
+    // surfaced to receivers via ObjectInfo.ValidAt / ObjectUpdateInfo.ValidAt.
+    // ─────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateObject_ShouldUseClientValidAt_WhenWithinSanityBounds()
+    {
+        // Arrange — second member so the OthersInGroup broadcast captures args
+        // (the creating member is excluded by OthersInGroup).
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var hubEntry = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientStamp = hubEntry - 250;
+
+        // Act
+        var response = await hub.CreateObject(
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            scope: "Session",
+            ownerMemberId: null,
+            clientValidAt: clientStamp);
+
+        // Assert — broadcast is OnObjectCreated(objectInfo, memberId, memberSeq, serverTimestamp) = 4 args.
+        // validAt is embedded in ObjectInfo.
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(4,
+            "OnObjectCreated broadcast carries serverTimestamp; validAt is embedded in ObjectInfo");
+        var objectInfo = (ObjectInfo)capturedArgs[0]!;
+        objectInfo.ValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor");
+    }
+
+    [Fact]
+    public async Task CreateObject_ShouldFallBackToServerTimestamp_WhenClientStampOutOfBounds()
+    {
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var hubEntryEstimate = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientStamp = hubEntryEstimate - 10_000; // 10s in the past — far outside the 2s window.
+
+        var response = await hub.CreateObject(
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            scope: "Session",
+            ownerMemberId: null,
+            clientValidAt: clientStamp);
+
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(4);
+        var serverTimestamp = (long)capturedArgs[3]!;
+        var objectInfo = (ObjectInfo)capturedArgs[0]!;
+        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
+    }
+
+    [Fact]
+    public async Task CreateObject_ShouldFallBackToServerTimestamp_WhenClientStampOmitted()
+    {
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var response = await hub.CreateObject(
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            scope: "Session");
+
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(4);
+        var serverTimestamp = (long)capturedArgs[3]!;
+        var objectInfo = (ObjectInfo)capturedArgs[0]!;
+        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "null clientValidAt must fall back to the hub-entry serverTimestamp");
+    }
+
+    [Fact]
+    public async Task UpdateObjects_ShouldUseClientValidAt_WhenWithinSanityBounds()
+    {
+        // Arrange — owner needs an existing object to update.
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+        var obj = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var hubEntry = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Newer than the existing object's ValidAt so the monotonic cap doesn't override.
+        var clientStamp = hubEntry + 100;
+
+        var updates = new List<ObjectUpdateRequest>
+        {
+            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+        };
+
+        // Act
+        var response = await hub.UpdateObjects(
+            updates,
+            senderSequence: 1,
+            senderSendIntervalMs: 100,
+            clientValidAt: clientStamp);
+
+        // Assert — broadcast is OnObjectsUpdated(updateInfos, memberId, senderSeq, memberSeq, serverTimestamp, senderSendIntervalMs) = 6 args.
+        // validAt is per-object inside each ObjectUpdateInfo.
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(6,
+            "OnObjectsUpdated broadcast carries serverTimestamp + senderSendIntervalMs; validAt is per-object inside each ObjectUpdateInfo");
+        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
+        updateInfos.Should().NotBeEmpty();
+        updateInfos[0].ValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each update");
+    }
+
+    [Fact]
+    public async Task UpdateObjects_ShouldFallBackToServerTimestamp_WhenClientStampOutOfBounds()
+    {
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+        var obj = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var hubEntryEstimate = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var clientStamp = hubEntryEstimate + 10_000; // 10s in the future — far outside the 2s window.
+
+        var updates = new List<ObjectUpdateRequest>
+        {
+            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+        };
+
+        var response = await hub.UpdateObjects(
+            updates,
+            senderSequence: 1,
+            senderSendIntervalMs: 100,
+            clientValidAt: clientStamp);
+
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(6);
+        var serverTimestamp = (long)capturedArgs[4]!;
+        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
+        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
+    }
+
+    [Fact]
+    public async Task UpdateObjects_ShouldFallBackToServerTimestamp_WhenClientStampOmitted()
+    {
+        var createResult = _sessionService.CreateSession("connection-1");
+        var session = createResult.Session!;
+        var creator = createResult.Creator!;
+        _sessionService.JoinSession(session.Id, "connection-2");
+        var obj = _objectService.CreateObject(
+            session.Id, creator.Id, Models.ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" })!;
+
+        object?[]? capturedArgs = null;
+        var clientProxy = new Mock<IClientProxy>();
+        clientProxy
+            .Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((_, a, _) => capturedArgs = a)
+            .Returns(Task.CompletedTask);
+
+        var hub = CreateHubWithProxy("connection-1", clientProxy);
+
+        var updates = new List<ObjectUpdateRequest>
+        {
+            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+        };
+
+        var response = await hub.UpdateObjects(updates);
+
+        response.Should().NotBeNull();
+        capturedArgs.Should().NotBeNull();
+        capturedArgs!.Length.Should().Be(6);
+        var serverTimestamp = (long)capturedArgs[4]!;
+        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
+        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
     private SessionHub CreateHubWithProxy(string connectionId, Mock<IClientProxy> proxy)

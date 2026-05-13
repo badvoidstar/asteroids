@@ -238,6 +238,20 @@
                 help: 'M = density · R². With independent deflection/separation knobs, density damps only separation by 1/√density (deflection and spin are velocity-driven and density-independent).',
             },
             {
+                key: 'ASTEROID_MAX_SPEED',
+                label: 'Asteroid max linear speed',
+                min: 0, max: 2, step: 0.025, default: 0.4,
+                fmt: v => v.toFixed(3),
+                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.4 (half the ship cap of 0.8) reins in compounded velocity from chained splits while still letting large hits accelerate fragments visibly. Realistic speeds in normal play peak around 0.4-0.6, so this cap will engage frequently. 0 = no cap. Note: only locally-owned asteroids are clamped — in multiplayer this affects the asteroids you currently own; remote ones reflect their owner\'s setting.',
+            },
+            {
+                key: 'ASTEROID_MAX_SPIN',
+                label: 'Asteroid max spin (rad/frame)',
+                min: 0, max: 1, step: 0.005, default: Math.PI / 6,
+                fmt: v => `${v.toFixed(3)} (${(v * 60 / (2 * Math.PI)).toFixed(2)} rot/s)`,
+                help: 'Per-frame cap on |rotationSpeed| of locally-owned asteroids (same units as SHIP_TURN_SPEED — radians per 60fps frame). Default π/6 ≈ 0.524 corresponds to 5 full rotations per second. 0 = no cap. Only affects locally-owned asteroids.',
+            },
+            {
                 key: 'DEFLECTION_KICK',
                 label: 'Deflection kick (head-on Δv_COM)',
                 min: 0, max: 5e-3, step: 1e-5, default: 1e-3,
@@ -268,7 +282,7 @@
             {
                 key: 'FRACTURE_ENABLED',
                 label: 'Fracture split enabled (0/1)',
-                min: 0, max: 1, step: 1, default: 0,
+                min: 0, max: 1, step: 1, default: 1,
                 fmt: v => `${Math.round(v)}`,
                 help: 'Master switch for fracture splits. 0 = legacy disk split path, 1 = polygon fracture path.',
             },
@@ -299,6 +313,20 @@
                 min: 0, max: 3, step: 0.05, default: 1.2,
                 fmt: v => v.toFixed(2),
                 help: '0 = feature disabled (no extra impulse). 1 = just enough to graze the ship\'s collision radius. >1 = miss by extra margin (target miss = scale · R_sum).',
+            },
+            {
+                key: 'MAX_EXTRAPOLATION',
+                label: 'Max extrapolation (s)',
+                min: 0, max: 5, step: 0.1, default: 2.0,
+                fmt: v => `${v.toFixed(1)} s`,
+                help: 'Cap on remote-object simulation projection: applied to (a) bracket-search single-snap velocity extrapolation, (b) local-owner spawn-projection of newly-adopted children, and (c) ownership-migration handoff seed. Higher = smoother through long packet gaps but more overshoot if velocity changes during the gap. 0 = disable all forward projection (objects freeze at the latest snapshot until the next one arrives).',
+            },
+            {
+                key: 'SPAWN_BRIDGE_ENABLED',
+                label: 'Spawn bridge enabled (0/1)',
+                min: 0, max: 1, step: 1, default: 1,
+                fmt: v => `${Math.round(v)}`,
+                help: 'On OnObjectReplaced (e.g. asteroid split), synthesize an extra snapshot at "local render time" carrying the parent\'s last-interpolated position. Bracket-search interpolates parent_pos → child authority_pos over one display delay, eliminating the spawn hitch on LAN and softening it under high latency. 0 = disable (revert to single-authority install: position discontinuity at every replace, magnitude proportional to (parent_vel − child_vel) × latency).',
             },
         ];
 
