@@ -238,6 +238,20 @@
                 help: 'M = density · R². With independent deflection/separation knobs, density damps only separation by 1/√density (deflection and spin are velocity-driven and density-independent).',
             },
             {
+                key: 'ASTEROID_MAX_SPEED',
+                label: 'Asteroid max linear speed',
+                min: 0, max: 5, step: 0.05, default: 0.8,
+                fmt: v => v.toFixed(2),
+                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.8 matches the ship cap. 0 = no cap. Applied after split impulses so chains of close-range hits cannot compound past the limit.',
+            },
+            {
+                key: 'ASTEROID_MAX_SPIN',
+                label: 'Asteroid max spin (rad/frame)',
+                min: 0, max: 2, step: 0.01, default: Math.PI / 6,
+                fmt: v => `${v.toFixed(3)} (${(v * 60 / (2 * Math.PI)).toFixed(2)} rot/s)`,
+                help: 'Per-frame cap on |rotationSpeed| of locally-owned asteroids (same units as SHIP_TURN_SPEED — radians per 60fps frame). Default π/6 ≈ 0.524 corresponds to 5 full rotations per second. 0 = no cap.',
+            },
+            {
                 key: 'DEFLECTION_KICK',
                 label: 'Deflection kick (head-on Δv_COM)',
                 min: 0, max: 5e-3, step: 1e-5, default: 1e-3,

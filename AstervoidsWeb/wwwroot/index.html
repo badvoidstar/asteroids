@@ -1018,6 +1018,15 @@
         ASTEROID_BASE_COUNT: 1,     // Starting astervoids in wave 1
         ASTEROID_BASE_SPEED: 0.15,  // Base asteroid speed per second (normalized)
         ASTEROID_SPEED_VARIANCE: 0.1, // Random speed variation (normalized)
+        // Per-frame caps applied to locally-owned asteroids in Asteroid.update().
+        // ASTEROID_MAX_SPEED uses the same units as SHIP_MAX_SPEED (normalized
+        // reference-dim per second). ASTEROID_MAX_SPIN uses the same units as
+        // SHIP_TURN_SPEED (radians per 60fps frame); the default π/6 corresponds
+        // to 5 full rotations per second (5 · 2π rad/s ÷ 60 frames/s = π/6).
+        // Caps apply after split impulses, so chains of close-range hits can no
+        // longer compound velocity/spin past these limits.
+        ASTEROID_MAX_SPEED: 0.8,
+        ASTEROID_MAX_SPIN: Math.PI / 6,
         ASTEROID_VERTICES: 10,      // Number of vertices per asteroid
         ASTEROID_JAGGEDNESS: 0.4,   // Shape irregularity (0-1)
         MIN_ASTEROID_RADIUS: 0.025, // Min radius before no split (normalized)
@@ -3231,6 +3240,26 @@
          * @param {number} dt - Delta time multiplier (1.0 = 60fps)
          */
         update(dt = 1) {
+            // Cap linear speed (same units as SHIP_MAX_SPEED). Compare squared
+            // magnitudes to skip the sqrt when under the cap.
+            const maxSpeed = CONFIG.ASTEROID_MAX_SPEED;
+            if (maxSpeed > 0) {
+                const speedSq = this.velocityX * this.velocityX + this.velocityY * this.velocityY;
+                const maxSpeedSq = maxSpeed * maxSpeed;
+                if (speedSq > maxSpeedSq) {
+                    const speed = Math.sqrt(speedSq);
+                    const k = maxSpeed / speed;
+                    this.velocityX *= k;
+                    this.velocityY *= k;
+                }
+            }
+
+            // Cap angular speed (same units as SHIP_TURN_SPEED — radians per frame).
+            const maxSpin = CONFIG.ASTEROID_MAX_SPIN;
+            if (maxSpin > 0 && Math.abs(this.rotationSpeed) > maxSpin) {
+                this.rotationSpeed = this.rotationSpeed > 0 ? maxSpin : -maxSpin;
+            }
+
             // Move asteroid using aspect-ratio-aware conversion
             this.x += velocityToNormalizedDeltaX(this.velocityX) * dt;
             this.y += velocityToNormalizedDeltaY(this.velocityY) * dt;
@@ -3478,6 +3507,8 @@
     // numeric tunables prevents stray messages from mutating arbitrary CONFIG fields.
     const DEBUG_OVERRIDABLE_KEYS = new Set([
         'ASTEROID_DENSITY',
+        'ASTEROID_MAX_SPEED',
+        'ASTEROID_MAX_SPIN',
         'DEFLECTION_KICK',
         'SEPARATION_ENERGY',
         'SEPARATION_ENERGY_SIZE_BLEND',
