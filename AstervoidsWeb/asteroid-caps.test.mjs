@@ -44,8 +44,8 @@ function clampSpin(rs, maxSpin) {
     return rs > 0 ? maxSpin : -maxSpin;
 }
 
-test('CONFIG.ASTEROID_MAX_SPEED defaults to 0.8 (matches SHIP_MAX_SPEED units)', () => {
-    assert.equal(ASTEROID_MAX_SPEED, 0.8);
+test('CONFIG.ASTEROID_MAX_SPEED defaults to 0.4 (half SHIP_MAX_SPEED, same units)', () => {
+    assert.equal(ASTEROID_MAX_SPEED, 0.4);
 });
 
 test('CONFIG.ASTEROID_MAX_SPIN defaults to π/6 ≈ 5 rotations per second', () => {
@@ -92,9 +92,9 @@ test('clampSpin: cap of 0 disables (no clamp)', () => {
     assert.equal(clampSpin(-99, 0), -99);
 });
 
-test('default cap matches ship cap (linear units parity)', () => {
+test('default cap is half the ship cap (deliberate — asteroids cap tighter)', () => {
     const SHIP_MAX_SPEED = extractConfigLiteral('SHIP_MAX_SPEED');
-    assert.equal(ASTEROID_MAX_SPEED, SHIP_MAX_SPEED);
+    assert.equal(ASTEROID_MAX_SPEED, SHIP_MAX_SPEED / 2);
 });
 
 test('debug page registers the new keys', () => {

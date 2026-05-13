@@ -240,9 +240,9 @@
             {
                 key: 'ASTEROID_MAX_SPEED',
                 label: 'Asteroid max linear speed',
-                min: 0, max: 2, step: 0.025, default: 0.8,
+                min: 0, max: 2, step: 0.025, default: 0.4,
                 fmt: v => v.toFixed(3),
-                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.8 matches the ship cap. Realistic asteroid speeds in normal play peak around 0.4–0.6 (initial spawn ≈ 0.15–0.25 plus ~0.09 added per split via SEPARATION_ENERGY); to see visible capping you typically need to drag below 0.5. 0 = no cap. Note: only locally-owned asteroids are clamped — in multiplayer this affects the asteroids you currently own; remote ones reflect their owner\'s setting.',
+                help: 'Per-frame cap on |velocity| of locally-owned asteroids (same units as SHIP_MAX_SPEED — normalized refdim/s). Default 0.4 (half the ship cap of 0.8) reins in compounded velocity from chained splits while still letting large hits accelerate fragments visibly. Realistic speeds in normal play peak around 0.4-0.6, so this cap will engage frequently. 0 = no cap. Note: only locally-owned asteroids are clamped — in multiplayer this affects the asteroids you currently own; remote ones reflect their owner\'s setting.',
             },
             {
                 key: 'ASTEROID_MAX_SPIN',
