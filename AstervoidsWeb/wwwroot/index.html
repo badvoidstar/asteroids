@@ -1071,9 +1071,11 @@
         MASS_SPLIT_BIAS: 0.6,
 
         // ─── Fracture geometry (visual + clip) ──────────────────────────────
-        // Master switch for fracture split logic. OFF by default so the legacy
-        // disk split path is preserved unless explicitly enabled (URL/session).
-        FRACTURE_ENABLED: false,
+        // Master switch for fracture split logic. ON by default so children of
+        // a split inherit the parent silhouette closed by a jagged fracture
+        // polyline. Set to false (or via URL/session override) to fall back to
+        // the legacy disk split path.
+        FRACTURE_ENABLED: true,
         // Children of a split inherit their parent's outer silhouette on their
         // side of the impact, and a jagged FRACTURE polyline closes the cut.
         // The number of intermediate jag-points along the fracture chord is
