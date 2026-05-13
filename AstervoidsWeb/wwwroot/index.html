@@ -1440,16 +1440,33 @@
          *   network jitter no longer enters the snapshot key.
          *   When omitted (legacy callers), falls back to performance.now() which
          *   anchors the snapshot to receiver-local time as before.
+         * @param {number} [arrivalServerTime] - Receiver's server-time estimate
+         *   captured INSIDE the SignalR event handler (object-sync.js stamps it
+         *   on `obj.arrivalServerTime`). Used as the "now" reference for the
+         *   lag-based adaptive-delay sample so the sample reflects only
+         *   network/queue delay, not game-loop processing latency. Falls back
+         *   to `this.serverNowMs()` when not provided.
+         * @param {boolean} [recordSample=true] - When false, the snapshot is
+         *   pushed into the bracket buffer but NOT fed into the lag-based
+         *   adaptive delay metric. Used for synthetic spawn-bridge snapshots
+         *   whose validAt is back-projected (`serverNowMs - delay`) — sampling
+         *   them would create a positive feedback loop where each spawn nudges
+         *   the computed delay up toward the current delay value.
          */
-        updateState(objectId, data, ownerMemberId, validAt) {
+        updateState(objectId, data, ownerMemberId, validAt, arrivalServerTime, recordSample = true) {
             const now = (validAt != null)
                 ? this.validAtToPerfNow(validAt)
                 : performance.now();
             // Per-object lag observation (Phase B): the cleanest signal of
             // owner→receiver delay. Skipped silently when clock isn't
-            // initialized yet (serverNowMs would be a guess).
-            if (validAt != null && ownerMemberId && this.isClockOffsetInitialized()) {
-                this.recordObjectSample(ownerMemberId, validAt, this.serverNowMs());
+            // initialized yet (serverNowMs would be a guess). Bridge snapshots
+            // pass recordSample=false to avoid biasing the metric with
+            // synthetic timestamps. arrivalServerTime is preferred over
+            // serverNowMs() because it was captured at the SignalR event
+            // boundary, not after game-loop dispatch.
+            if (recordSample && validAt != null && ownerMemberId && this.isClockOffsetInitialized()) {
+                const arrival = (arrivalServerTime != null) ? arrivalServerTime : this.serverNowMs();
+                this.recordObjectSample(ownerMemberId, validAt, arrival);
             }
             const existing = this.states.get(objectId);
             const snapshot = {
@@ -3677,7 +3694,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -3859,7 +3876,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -3962,7 +3979,7 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt, obj.arrivalServerTime);
                 RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
@@ -6128,12 +6145,16 @@
                         };
                         if (bridgeIsBeforeAuth) {
                             // LAN: bridge older than authority → bridge first.
-                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt);
-                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt);
+                            // Bridge snapshot is synthetic (validAt back-projected
+                            // from current delay); EXCLUDED from adaptive-delay
+                            // sampling to prevent positive feedback (delay
+                            // estimate would otherwise feed itself on every spawn).
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt, null, false);
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt, child.arrivalServerTime);
                         } else {
                             // High latency: authority older than bridge → authority first.
-                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt);
-                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt);
+                            RemoteObjects.updateState(child.id, child.data, child.ownerMemberId, childValidAt, child.arrivalServerTime);
+                            RemoteObjects.updateState(child.id, bridgeData, child.ownerMemberId, bridgeValidAt, null, false);
                         }
                         // Pre-set lastVersions so the next frame's
                         // updateAstervoidsFromSync (or updateBulletsFromSync) skips

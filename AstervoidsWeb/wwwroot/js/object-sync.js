@@ -209,6 +209,24 @@ const ObjectSync = (function() {
     function getSendRate() {
         return Math.round(1 / nominalFrameTime);
     }
+
+    /**
+     * Server-time estimate of "right now" in the same axis as validAt.
+     * Returns null when the NTP clock isn't bootstrapped — callers must
+     * guard so adaptive-delay metrics aren't fed pre-init guesses.
+     *
+     * Captured INSIDE network event handlers so the lag = arrival − validAt
+     * sample reflects only owner→receiver delivery delay, with zero
+     * contamination from game-loop processing latency (a frame's worth of
+     * raf jitter, 0–16ms, that would otherwise systematically inflate the
+     * computed jitter buffer).
+     */
+    function getArrivalServerTimeMs() {
+        if (clockSource && clockSource.initialized && clockSource.initialized()) {
+            return Math.round(clockSource.nowMs());
+        }
+        return null;
+    }
     
     /**
      * Add object to type index
@@ -421,6 +439,10 @@ const ObjectSync = (function() {
         const arrivalTime = (typeof performance !== 'undefined' && performance.now)
             ? performance.now()
             : Date.now();
+        // Server-time twin of arrivalTime (NTP-aligned), used by RemoteObjects
+        // for lag-based adaptive delay. Captured here so the lag estimate
+        // ignores game-loop processing latency entirely.
+        const arrivalServerTime = getArrivalServerTimeMs();
 
         // Strip any legacy spawnTimestamp field from the wire data. The
         // current model uses validAt as the single owner-stamped timestamp;
@@ -444,6 +466,7 @@ const ObjectSync = (function() {
                 existing.data = objectInfo.data || {};
                 existing.version = objectInfo.version;
                 existing.arrivalTime = arrivalTime;
+                existing.arrivalServerTime = arrivalServerTime;
                 if (validAt !== undefined && validAt !== null) {
                     existing.validAt = validAt;
                 }
@@ -479,6 +502,7 @@ const ObjectSync = (function() {
         // game-loop frame's RemoteObjects.updateState(... obj.arrivalTime)
         // call anchors the snapshot correctly (Fix 2 + Fix 3).
         obj.arrivalTime = arrivalTime;
+        obj.arrivalServerTime = arrivalServerTime;
         // Stamp the unified server-time axis anchor. RemoteObjects.updateState
         // converts validAt → perf.now-domain via validAtToPerfNow so bracket
         // search remains monotonic while the snapshot key encodes the global
@@ -517,6 +541,8 @@ const ObjectSync = (function() {
         const arrivalTime = (typeof performance !== 'undefined' && performance.now)
             ? performance.now()
             : Date.now();
+        // Server-time twin of arrivalTime (see handleRemoteObjectCreated for rationale).
+        const arrivalServerTime = getArrivalServerTimeMs();
 
         // Signal packet arrival (for adaptive delay and latency tracking)
         if (callbacks.onBatchReceived) {
@@ -534,6 +560,7 @@ const ObjectSync = (function() {
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
+                    existing.arrivalServerTime = arrivalServerTime;
                     if (updateValidAt !== undefined && updateValidAt !== null) {
                         existing.validAt = updateValidAt;
                     }
@@ -558,6 +585,7 @@ const ObjectSync = (function() {
                     data: update.data || {},
                     version: update.version,
                     arrivalTime: arrivalTime,
+                    arrivalServerTime: arrivalServerTime,
                     validAt: (updateValidAt !== undefined && updateValidAt !== null) ? updateValidAt : undefined
                 };
                 objects.set(obj.id, obj);

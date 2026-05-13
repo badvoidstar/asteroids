@@ -180,3 +180,85 @@ test('createMemberDelay: starts with empty lagSamples and INTERPOLATION_DELAY de
     assert.equal(ad.computedDelay, CONFIG.INTERPOLATION_DELAY);
     assert.equal(ad.lastValidAt, 0);
 });
+
+// ── recordSample gate: synthetic spawn-bridge snapshots must not pollute lag ──
+
+/**
+ * Mirror of RemoteObjects.updateState's recordSample gate. Real callers pass
+ * `recordSample=false` for bridge snapshots whose validAt is back-projected
+ * (`serverNowMs - delay`) — feeding those into recordObjectSample would
+ * create a positive feedback loop (lag = delay → raises delay → raises lag).
+ */
+function updateStateAdaptive(ad, validAt, arrivalServerTime, recordSample = true) {
+    if (!recordSample) return;
+    recordObjectSample(ad, validAt, arrivalServerTime);
+}
+
+test('updateState: recordSample=false skips lag sample (bridge exclusion)', () => {
+    const ad = createMemberDelay();
+    // Push 10 synthetic bridge snapshots with lag=200 (high jitter pretend)
+    for (let i = 0; i < 10; i++) {
+        updateStateAdaptive(ad, 1000 + i * 50, 1000 + i * 50 + 200, /*recordSample=*/false);
+    }
+    assert.equal(ad.lagSamples.length, 0,
+        'bridge snapshots must not enter lagSamples');
+    assert.equal(ad.computedDelay, CONFIG.INTERPOLATION_DELAY,
+        'computedDelay must remain at default with only bridge snapshots');
+});
+
+test('updateState: real authority snapshots after bridge still drive convergence', () => {
+    const ad = createMemberDelay();
+    // 5 bridge snapshots with phantom 500ms lag (excluded)
+    for (let i = 0; i < 5; i++) {
+        updateStateAdaptive(ad, 1000 + i * 50, 1000 + i * 50 + 500, /*recordSample=*/false);
+    }
+    // Then 30 real samples with actual lag=15ms
+    for (let i = 0; i < 30; i++) {
+        updateStateAdaptive(ad, 2000 + i * 50, 2000 + i * 50 + 15, /*recordSample=*/true);
+    }
+    // Convergence should reflect the REAL 15ms lag, not the synthetic 500ms.
+    assert.ok(ad.computedDelay < 50,
+        `computedDelay=${ad.computedDelay} must reflect real lag (15), not bridge synthetic (500)`);
+});
+
+test('updateState: positive feedback prevented (bridge with delay-derived lag does not inflate delay)', () => {
+    const ad = createMemberDelay();
+    // Establish baseline: 30 real samples at lag=20.
+    for (let i = 0; i < 30; i++) {
+        updateStateAdaptive(ad, 1000 + i * 50, 1000 + i * 50 + 20, /*recordSample=*/true);
+    }
+    const baselineDelay = ad.computedDelay;
+    // Simulate 50 spawn-bridge events: each would have stamped lag = current delay.
+    for (let i = 0; i < 50; i++) {
+        const syntheticLag = ad.computedDelay; // bridgeValidAt = serverNowMs - delay → lag = delay
+        updateStateAdaptive(ad, 2000 + i * 50, 2000 + i * 50 + syntheticLag, /*recordSample=*/false);
+    }
+    assert.equal(ad.computedDelay, baselineDelay,
+        'bridge events must not nudge computedDelay (positive feedback prevention)');
+});
+
+// ── arrivalServerTime gate: handler-captured time vs game-loop processing time ──
+
+test('arrivalServerTime: handler-captured arrival yields lower lag than game-loop time', () => {
+    // Simulate two scenarios:
+    //  (a) arrival captured at SignalR event boundary (handler time) — pure network delay
+    //  (b) arrival captured in game-loop dispatch — adds frame-pacing jitter
+    //
+    // Both scenarios send the SAME real network samples (validAt=T, true arrival=T+30).
+    // Scenario (b) adds a uniform 8ms game-loop processing delay to every sample.
+    const adHandler = createMemberDelay();
+    const adGameLoop = createMemberDelay();
+
+    for (let i = 0; i < 30; i++) {
+        const validAt = 1000 + i * 50;
+        const handlerArrival = validAt + 30;       // true network delay
+        const gameLoopArrival = handlerArrival + 8; // +8ms raf jitter
+        updateStateAdaptive(adHandler, validAt, handlerArrival, true);
+        updateStateAdaptive(adGameLoop, validAt, gameLoopArrival, true);
+    }
+
+    // Both converge toward their respective lag means; handler should be ~30,
+    // gameLoop should be ~38. The handler-based estimate is consistently lower.
+    assert.ok(adHandler.computedDelay < adGameLoop.computedDelay,
+        `handler (${adHandler.computedDelay}) must be < gameLoop (${adGameLoop.computedDelay}) — game-loop time inflates the estimate`);
+});
