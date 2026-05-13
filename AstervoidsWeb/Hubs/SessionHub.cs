@@ -143,34 +143,6 @@ public class SessionHub : Hub
         return obj;
     }
 
-    /// <summary>
-    /// Sanity bound for owner-stamped <c>clientValidAt</c> values. If the client's
-    /// estimate diverges from the server's hub-entry timestamp by more than this
-    /// many milliseconds, we assume the client's clock estimate is unreliable
-    /// (clock not yet initialized, glitched, or hostile) and fall back to the
-    /// server's timestamp. 2s comfortably exceeds any realistic
-    /// RTT + clock-skew combination on a real game session.
-    /// </summary>
-    private const long ValidAtSanityBoundMs = 2000;
-
-    /// <summary>
-    /// Resolve the broadcast-time <c>validAt</c> from an owner-stamped
-    /// <paramref name="clientValidAt"/> and the server's hub-entry
-    /// <paramref name="serverTimestamp"/>. Within ±<see cref="ValidAtSanityBoundMs"/>
-    /// the client value wins (eliminates the owner→server upload-time bias from
-    /// motion-related receiver math). Outside the window or when null, falls
-    /// back to the server timestamp so receivers always have a usable value.
-    /// </summary>
-    private static long ResolveValidAt(long? clientValidAt, long serverTimestamp)
-    {
-        if (clientValidAt.HasValue
-            && Math.Abs(clientValidAt.Value - serverTimestamp) <= ValidAtSanityBoundMs)
-        {
-            return clientValidAt.Value;
-        }
-        return serverTimestamp;
-    }
-
     private static MemberInfo ToMemberInfo(Member member) =>
         new(member.Id, member.Role.ToString(), member.JoinedAt);
 
@@ -181,7 +153,7 @@ public class SessionHub : Hub
     /// </summary>
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
         new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(),
-            new Dictionary<string, object?>(o.Data), o.Version);
+            new Dictionary<string, object?>(o.Data), o.Version, o.ValidAt);
 
     /// <summary>
     /// Takes a consistent point-in-time snapshot of a session's members and objects.
@@ -484,8 +456,9 @@ public class SessionHub : Hub
     public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale.
+        // clientValidAt is forwarded into the service which validates it (±2 s
+        // clamp + monotonic cap) and stamps the result on SessionObject.ValidAt.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
@@ -493,7 +466,7 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId, clientValidAt));
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId));
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
@@ -506,10 +479,11 @@ public class SessionHub : Hub
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
-        // validAt is the unified server-time anchor for receiver-side interpolation;
-        // serverTimestamp is retained for receiver-side packet-arrival / RTT instrumentation.
+        // ObjectInfo.ValidAt carries the validated owner-stamped server-time anchor for
+        // receiver-side interpolation; serverTimestamp is retained for receiver-side
+        // packet-arrival / RTT instrumentation.
         await BroadcastToOthersAsync(session, member.Id, "OnObjectCreated",
-            objectInfo, member.Id, memberSequence, serverTimestamp, validAt);
+            objectInfo, member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, obj.Scope);
 
@@ -534,8 +508,10 @@ public class SessionHub : Hub
         // Hub-entry serverTimestamp — see JoinSession for rationale. Always
         // populated (even when no objects are updated) so the response carries
         // a valid timestamp the client's clock-offset estimator can use.
+        // clientValidAt (call-level fallback) and per-update ObjectUpdateRequest.ValidAt
+        // are both validated inside the service (±2 s clamp + monotonic cap) and
+        // stamped on each SessionObject.ValidAt.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
@@ -544,13 +520,13 @@ public class SessionHub : Hub
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, senderSendIntervalMs, clientValidAt));
 
         // Map hub request type to service type; ownership enforcement is inside the service.
-        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data));
-        var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates).ToList();
-
-        var objectInfos = updatedObjects.Select(ToObjectInfo).ToList();
+        // Per-object ValidAt is preserved so a single batch can carry independently-stamped
+        // updates; null per-object falls back to call-level clientValidAt inside the service.
+        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data, u.ValidAt)).ToList();
+        var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates, clientValidAt, serverTimestamp).ToList();
 
         long memberSequence = 0;
-        if (objectInfos.Count > 0)
+        if (updatedObjects.Count > 0)
         {
             memberSequence = NextMemberSequence(member);
             // Build a map from objectId → requested data for the broadcast payload.
@@ -558,19 +534,24 @@ public class SessionHub : Hub
             var requestDataByObjectId = serviceUpdates
                 .GroupBy(u => u.ObjectId)
                 .ToDictionary(g => g.Key, g => g.Last().Data);
+            // Per-object ValidAt is read from the stored SessionObject so it carries
+            // the validated value (±2 s clamp + monotonic cap) — the same value any
+            // future reconciliation snapshot would carry. This is the unified
+            // interpolation timeline anchor; receivers no longer take it from the
+            // broadcast trailer, only from each ObjectUpdateInfo.
             var updateInfos = updatedObjects
                 .Where(o => requestDataByObjectId.ContainsKey(o.Id))
-                .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version))
+                .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version, o.ValidAt))
                 .ToList();
 
             // Broadcast to other members only — sender gets versions/RTT from the response.
-            // validAt is the unified server-time anchor for receiver-side interpolation;
             // serverTimestamp is retained for receiver-side packet-arrival / jitter
-            // instrumentation. The legacy clientTimestamp echo was removed: it was only
-            // useful to the sender, who never received the broadcast (OthersInGroup),
-            // so every byte of it on the wire was wasted.
+            // instrumentation. The legacy clientTimestamp echo and trailing validAt
+            // arg were removed: clientTimestamp was only useful to the sender (who
+            // never received the broadcast — OthersInGroup), and validAt is now
+            // per-object inside each ObjectUpdateInfo.
             await BroadcastToOthersAsync(session, member.Id, "OnObjectsUpdated",
-                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt);
+                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs);
         }
 
         var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
@@ -646,18 +627,9 @@ public class SessionHub : Hub
     {
         // Hub-entry serverTimestamp — used by recordPacketArrival (network arrival
         // timing, includes server processing time). NOT used as the spawn anchor;
-        // see validAt below for the owner-stamped value used by interpolation.
+        // the owner-stamped clientValidAt is validated and stored on each child
+        // SessionObject by the service, then read back for the broadcast.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        // validAt is the unified server-time anchor for receiver-side interpolation.
-        // The asteroid OWNER stamps their best estimate of "server time at collision
-        // detection" using their Phase 1 clock-offset (RemoteObjects.serverNowMs).
-        // This eliminates the owner→server upload-time bias that plagued using
-        // serverTimestamp alone:
-        //   * serverTimestamp = T_collision_owner + upload_time_owner_to_server
-        //   * clientValidAt   = T_collision_owner   (modulo NTP residual)
-        // Receivers then bracket-search at validAt, so children spawn at the
-        // position the bracket-renderer was actually showing the parent at.
-        var validAt = ResolveValidAt(clientValidAt, serverTimestamp);
 
         var ctx = GetCallerContext();
         if (ctx == null) return null;
@@ -668,12 +640,13 @@ public class SessionHub : Hub
         var objectScope = ParseScope(scope);
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
 
-        // Build replacement specs; service enforces ownership atomically
+        // Build replacement specs; service enforces ownership atomically and stamps
+        // the validated collision-time on each child's ValidAt.
         var specs = replacements
             .Select(data => new ReplacementObjectSpec(objectScope, data, ownerGuid))
             .ToList();
 
-        var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs);
+        var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs, clientValidAt, serverTimestamp);
         if (createdObjects == null)
         {
             _logger.LogWarning("ReplaceObject failed - object {ObjectId} not found, not owned by member {MemberId}, or session not active",
@@ -689,9 +662,11 @@ public class SessionHub : Hub
         // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
         // update its local object map (replaceObject is not local-first). Would need
         // to refactor replaceObject to process the invoke response locally first.
+        // ObjectInfo.ValidAt carries the validated owner-stamped collision time so
+        // receivers no longer need a broadcast-trailer validAt argument.
         var replaceEvent = new ObjectReplacedEvent(deleteObjectId, createdInfos);
         await BroadcastToAllAsync(session, "OnObjectReplaced",
-            replaceEvent, member.Id, memberSequence, serverTimestamp, validAt);
+            replaceEvent, member.Id, memberSequence, serverTimestamp);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
             deleteObjectId, createdObjects.Count, member.SessionId);

@@ -230,21 +230,19 @@ const SessionClient = (function() {
         }));
 
         // Object events
-        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+        // ValidAt is now embedded in each ObjectInfo / ObjectUpdateInfo as a top-level
+        // property (server-validated: ±2 s sanity bound + monotonic cap). The wire no
+        // longer carries a trailing validAt argument on these events, and the legacy
+        // clientTimestamp echo on OnObjectsUpdated has been retired.
+        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectCreated) {
-                // Forward validAt as the unified server-time interpolation anchor.
-                // The server resolves it from the owner's clientValidAt (preferred,
-                // upload-time-bias-free) or its own hub-entry serverTimestamp
-                // (fallback when the owner's clock isn't yet initialized).
-                // Either way receivers can place snap[0] on the same axis they
-                // bracket-search, eliminating the spawn-vs-render axis seam.
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
             }
         }));
 
-        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt) => {
+        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs, validAt);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
             }
         }));
 
@@ -254,9 +252,9 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
             }
         }));
 

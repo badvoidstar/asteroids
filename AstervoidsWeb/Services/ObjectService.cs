@@ -35,12 +35,42 @@ public class ObjectService : IObjectService
     }
 
     /// <summary>
+    /// Sanity bound for owner-stamped <c>clientValidAt</c> values. Mirrors
+    /// <c>SessionHub.ValidAtSanityBoundMs</c>; kept private here so the service
+    /// can be unit-tested without referencing the hub layer.
+    /// </summary>
+    private const long ValidAtSanityBoundMs = 2000;
+
+    /// <summary>
+    /// Validates an owner-stamped <paramref name="clientValidAt"/> against the server's
+    /// <paramref name="serverReceiveTimeMs"/> and (optionally) the object's prior
+    /// <paramref name="previousValidAt"/>:
+    ///   * Out-of-bounds (|client - server| > ±2 s) or null → fall back to <paramref name="serverReceiveTimeMs"/>.
+    ///   * Result is then capped at <paramref name="previousValidAt"/> (if provided)
+    ///     so a single object's ValidAt is monotonically non-decreasing.
+    /// This is the single source of truth for the validAt timeline; both create and
+    /// update paths must call it before storage.
+    /// </summary>
+    private static long ValidateValidAt(long? clientValidAt, long serverReceiveTimeMs, long? previousValidAt = null)
+    {
+        var result = clientValidAt.HasValue
+            && Math.Abs(clientValidAt.Value - serverReceiveTimeMs) <= ValidAtSanityBoundMs
+            ? clientValidAt.Value
+            : serverReceiveTimeMs;
+
+        if (previousValidAt.HasValue && result < previousValidAt.Value)
+            result = previousValidAt.Value;
+
+        return result;
+    }
+
+    /// <summary>
     /// Validates that a session exists. Returns the session if valid, or null if not found.
     /// </summary>
     private Session? GetValidSession(Guid sessionId)
         => _sessionService.GetSession(sessionId);
 
-    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null)
+    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null, long? clientValidAt = null, long? serverReceiveTimeMs = null)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -58,7 +88,9 @@ public class ObjectService : IObjectService
             if (effectiveOwner != creatorMemberId && !session.Members.TryGetValue(effectiveOwner, out _))
                 return null;
 
-            var obj = NewSessionObject(sessionId, creatorMemberId, effectiveOwner, scope, data);
+            var receive = serverReceiveTimeMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var validAt = ValidateValidAt(clientValidAt, receive);
+            var obj = NewSessionObject(sessionId, creatorMemberId, effectiveOwner, scope, data, validAt);
             session.Objects.TryAdd(obj.Id, obj);
             return obj;
         }
@@ -69,7 +101,7 @@ public class ObjectService : IObjectService
     /// Used internally and by tests.  The hub uses <see cref="UpdateObjects"/> which
     /// enforces ownership inside the lock.
     /// </summary>
-    public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data)
+    public SessionObject? UpdateObject(Guid sessionId, Guid objectId, Dictionary<string, object?> data, long? clientValidAt = null, long? serverReceiveTimeMs = null)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -80,7 +112,9 @@ public class ObjectService : IObjectService
             if (!session.Objects.TryGetValue(objectId, out var obj))
                 return null;
 
-            ApplyUpdate(obj, data);
+            var receive = serverReceiveTimeMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var validAt = ValidateValidAt(clientValidAt, receive, obj.ValidAt);
+            ApplyUpdate(obj, data, validAt);
             return obj;
         }
     }
@@ -89,15 +123,18 @@ public class ObjectService : IObjectService
     /// Batch-updates multiple objects owned by <paramref name="ownerMemberId"/>.
     ///
     /// Objects not owned by the caller are silently skipped.  Successfully updated
-    /// objects are returned.
+    /// objects are returned. Each update's <see cref="ObjectUpdate.ValidAt"/>
+    /// (if present) takes precedence over <paramref name="callLevelClientValidAt"/>;
+    /// both go through the same ±2 s-vs-server / monotonic-vs-previous validator.
     /// </summary>
-    public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates)
+    public IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates, long? callLevelClientValidAt = null, long? serverReceiveTimeMs = null)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
             return Enumerable.Empty<SessionObject>();
 
         var results = new List<SessionObject>();
+        var receive = serverReceiveTimeMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         lock (session.SyncRoot)
         {
@@ -113,7 +150,9 @@ public class ObjectService : IObjectService
                 if (obj.OwnerMemberId != ownerMemberId)
                     continue;
 
-                ApplyUpdate(obj, update.Data);
+                var requestedValidAt = update.ValidAt ?? callLevelClientValidAt;
+                var validAt = ValidateValidAt(requestedValidAt, receive, obj.ValidAt);
+                ApplyUpdate(obj, update.Data, validAt);
                 results.Add(obj);
             }
         }
@@ -148,7 +187,9 @@ public class ObjectService : IObjectService
         Guid sessionId,
         Guid deleteObjectId,
         Guid ownerMemberId,
-        IReadOnlyList<ReplacementObjectSpec> replacements)
+        IReadOnlyList<ReplacementObjectSpec> replacements,
+        long? clientValidAt = null,
+        long? serverReceiveTimeMs = null)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -165,6 +206,13 @@ public class ObjectService : IObjectService
             if (objToDelete.OwnerMemberId != ownerMemberId)
                 return null;
 
+            // All replacement children share the SAME validated collision-time stamp so
+            // observers see them spawn at exactly the parent's bracket-rendered position
+            // at that moment. Monotonic cap is taken against the deleted parent's
+            // ValidAt, not against the (not-yet-existing) children's previous values.
+            var receive = serverReceiveTimeMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var validAt = ValidateValidAt(clientValidAt, receive, objToDelete.ValidAt);
+
             // Determine effective owner for replacements (must be a current member)
             var created = new List<SessionObject>(replacements.Count);
             foreach (var spec in replacements)
@@ -174,7 +222,7 @@ public class ObjectService : IObjectService
                     ? spec.OwnerOverride.Value
                     : ownerMemberId;
 
-                var obj = NewSessionObject(sessionId, ownerMemberId, effectiveOwner, spec.Scope, spec.Data);
+                var obj = NewSessionObject(sessionId, ownerMemberId, effectiveOwner, spec.Scope, spec.Data, validAt);
                 session.Objects.TryAdd(obj.Id, obj);
                 created.Add(obj);
             }
@@ -207,10 +255,11 @@ public class ObjectService : IObjectService
     // ── Private helpers ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Applies a data merge (copy-on-write) + version bump to a single object.
+    /// Applies a data merge (copy-on-write) + version bump to a single object,
+    /// stamping the object's ValidAt with the validated server-time sample.
     /// Must be called while holding <c>session.SyncRoot</c>.
     /// </summary>
-    private static void ApplyUpdate(SessionObject obj, Dictionary<string, object?> data)
+    private static void ApplyUpdate(SessionObject obj, Dictionary<string, object?> data, long validAt)
     {
         // Copy-on-write: create a new dictionary so readers outside the lock observe
         // a stable snapshot rather than a partially-written dictionary.
@@ -221,6 +270,7 @@ public class ObjectService : IObjectService
         obj.Data = newData;
         obj.Version++;
         obj.UpdatedAt = DateTime.UtcNow;
+        obj.ValidAt = validAt;
     }
 
     /// <summary>
@@ -233,13 +283,15 @@ public class ObjectService : IObjectService
         Guid creatorMemberId,
         Guid ownerMemberId,
         ObjectScope scope,
-        Dictionary<string, object?>? data)
+        Dictionary<string, object?>? data,
+        long validAt)
         => new()
         {
             SessionId = sessionId,
             CreatorMemberId = creatorMemberId,
             OwnerMemberId = ownerMemberId,
             Scope = scope,
-            Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>()
+            Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>(),
+            ValidAt = validAt
         };
 }

@@ -401,15 +401,16 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      *
-     * @param {object} objectInfo
+     * @param {object} objectInfo - Includes server-validated `validAt` (top-level
+     *   property): owner-stamped server-time ms (NTP-aligned), clamped within
+     *   ±2 s of hub-entry receive time and monotonically capped against the
+     *   object's previous ValidAt. This is THE unified interpolation axis:
+     *   snap[0] is keyed at validAt. Stored on `obj.validAt`; consumed by
+     *   RemoteObjects.updateState.
      * @param {string} senderMemberId
      * @param {number} memberSequence
-     * @param {number|null} validAt - Owner-stamped server-time ms (NTP-aligned)
-     *   resolved by the server (clientValidAt clamped, or hub-entry fallback).
-     *   This is THE unified interpolation axis: snap[0] is keyed at validAt.
-     *   Stored on `obj.validAt`; consumed by RemoteObjects.updateState.
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, validAt) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -429,6 +430,8 @@ const ObjectSync = (function() {
         if (objectInfo.data && objectInfo.data.spawnTimestamp !== undefined) {
             delete objectInfo.data.spawnTimestamp;
         }
+
+        const validAt = objectInfo.validAt;
 
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -492,17 +495,17 @@ const ObjectSync = (function() {
     /**
      * Handle remote objects updated (from other members only — self-echo eliminated).
      *
-     * @param {Array} updatedObjects
+     * @param {Array} updatedObjects - Each entry includes a server-validated
+     *   `validAt` top-level property (per-object: ±2 s clamp + monotonic cap).
+     *   Stamped on `existing.validAt` so RemoteObjects.updateState uses it
+     *   directly as the unified bracket-search axis anchor.
      * @param {number} serverTimestamp - hub-entry ms (still used for batch metrics)
      * @param {string} senderMemberId
      * @param {number} senderSeq
      * @param {number} memberSequence
      * @param {number} senderSendIntervalMs
-     * @param {number|null} validAt - Owner-stamped server-time ms (NTP-aligned)
-     *   for THIS BATCH. Stamped on every per-object snapshot below; consumed
-     *   by RemoteObjects.updateState as the unified bracket-search axis.
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs, validAt) {
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
         trackMemberSequence(senderMemberId, memberSequence);
 
         // Capture the actual network arrival time once per packet. Stamping each
@@ -519,9 +522,10 @@ const ObjectSync = (function() {
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
-        // Updates contain only id, data, version (metadata stripped for bandwidth)
+        // Updates contain id, data, version, validAt (metadata stripped for bandwidth)
         for (const update of updatedObjects) {
             update.data = expandData(update.data);
+            const updateValidAt = update.validAt;
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
@@ -530,8 +534,8 @@ const ObjectSync = (function() {
                     Object.assign(existing.data, update.data);
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
-                    if (validAt !== undefined && validAt !== null) {
-                        existing.validAt = validAt;
+                    if (updateValidAt !== undefined && updateValidAt !== null) {
+                        existing.validAt = updateValidAt;
                     }
 
                     // Update type index if type changed (only when type is present in delta)
@@ -554,7 +558,7 @@ const ObjectSync = (function() {
                     data: update.data || {},
                     version: update.version,
                     arrivalTime: arrivalTime,
-                    validAt: (validAt !== undefined && validAt !== null) ? validAt : undefined
+                    validAt: (updateValidAt !== undefined && updateValidAt !== null) ? updateValidAt : undefined
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -579,28 +583,30 @@ const ObjectSync = (function() {
 
     /**
      * Handle remote object replaced (atomic delete + create).
+     *
+     * Each ObjectInfo in event.createdObjects carries its own validated validAt
+     * (server stamps all children with the same collision-time value). The
+     * downstream onObjectReplaced callback consumers use createdObjects[i].validAt
+     * directly when synthesizing spawn-bridge snapshots.
+     *
      * @param {object} event - { deletedObjectId, createdObjects }
      * @param {string} senderMemberId
      * @param {number} memberSequence
-     * @param {number|null} validAt - Owner-stamped server-time ms (NTP-aligned)
-     *   for the replacement event, resolved by the server. Forwarded to each
-     *   replacement's handleRemoteObjectCreated so all children share the same
-     *   unified-axis anchor (children are simultaneous in the simulation).
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, validAt) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
         // Create all replacement objects (no sequence tracking — already tracked above).
-        // All children share the same validAt — they're simultaneous in the
-        // simulation timeline of the owner that authored the replacement.
+        // validAt is per-child inside each ObjectInfo (all children share the same
+        // server-validated collision-time from ObjectService.ReplaceObject).
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo, undefined, undefined, validAt);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, validAt);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
         }
     }
 
@@ -693,19 +699,14 @@ const ObjectSync = (function() {
                         existing.data = obj.data || {};
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
-                        // Mark this object as updated by reconciliation. The
-                        // snapshot data is stale by ~RTT (it was the server's
-                        // state at GetSessionState time, not now). If the
-                        // interpolator pushes this position into its ring
-                        // buffer timestamped at performance.now(), it would
-                        // step the rendered asteroid backward by ~RTT × velocity
-                        // and disrupt ongoing extrapolation. Consumers
-                        // (updateAstervoidsFromSync, updateRemoteShips,
-                        // updateBulletsFromSync) check this flag and skip the
-                        // updateState() push for one cycle, letting live
-                        // OnObjectsUpdated broadcasts (with proper arrivalTime
-                        // anchoring) drive the interpolator instead.
-                        existing.fromReconciliation = true;
+                        // Reconciliation snapshots now carry the same validated
+                        // server-time validAt as live broadcasts (monotonically
+                        // capped, ±2 s clamped). The interpolator pushes them
+                        // onto the unified bracket-search axis at that anchor,
+                        // so they no longer need a skip-one-cycle hack: they
+                        // either ARE the latest known state (correct to render
+                        // from) or are dominated by newer live snapshots in
+                        // the ring buffer (no visual effect).
                     }
                 } else if (pendingDeletes.has(obj.id)) {
                     // Locally deleted but server hasn't processed yet — do NOT

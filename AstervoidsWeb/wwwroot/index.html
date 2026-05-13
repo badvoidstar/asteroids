@@ -1392,13 +1392,24 @@
         },
 
         /**
-         * Create a fresh adaptive delay state for a member
+         * Create a fresh adaptive delay state for a member.
+         *
+         * `packetIntervals` tracks server-side packet spacing (used by the
+         * legacy interval-based estimate as a fallback). `lagSamples` is the
+         * preferred metric: arrivalServerTime − sampleTime (validAt) per
+         * snapshot, which directly measures the send-jitter + queue delay
+         * the owner is currently injecting into our render axis. When we have
+         * enough lagSamples we compute `rawDelay = lagMean + JITTER_MULT ×
+         * lagStddev + intervalStddev` so the renderer always trails the
+         * owner by enough to cover their worst recent jitter.
          */
         createMemberDelay() {
             return {
                 packetIntervals: [],
+                lagSamples: [],
                 computedDelay: CONFIG.INTERPOLATION_DELAY,
                 lastServerTimestamp: 0,
+                lastValidAt: 0,
                 remoteSendInterval: 0
             };
         },
@@ -1434,6 +1445,12 @@
             const now = (validAt != null)
                 ? this.validAtToPerfNow(validAt)
                 : performance.now();
+            // Per-object lag observation (Phase B): the cleanest signal of
+            // owner→receiver delay. Skipped silently when clock isn't
+            // initialized yet (serverNowMs would be a guess).
+            if (validAt != null && ownerMemberId && this.isClockOffsetInitialized()) {
+                this.recordObjectSample(ownerMemberId, validAt, this.serverNowMs());
+            }
             const existing = this.states.get(objectId);
             const snapshot = {
                 data: { ...data },
@@ -1530,14 +1547,81 @@
         },
 
         /**
-         * Record a packet interval for a specific member's adaptive delay
+         * Record a packet interval for a specific member's adaptive delay.
+         * Used when the lag-based estimate doesn't have enough samples yet
+         * (warm-up window). Once `lagSamples` reaches MIN_SAMPLES the
+         * lag-based path in `recomputeAdaptiveDelay` takes precedence.
          */
         recordMemberPacketInterval(ad, interval) {
             ad.packetIntervals.push(interval);
             if (ad.packetIntervals.length > CONFIG.ADAPTIVE_DELAY_SAMPLES) {
                 ad.packetIntervals.shift();
             }
-            if (ad.packetIntervals.length >= CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES) {
+            this.recomputeAdaptiveDelay(ad);
+        },
+
+        /**
+         * Record an owner-stamped sample (validAt) and the receiver's server-time
+         * estimate of when it arrived. The lag = arrival − validAt is the most
+         * direct measure of the send-jitter + queue delay we need to cover with
+         * interpolation delay; it absorbs send-interval skew, NTP-residual, and
+         * network queue depth all in one number.
+         *
+         * Skipped when the receiver clock isn't initialized (offset would be
+         * meaningless) or when validAt is missing on a snapshot.
+         */
+        recordObjectSample(memberId, validAt, arrivalServerTime) {
+            if (!CONFIG.ADAPTIVE_DELAY_ENABLED) return;
+            if (!memberId || validAt == null || arrivalServerTime == null) return;
+            const ad = this.getMemberDelay(memberId);
+            const lag = arrivalServerTime - validAt;
+            if (!Number.isFinite(lag) || lag < 0 || lag > 5000) return;
+            ad.lagSamples.push(lag);
+            if (ad.lagSamples.length > CONFIG.ADAPTIVE_DELAY_SAMPLES) {
+                ad.lagSamples.shift();
+            }
+            // Track per-member sample-time monotonicity → packet-interval fallback.
+            if (ad.lastValidAt > 0) {
+                const interval = validAt - ad.lastValidAt;
+                if (interval > 0 && interval < 5000) {
+                    this.recordMemberPacketInterval(ad, interval);
+                } else {
+                    this.recomputeAdaptiveDelay(ad);
+                }
+            } else {
+                this.recomputeAdaptiveDelay(ad);
+            }
+            ad.lastValidAt = validAt;
+        },
+
+        /**
+         * Recompute `ad.computedDelay` from current sample buffers. Lag-based
+         * path takes priority once we have ≥ MIN_SAMPLES lag observations:
+         * delay covers lag mean + JITTER_MULT × lag stddev, plus an
+         * additional interval-stddev cushion to stay ahead of bursty send
+         * spacing. Falls back to the interval-based formula during warm-up.
+         */
+        recomputeAdaptiveDelay(ad) {
+            const minSamples = CONFIG.ADAPTIVE_DELAY_MIN_SAMPLES;
+            const useLagBased = ad.lagSamples.length >= minSamples;
+
+            if (useLagBased) {
+                const lagMean = ad.lagSamples.reduce((s, v) => s + v, 0) / ad.lagSamples.length;
+                const lagVar = ad.lagSamples.reduce((s, v) => s + (v - lagMean) ** 2, 0) / ad.lagSamples.length;
+                const lagStddev = Math.sqrt(lagVar);
+                let intervalStddev = 0;
+                if (ad.packetIntervals.length >= minSamples) {
+                    const iMean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
+                    const iVar = ad.packetIntervals.reduce((s, v) => s + (v - iMean) ** 2, 0) / ad.packetIntervals.length;
+                    intervalStddev = Math.sqrt(iVar);
+                }
+                const rawDelay = Math.max(CONFIG.ADAPTIVE_DELAY_MIN,
+                    lagMean + CONFIG.ADAPTIVE_DELAY_JITTER_MULT * lagStddev + intervalStddev);
+                ad.computedDelay += CONFIG.ADAPTIVE_DELAY_SMOOTHING * (rawDelay - ad.computedDelay);
+                return;
+            }
+
+            if (ad.packetIntervals.length >= minSamples) {
                 const observedMean = ad.packetIntervals.reduce((s, v) => s + v, 0) / ad.packetIntervals.length;
                 const variance = ad.packetIntervals.reduce((s, v) => s + (v - observedMean) ** 2, 0) / ad.packetIntervals.length;
                 const stddev = Math.sqrt(variance);
@@ -3593,18 +3677,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // Reconciliation snapshots are stale by ~RTT and would
-                    // step the rendered position backward if pushed. Advance
-                    // the version cursor without snapshotting; the next live
-                    // OnObjectsUpdated broadcast (with proper arrival-time
-                    // anchoring) will resume normal interpolation.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Get or create remote ship instance
@@ -3785,15 +3859,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // See updateRemoteShips for rationale: skip pushing a
-                    // stale reconciliation snapshot into the interpolator.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Find existing asteroid by sync ID
@@ -3895,15 +3962,8 @@
             
             // Only feed new sync data to interpolation when version changes
             if (obj.version !== RemoteObjects.lastVersions.get(obj.id)) {
-                if (obj.fromReconciliation) {
-                    // See updateRemoteShips for rationale: skip pushing a
-                    // stale reconciliation snapshot into the interpolator.
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                    obj.fromReconciliation = false;
-                } else {
-                    RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
-                    RemoteObjects.lastVersions.set(obj.id, obj.version);
-                }
+                RemoteObjects.updateState(obj.id, obj.data, obj.ownerMemberId, obj.validAt);
+                RemoteObjects.lastVersions.set(obj.id, obj.version);
             }
             
             // Find existing bullet by sync ID
@@ -5984,8 +6044,8 @@
                 // Locally-owned children are skipped: they're driven by local
                 // physics (the adopt branch in updateAstervoidsFromSync), not
                 // by interpolation, so a bridge would be ignored.
-                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, validAt) => {
-                    if (!CONFIG.SPAWN_BRIDGE_ENABLED || validAt == null) return;
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects) => {
+                    if (!CONFIG.SPAWN_BRIDGE_ENABLED) return;
                     if (!RemoteObjects.isClockOffsetInitialized()) return;
                     const myMemberId = SessionClient.getCurrentMember()?.id;
                     const renderTime = performance.now();
@@ -6001,11 +6061,15 @@
                         // Skip locally-owned children — local game physics drives
                         // their position, not the interpolator.
                         if (child.ownerMemberId === myMemberId) continue;
+                        // Each child's validAt is server-validated and stamped per
+                        // ObjectInfo (all replacement children share the parent's
+                        // collision moment). Skip if absent.
+                        const childValidAt = child.validAt;
+                        if (childValidAt == null) continue;
                         // Bridge anchor in server-time: "where the renderer is
                         // currently displaying objects from this owner".
                         const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
                         const bridgeValidAt = Math.round(RemoteObjects.serverNowMs() - delay);
-                        const childValidAt = child.validAt ?? validAt;
                         const timeDiffSec = (childValidAt - bridgeValidAt) / 1000;
                         const bridgeIsBeforeAuth = bridgeValidAt <= childValidAt;
 

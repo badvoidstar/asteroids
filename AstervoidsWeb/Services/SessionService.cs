@@ -514,7 +514,11 @@ public class SessionService : ISessionService
                 obj.Data = new Dictionary<string, object?>(obj.Data);
                 obj.Version++;
                 obj.UpdatedAt = DateTime.UtcNow;
-                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version));
+                // ValidAt is preserved (NOT bumped to "now") so the new owner inherits the
+                // last validated server-time anchor; their first authored snapshot will
+                // carry a fresh validAt and observers will see motion continue smoothly
+                // across the handoff via normal bracket interpolation.
+                migratedObjects.Add(new ObjectMigration(obj.Id, newOwnerId, obj.Version, obj.ValidAt));
             }
             // If scope == Session but no remaining members, leave the object in place;
             // it will be cleaned up when the session is eventually destroyed.

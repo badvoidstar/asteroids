@@ -412,4 +412,141 @@ public class ObjectServiceTests : TestBase
         m2.NewVersion.Should().Be(2); // 1 (create) + 1 migration = 2
     }
 
+    // ── ValidAt validation/storage tests ─────────────────────────────────────────
+    //
+    // These cover the unified server-time interpolation axis from the service layer.
+    // ObjectService.ValidateValidAt applies a ±2s sanity bound vs the server's
+    // hub-entry receive time, then a monotonic cap vs the object's previous ValidAt.
+    // The validated value is stored on SessionObject.ValidAt and observable via
+    // ObjectInfo.ValidAt / ObjectUpdateInfo.ValidAt on the wire.
+
+    [Fact]
+    public void CreateObject_ShouldStoreClientValidAt_WhenWithinSanityBounds()
+    {
+        var (session, creator) = CreateTestSession();
+        var receive = 1_000_000_000_000L;
+        var clientStamp = receive - 250; // 250 ms before receive — well within ±2s.
+
+        var obj = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            clientValidAt: clientStamp,
+            serverReceiveTimeMs: receive);
+
+        obj.Should().NotBeNull();
+        obj!.ValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be stored verbatim as the unified-axis anchor");
+    }
+
+    [Fact]
+    public void CreateObject_ShouldFallBackToServerReceiveTime_WhenClientStampOutOfBounds()
+    {
+        var (session, creator) = CreateTestSession();
+        var receive = 1_000_000_000_000L;
+        var clientStamp = receive - 10_000; // 10s in the past — far outside the 2s window.
+
+        var obj = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            clientValidAt: clientStamp,
+            serverReceiveTimeMs: receive);
+
+        obj.Should().NotBeNull();
+        obj!.ValidAt.Should().Be(receive,
+            "out-of-bounds clientValidAt must fall back to the server's hub-entry receive time");
+    }
+
+    [Fact]
+    public void UpdateObject_ShouldEnforceMonotonicCap_AgainstPreviousValidAt()
+    {
+        var (session, creator) = CreateTestSession();
+        var receiveCreate = 1_000_000_000_000L;
+        var obj = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["x"] = 1.0 },
+            clientValidAt: receiveCreate,
+            serverReceiveTimeMs: receiveCreate)!;
+
+        // Update with a clientValidAt that is BEFORE the current ValidAt.
+        // Validation should keep ValidAt monotonic — clamp to the previous value.
+        var receiveUpdate = receiveCreate + 500;
+        var staleClientStamp = receiveCreate - 200; // older than obj.ValidAt
+        var updated = ObjectService.UpdateObject(
+            session.Id, obj.Id,
+            new Dictionary<string, object?> { ["x"] = 2.0 },
+            clientValidAt: staleClientStamp,
+            serverReceiveTimeMs: receiveUpdate);
+
+        updated.Should().NotBeNull();
+        updated!.ValidAt.Should().Be(receiveCreate,
+            "monotonic cap must prevent ValidAt from going backwards");
+    }
+
+    [Fact]
+    public void ReplaceObject_ShouldStampAllChildrenWithValidatedValidAt()
+    {
+        var (session, creator) = CreateTestSession();
+        var receiveCreate = 1_000_000_000_000L;
+        var parent = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            clientValidAt: receiveCreate,
+            serverReceiveTimeMs: receiveCreate)!;
+
+        var receiveReplace = receiveCreate + 500;
+        var collisionStamp = receiveCreate + 250; // newer than parent, in-bounds vs receive.
+        var children = ObjectService.ReplaceObject(
+            session.Id, parent.Id, creator.Id,
+            new List<ReplacementObjectSpec>
+            {
+                new(ObjectScope.Session, new Dictionary<string, object?> { ["type"] = "asteroid", ["fragment"] = 1 }),
+                new(ObjectScope.Session, new Dictionary<string, object?> { ["type"] = "asteroid", ["fragment"] = 2 })
+            },
+            clientValidAt: collisionStamp,
+            serverReceiveTimeMs: receiveReplace);
+
+        children.Should().NotBeNull();
+        children!.Should().HaveCount(2);
+        children.Should().AllSatisfy(c =>
+            c.ValidAt.Should().Be(collisionStamp,
+                "all replacement children must share the parent's collision moment as their unified-axis anchor"));
+    }
+
+    [Fact]
+    public void UpdateObjects_PerObjectValidAt_OverridesCallLevelFallback()
+    {
+        var (session, creator) = CreateTestSession();
+        var receiveCreate = 1_000_000_000_000L;
+        var obj1 = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["x"] = 1.0 },
+            clientValidAt: receiveCreate,
+            serverReceiveTimeMs: receiveCreate)!;
+        var obj2 = ObjectService.CreateObject(
+            session.Id, creator.Id, ObjectScope.Session,
+            new Dictionary<string, object?> { ["x"] = 2.0 },
+            clientValidAt: receiveCreate,
+            serverReceiveTimeMs: receiveCreate)!;
+
+        var receiveUpdate = receiveCreate + 1000;
+        var perObjectStamp = receiveCreate + 750;
+        var callLevelFallback = receiveCreate + 250;
+
+        var updated = ObjectService.UpdateObjects(
+            session.Id, creator.Id,
+            new List<ObjectUpdate>
+            {
+                new(obj1.Id, new Dictionary<string, object?> { ["x"] = 10.0 }, ValidAt: perObjectStamp),
+                new(obj2.Id, new Dictionary<string, object?> { ["x"] = 20.0 }) // null → call-level
+            },
+            callLevelClientValidAt: callLevelFallback,
+            serverReceiveTimeMs: receiveUpdate).ToList();
+
+        updated.Should().HaveCount(2);
+        updated.First(o => o.Id == obj1.Id).ValidAt.Should().Be(perObjectStamp,
+            "per-object ValidAt must override call-level fallback");
+        updated.First(o => o.Id == obj2.Id).ValidAt.Should().Be(callLevelFallback,
+            "null per-object ValidAt must fall back to the call-level value");
+    }
+
 }

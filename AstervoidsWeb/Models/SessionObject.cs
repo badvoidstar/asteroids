@@ -50,6 +50,19 @@ public class SessionObject
     public long Version { get; set; } = 1;
 
     /// <summary>
+    /// Owner-stamped simulation sample time in server-clock milliseconds (NTP-aligned).
+    /// This is the unified interpolation timeline anchor: receivers convert this to
+    /// their local perf.now domain via <c>validAtToPerfNow</c> so bracket-search
+    /// continues on a monotonic clock even though the source is wall-clock.
+    ///
+    /// Set on every mutation by <see cref="ObjectService"/> after the validation
+    /// pipeline (±2 s sanity bound vs. server's hub-entry timestamp + monotonic
+    /// cap at the previous ValidAt). Defaults to the creation time so reconciliation
+    /// snapshots never observe a missing/zero value.
+    /// </summary>
+    public long ValidAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>
     /// Timestamp when the object was created.
     /// </summary>
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
