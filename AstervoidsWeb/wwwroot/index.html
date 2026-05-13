@@ -1165,7 +1165,7 @@
         ADAPTIVE_DELAY_SMOOTHING: 0.1, // EMA alpha for delay transitions (lower = smoother, 0.1 ≈ 10-sample convergence)
         ADAPTIVE_DELAY_SAMPLES: 30,    // Sliding window size for packet interval history
         ADAPTIVE_DELAY_MIN_SAMPLES: 5, // Minimum samples before computing adaptive delay
-        SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (normalized)
+        SNAP_THRESHOLD: 0.25,          // Snap instead of interpolate when position error exceeds this (in reference-dimension units, isotropic)
         MAX_EXTRAPOLATION: 2.0,        // Max extrapolation time in seconds to prevent overshoot
         SNAPSHOT_BUFFER_SIZE: 6,       // Ring buffer size per object — 6 snapshots covers 2-3 send intervals
         // Spawn-bridge: on OnObjectReplaced (e.g. asteroid split), synthesize an
@@ -2109,7 +2109,20 @@
         },
 
         /**
-         * Check if positions are far enough apart to warrant a snap
+         * Check if positions are far enough apart to warrant a snap.
+         *
+         * Both x and y are stored in normalized coordinates BUT in DIFFERENT
+         * units — x is a fraction of game width, y is a fraction of height.
+         * Combining them with √(dx² + dy²) and comparing to a single scalar
+         * threshold is non-isotropic at non-square aspect ratios. Convert both
+         * deltas to reference-dimension units (the same isotropic spatial unit
+         * used by velocityX/Y, bullet impact physics, and the Hermite tangent
+         * conversion) before computing the magnitude. SNAP_THRESHOLD is then
+         * interpreted as a ref-dim distance — on a square viewport behaviour
+         * is unchanged; on a wide viewport horizontal snaps trigger at a
+         * smaller normalized-X delta and vertical snaps trigger at the same
+         * normalized-Y delta, so a given visual pixel jump triggers the same
+         * way regardless of direction.
          */
         shouldSnap(a, b) {
             if (a.x === undefined || b.x === undefined) return false;
@@ -2121,7 +2134,11 @@
             // Wrap-aware distance using extended range
             if (dx > rangeX / 2) dx -= rangeX; else if (dx < -rangeX / 2) dx += rangeX;
             if (dy > rangeY / 2) dy -= rangeY; else if (dy < -rangeY / 2) dy += rangeY;
-            return Math.sqrt(dx * dx + dy * dy) > CONFIG.SNAP_THRESHOLD;
+            // Convert per-axis normalized deltas to ref-dim before combining.
+            const refDim = getReferenceDimension();
+            const dxRef = dx * getGameWidth() / refDim;
+            const dyRef = dy * getGameHeight() / refDim;
+            return Math.sqrt(dxRef * dxRef + dyRef * dyRef) > CONFIG.SNAP_THRESHOLD;
         },
         
         /**
