@@ -1,3 +1,4 @@
+using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using MessagePack;
 
@@ -9,7 +10,7 @@ public record CreateSessionResponse(
     [property: Key("sessionId")] Guid SessionId,
     [property: Key("sessionName")] string SessionName,
     [property: Key("memberId")] Guid MemberId,
-    [property: Key("role")] string Role,
+    [property: Key("role")] MemberRole Role,
     [property: Key("metadata")] Dictionary<string, object?> Metadata);
 
 [MessagePackObject]
@@ -17,10 +18,10 @@ public record JoinSessionResponse(
     [property: Key("sessionId")] Guid SessionId,
     [property: Key("sessionName")] string SessionName,
     [property: Key("memberId")] Guid MemberId,
-    [property: Key("role")] string Role,
+    [property: Key("role")] MemberRole Role,
     [property: Key("members")] IEnumerable<MemberInfo> Members,
     [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
-    [property: Key("validAts")] Dictionary<string, long> ValidAts,
+    [property: Key("validAts")] GuidLongPair[] ValidAts,
     [property: Key("metadata")] Dictionary<string, object?> Metadata
 );
 
@@ -42,21 +43,21 @@ public record SessionListItem(
 public record SessionStateSnapshot(
     [property: Key("members")] IEnumerable<MemberInfo> Members,
     [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
-    [property: Key("validAts")] Dictionary<string, long> ValidAts,
-    [property: Key("memberSequences")] Dictionary<string, long> MemberSequences);
+    [property: Key("validAts")] GuidLongPair[] ValidAts,
+    [property: Key("memberSequences")] GuidLongPair[] MemberSequences);
 
 // Member info
 [MessagePackObject]
 public record MemberInfo(
     [property: Key("id")] Guid Id,
-    [property: Key("role")] string Role,
+    [property: Key("role")] MemberRole Role,
     [property: Key("joinedAt")] DateTime JoinedAt);
 
 [MessagePackObject]
 public record MemberLeftInfo(
     [property: Key("memberId")] Guid MemberId,
     [property: Key("promotedMemberId")] Guid? PromotedMemberId,
-    [property: Key("promotedRole")] string? PromotedRole,
+    [property: Key("promotedRole")] MemberRole? PromotedRole,
     [property: Key("deletedObjectIds")] IEnumerable<Guid> DeletedObjectIds,
     [property: Key("migratedObjects")] IEnumerable<ObjectMigration> MigratedObjects
 );
@@ -65,14 +66,14 @@ public record MemberLeftInfo(
 // ValidAt is no longer per-object on the wire. Live broadcasts (OnObjectCreated,
 // OnObjectsUpdated, OnObjectReplaced) carry a single batch-level validAt trailing
 // argument. Snapshot DTOs (JoinSessionResponse, SessionStateSnapshot) carry a
-// parallel ValidAts dictionary keyed by objectId so each pre-existing object
-// keeps its own age. SessionObject.ValidAt remains the server-side storage.
+// parallel ValidAts array (GuidLongPair[]) so each pre-existing object keeps its
+// own age. SessionObject.ValidAt remains the server-side storage.
 [MessagePackObject]
 public record ObjectInfo(
     [property: Key("id")] Guid Id,
     [property: Key("creatorMemberId")] Guid CreatorMemberId,
     [property: Key("ownerMemberId")] Guid OwnerMemberId,
-    [property: Key("scope")] string Scope,
+    [property: Key("scope")] ObjectScope Scope,
     [property: Key("data")] Dictionary<string, object?> Data,
     [property: Key("version")] long Version);
 
@@ -101,7 +102,7 @@ public record CreateObjectResponse(
 
 [MessagePackObject]
 public record UpdateObjectsResponse(
-    [property: Key("versions")] Dictionary<string, long> Versions,
+    [property: Key("versions")] GuidLongPair[] Versions,
     [property: Key("memberSequence")] long MemberSequence,
     [property: Key("serverTimestamp")] long ServerTimestamp);
 
@@ -109,3 +110,24 @@ public record UpdateObjectsResponse(
 public record DeleteObjectResponse(
     [property: Key("success")] bool Success,
     [property: Key("memberSequence")] long MemberSequence);
+
+/// <summary>
+/// Wire-level (Guid, long) pair encoded as a 2-element MessagePack fixarray
+/// thanks to positional <c>[Key(int)]</c> attributes. Used in place of
+/// <c>Dictionary&lt;string, long&gt;</c> on snapshot/update-response wire shapes
+/// where keys are GUIDs:
+/// <list type="bullet">
+///   <item>Dict-of-string-keyed-GUIDs costs ~37 B per key (full 36-char string).</item>
+///   <item>This pair costs ~24 B per entry (fixarray header 1 B + bin8(16) GUID 18 B + small int 5 B).</item>
+///   <item>Saves ~13–19 B per entry.</item>
+/// </list>
+/// JS clients see each pair as a 2-element array <c>[guidString, long]</c> after
+/// the existing <c>GuidUtils.transformBinaryGuids</c> walk converts the 16-byte
+/// binary GUID to a string. The session-client adapter folds the array back into
+/// an object/Map for ergonomic game-side access.
+/// </summary>
+[MessagePackObject]
+public record GuidLongPair(
+    [property: Key(0)] Guid Id,
+    [property: Key(1)] long Value);
+

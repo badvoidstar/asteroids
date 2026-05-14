@@ -1,4 +1,5 @@
 using AstervoidsWeb.Hubs;
+using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.SignalR;
@@ -69,8 +70,8 @@ public class SessionHubTests
         snapshot.Objects.Should().BeOfType<ObjectInfo[]>();
         snapshot.Members.Should().HaveCount(2);
         snapshot.Objects.Should().ContainSingle(o => o.Id == createdObject!.Id);
-        snapshot.MemberSequences.Should().ContainKey(creator.Id.ToString());
-        snapshot.MemberSequences.Should().ContainKey(client.Id.ToString());
+        snapshot.MemberSequences.Should().Contain(p => p.Id == creator.Id);
+        snapshot.MemberSequences.Should().Contain(p => p.Id == client.Id);
     }
 
     /// <summary>
@@ -151,7 +152,7 @@ public class SessionHubTests
         // so the snapshot taken immediately after always reflects the full post-join membership.
         response.Should().NotBeNull();
         response!.Members.Should().HaveCount(2, "snapshot must include both the creator and the joiner");
-        response.Members.Should().Contain(m => m.Role == "Client",
+        response.Members.Should().Contain(m => m.Role == MemberRole.Client,
             "the joining member should appear as Client in the snapshot");
     }
 

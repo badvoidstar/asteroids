@@ -144,7 +144,7 @@ public class SessionHub : Hub
     }
 
     private static MemberInfo ToMemberInfo(Member member) =>
-        new(member.Id, member.Role.ToString(), member.JoinedAt);
+        new(member.Id, member.Role, member.JoinedAt);
 
     /// <summary>
     /// Converts a <see cref="SessionObject"/> to a <see cref="ObjectInfo"/> DTO.
@@ -152,7 +152,7 @@ public class SessionHub : Hub
     /// mutated by concurrent object updates.
     /// </summary>
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
-        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(),
+        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope,
             new Dictionary<string, object?>(o.Data), o.Version);
 
     /// <summary>
@@ -160,17 +160,17 @@ public class SessionHub : Hub
     /// Acquires <c>session.SyncRoot</c> for the duration of the read so that no
     /// concurrent mutation can produce a torn snapshot.
     ///
-    /// Returns a parallel <c>validAts</c> dictionary (objectId → validAt) so the
+    /// Returns a parallel <c>validAts</c> array (objectId, validAt pairs) so the
     /// snapshot keeps per-object timing without duplicating the field on every
     /// <see cref="ObjectInfo"/>; live broadcasts use a single batch-level
     /// <c>validAt</c> trailing argument and never need this map.
     /// </summary>
-    private static (MemberInfo[] Members, ObjectInfo[] Objects, Dictionary<string, long> ValidAts) ToSessionSnapshot(Session session)
+    private static (MemberInfo[] Members, ObjectInfo[] Objects, GuidLongPair[] ValidAts) ToSessionSnapshot(Session session)
     {
         lock (session.SyncRoot)
         {
             var objs = session.Objects.Values.ToArray();
-            var validAts = objs.ToDictionary(o => o.Id.ToString(), o => o.ValidAt);
+            var validAts = objs.Select(o => new GuidLongPair(o.Id, o.ValidAt)).ToArray();
             return (
                 [.. session.Members.Values.Select(ToMemberInfo)],
                 [.. objs.Select(ToObjectInfo)],
@@ -227,7 +227,7 @@ public class SessionHub : Hub
             session.Id,
             session.Name,
             creator.Id,
-            creator.Role.ToString(),
+            creator.Role,
             session.Metadata
         );
     }
@@ -284,7 +284,7 @@ public class SessionHub : Hub
             var evictionInfo = new MemberLeftInfo(
                 eviction.EvictedMemberId,
                 eviction.PromotedMember?.Id,
-                eviction.PromotedMember?.Role.ToString(),
+                eviction.PromotedMember?.Role,
                 eviction.DeletedObjectIds,
                 eviction.MigratedObjects
             );
@@ -336,7 +336,7 @@ public class SessionHub : Hub
             session.Id,
             session.Name,
             member.Id,
-            member.Role.ToString(),
+            member.Role,
             members,
             objects,
             validAts,
@@ -377,7 +377,7 @@ public class SessionHub : Hub
             var departureInfo = new MemberLeftInfo(
                 result.MemberId,
                 result.PromotedMember?.Id,
-                result.PromotedMember?.Role.ToString(),
+                result.PromotedMember?.Role,
                 result.DeletedObjectIds,
                 result.MigratedObjects
             );
@@ -555,7 +555,7 @@ public class SessionHub : Hub
                 updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, batchValidAt);
         }
 
-        var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
+        var versions = updatedObjects.Select(o => new GuidLongPair(o.Id, o.Version)).ToArray();
         return new UpdateObjectsResponse(versions, memberSequence, serverTimestamp);
     }
 
@@ -691,8 +691,8 @@ public class SessionHub : Hub
 
         var (members, objects, validAts) = ToSessionSnapshot(session);
 
-        var memberSequences = session.Members.Values.ToDictionary(
-            m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
+        var memberSequences = session.Members.Values.Select(
+            m => new GuidLongPair(m.Id, Interlocked.Read(ref m.EventSequence))).ToArray();
 
         return new SessionStateSnapshot(members, objects, validAts, memberSequences);
     }

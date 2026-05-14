@@ -1,5 +1,6 @@
 using AstervoidsWeb.Formatters;
 using AstervoidsWeb.Hubs;
+using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using FluentAssertions;
 using MessagePack;
@@ -106,7 +107,7 @@ public class BinaryGuidFormatterTests
     public void CreateSessionResponse_RoundTrip()
     {
         var dto = new CreateSessionResponse(
-            Guid.NewGuid(), "TestSession", Guid.NewGuid(), "Server",
+            Guid.NewGuid(), "TestSession", Guid.NewGuid(), MemberRole.Server,
             new Dictionary<string, object?> { ["aspectRatio"] = 1.5 });
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -125,7 +126,7 @@ public class BinaryGuidFormatterTests
         var dto = new MemberLeftInfo(
             Guid.NewGuid(),
             Guid.NewGuid(),
-            "Server",
+            MemberRole.Server,
             new List<Guid> { Guid.NewGuid(), Guid.NewGuid() },
             new List<ObjectMigration>
             {
@@ -164,7 +165,7 @@ public class BinaryGuidFormatterTests
     {
         var dto = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Session",
+            ObjectScope.Session,
             new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 1.5 },
             42L);
 
@@ -196,7 +197,7 @@ public class BinaryGuidFormatterTests
     {
         var created = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Session", new Dictionary<string, object?> { ["type"] = "asteroid" }, 1L);
+            ObjectScope.Session, new Dictionary<string, object?> { ["type"] = "asteroid" }, 1L);
 
         var dto = new ObjectReplacedEvent(Guid.NewGuid(), new List<ObjectInfo> { created });
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -210,15 +211,15 @@ public class BinaryGuidFormatterTests
     [Fact]
     public void JoinSessionResponse_RoundTrip()
     {
-        var member = new MemberInfo(Guid.NewGuid(), "Client", DateTime.UtcNow);
+        var member = new MemberInfo(Guid.NewGuid(), MemberRole.Client, DateTime.UtcNow);
         var obj = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Member", new Dictionary<string, object?>(), 1L);
+            ObjectScope.Member, new Dictionary<string, object?>(), 1L);
 
         var dto = new JoinSessionResponse(
-            Guid.NewGuid(), "Banana", Guid.NewGuid(), "Client",
+            Guid.NewGuid(), "Banana", Guid.NewGuid(), MemberRole.Client,
             new[] { member }, new[] { obj },
-            new Dictionary<string, long> { [obj.Id.ToString()] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            new[] { new GuidLongPair(obj.Id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) },
             new Dictionary<string, object?> { ["aspectRatio"] = 1.78 });
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -252,7 +253,7 @@ public class BinaryGuidFormatterTests
     {
         var dto = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            "Session",
+            ObjectScope.Session,
             new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 100.0, ["y"] = 200.0 },
             42L);
 

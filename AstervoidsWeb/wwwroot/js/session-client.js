@@ -190,6 +190,7 @@ const SessionClient = (function() {
         // Session events
         connection.on('OnMemberJoined', guard((memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member joined:', memberInfo);
+            WireEnum.translateMember(memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
                 currentSession.members.push(memberInfo);
@@ -201,7 +202,8 @@ const SessionClient = (function() {
 
         connection.on('OnMemberLeft', guard((info, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member left:', info);
-            
+            if (info) info.promotedRole = WireEnum.roleFromWire(info.promotedRole);
+
             // Remove member from local session state
             if (currentSession && currentSession.members) {
                 currentSession.members = currentSession.members.filter(m => m.id !== info.memberId);
@@ -236,6 +238,7 @@ const SessionClient = (function() {
         // SessionStateSnapshot) carry a parallel validAts dictionary keyed by
         // objectId so each pre-existing object keeps its own age.
         connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            WireEnum.translateObject(objectInfo);
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
             }
@@ -254,6 +257,9 @@ const SessionClient = (function() {
         }));
 
         connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            if (event && Array.isArray(event.createdObjects)) {
+                for (const o of event.createdObjects) WireEnum.translateObject(o);
+            }
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
             }
@@ -328,10 +334,10 @@ const SessionClient = (function() {
                 // console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
             }
-            
+
             currentMember = {
                 id: response.memberId,
-                role: response.role,
+                role: WireEnum.roleFromWire(response.role),
                 joinedAt: new Date().toISOString()
             };
             currentSession = {
@@ -373,17 +379,26 @@ const SessionClient = (function() {
                 return null;
             }
 
+            // Translate Phase-1 wire-byte enums and pair-array snapshots to the legacy shapes
+            // game code expects (string roles/scopes, object-keyed validAts).
+            if (Array.isArray(response.members)) {
+                for (const m of response.members) WireEnum.translateMember(m);
+            }
+            if (Array.isArray(response.objects)) {
+                for (const o of response.objects) WireEnum.translateObject(o);
+            }
+
             currentSession = {
                 id: response.sessionId,
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
-                validAts: response.validAts || {},
+                validAts: WireEnum.pairsToObject(response.validAts),
                 metadata: response.metadata || {}
             };
             currentMember = {
                 id: response.memberId,
-                role: response.role
+                role: WireEnum.roleFromWire(response.role)
             };
 
             _log('[SessionClient] Joined session:', currentSession.name, 'as', currentMember.role);
@@ -472,7 +487,14 @@ const SessionClient = (function() {
      *   the server's hub-entry timestamp.
      */
     async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null, clientValidAt = null) {
-        return invokeHub('UpdateObjects', updates, senderSequence, senderSendIntervalMs, clientValidAt);
+        const response = await invokeHub('UpdateObjects', updates, senderSequence, senderSendIntervalMs, clientValidAt);
+        // Phase 1 wire-shape: response.versions is GuidLongPair[] on the wire (each
+        // entry deserialized as [guidString, long]). Game code expects a string-keyed
+        // object so it can do `versions[id]` and `Object.entries(versions)`.
+        if (response) {
+            response.versions = WireEnum.pairsToObject(response.versions);
+        }
+        return response;
     }
 
     /**
@@ -499,7 +521,24 @@ const SessionClient = (function() {
     }
 
     async function getSessionState() {
-        return invokeHub('GetSessionState');
+        const snapshot = await invokeHub('GetSessionState');
+        if (snapshot) {
+            // Phase 1 wire-shape: SessionStateSnapshot now carries members with byte
+            // role, objects with byte scope, and validAts/memberSequences as
+            // GuidLongPair[] (deserialized as [guidString, long] arrays after
+            // GuidUtils.transformBinaryGuids). Translate to legacy shapes here so
+            // game/object-sync code keeps using string roles/scopes and string-keyed
+            // dicts for validAts/memberSequences.
+            if (Array.isArray(snapshot.members)) {
+                for (const m of snapshot.members) WireEnum.translateMember(m);
+            }
+            if (Array.isArray(snapshot.objects)) {
+                for (const o of snapshot.objects) WireEnum.translateObject(o);
+            }
+            snapshot.validAts = WireEnum.pairsToObject(snapshot.validAts);
+            snapshot.memberSequences = WireEnum.pairsToObject(snapshot.memberSequences);
+        }
+        return snapshot;
     }
 
     /**
