@@ -292,6 +292,7 @@ const ObjectSync = (function() {
         SessionClient.on('onObjectsUpdated', handleRemoteObjectsUpdated);
         SessionClient.on('onObjectDeleted', handleRemoteObjectDeleted);
         SessionClient.on('onObjectReplaced', handleRemoteObjectReplaced);
+        SessionClient.on('onObjectEvent', dispatchRemoteObjectEvent);
         SessionClient.on('onSessionJoined', handleSessionJoined);
         SessionClient.on('onSessionLeft', handleSessionLeft);
 
@@ -1236,10 +1237,112 @@ const ObjectSync = (function() {
      * Register a callback.
      */
     function on(event, callback) {
+        if (event && event.indexOf('objectEvent:') === 0) {
+            const kindName = event.substring('objectEvent:'.length);
+            if (callback === null || callback === undefined) {
+                eventHandlers.delete(kindName);
+            } else {
+                eventHandlers.set(kindName, callback);
+            }
+            return;
+        }
         if (callbacks.hasOwnProperty(event)) {
             callbacks[event] = callback;
         } else {
             _warn('[ObjectSync] Unknown event:', event);
+        }
+    }
+
+    // ── Per-object event channel (Phase 2.1) ─────────────────────────────
+    // Game registers a byte ↔ name mapping for each event kind, plus a
+    // handler per kind name. Owner-side emitEvent() invokes the handler
+    // locally (synchronously) before sending so all peers run the same
+    // handler exactly once. Receiver side: SessionClient.onObjectEvent
+    // dispatches to the same handler by looking up name from byte.
+    const eventKindToName = new Map(); // byte -> kindName
+    const eventNameToKind = new Map(); // kindName -> byte
+    const eventHandlers = new Map();   // kindName -> handler(objectId, payload, ctx)
+
+    /**
+     * Register a byte ↔ name mapping for a per-object event kind. Both peers
+     * must register the same mapping. Throws if kindByte or kindName is
+     * already registered with a different counterpart.
+     * @param {string} kindName - Game-defined name (e.g. 'ship-state-changed')
+     * @param {number} kindByte - 0–255
+     */
+    function registerEventKind(kindName, kindByte) {
+        if (typeof kindName !== 'string' || !kindName) {
+            throw new Error('registerEventKind: kindName must be a non-empty string');
+        }
+        if (!Number.isInteger(kindByte) || kindByte < 0 || kindByte > 255) {
+            throw new Error('registerEventKind: kindByte must be an integer in [0, 255]');
+        }
+        const existingName = eventKindToName.get(kindByte);
+        const existingByte = eventNameToKind.get(kindName);
+        if (existingName !== undefined && existingName !== kindName) {
+            throw new Error(`registerEventKind: byte ${kindByte} already mapped to ${existingName}`);
+        }
+        if (existingByte !== undefined && existingByte !== kindByte) {
+            throw new Error(`registerEventKind: name ${kindName} already mapped to byte ${existingByte}`);
+        }
+        eventKindToName.set(kindByte, kindName);
+        eventNameToKind.set(kindName, kindByte);
+    }
+
+    /**
+     * Broadcast a per-object event to other members, and run the local
+     * handler synchronously so the owner sees the same effect everyone
+     * else will see. Returns true on send success.
+     * @param {string} objectId
+     * @param {string} kindName - Must have been registered via registerEventKind
+     * @param {object} payload - Game-defined dict
+     */
+    function emitEvent(objectId, kindName, payload) {
+        const kindByte = eventNameToKind.get(kindName);
+        if (kindByte === undefined) {
+            _warn('[ObjectSync] emitEvent: unknown kind', kindName);
+            return Promise.resolve(false);
+        }
+
+        // Run local handler synchronously so owner-side state matches what
+        // remote peers will observe when the broadcast arrives.
+        const handler = eventHandlers.get(kindName);
+        if (handler) {
+            try {
+                handler(objectId, payload, { local: true });
+            } catch (e) {
+                _warn('[ObjectSync] emitEvent local handler threw:', e);
+            }
+        }
+
+        const validAt = clockSource && typeof clockSource.nowMs === 'function'
+            ? Math.round(clockSource.nowMs())
+            : null;
+        return SessionClient.broadcastObjectEvent(objectId, kindByte, payload, validAt);
+    }
+
+    /**
+     * Dispatch a received OnObjectEvent to its registered handler.
+     * Wired into SessionClient by init().
+     */
+    function dispatchRemoteObjectEvent(eventInfo, senderMemberId, memberSequence, validAt) {
+        if (!eventInfo) return;
+        const kindName = eventKindToName.get(eventInfo.eventKind);
+        if (!kindName) {
+            _warn('[ObjectSync] OnObjectEvent: unknown kind byte', eventInfo.eventKind);
+            return;
+        }
+        const handler = eventHandlers.get(kindName);
+        if (!handler) return; // silently ignore — game may not subscribe to all kinds
+        try {
+            handler(eventInfo.objectId, eventInfo.payload, {
+                local: false,
+                senderMemberId,
+                memberSequence,
+                validAt
+            });
+        } catch (e) {
+            _warn('[ObjectSync] OnObjectEvent handler threw:', e);
         }
     }
 
@@ -1319,6 +1422,8 @@ const ObjectSync = (function() {
         trackEventSequence,
         isReconciling: () => reconciling,
         on,
+        registerEventKind,
+        emitEvent,
         clear
     };
 })();

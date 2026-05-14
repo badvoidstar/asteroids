@@ -126,6 +126,17 @@ public record DeleteObjectResponse(
 /// binary GUID to a string. The session-client adapter folds the array back into
 /// an object/Map for ergonomic game-side access.
 /// </summary>
+// Generic per-object event channel. Server is a relay — payload is opaque
+// to the server (game-defined dictionary). EventKind is a small byte-id
+// agreed between game peers (registered via ObjectSync.registerEventKind).
+// Use for low-frequency state transitions that don't belong on the per-frame
+// update path (score changes, one-shot impact reports, etc.).
+[MessagePackObject]
+public record ObjectEventInfo(
+    [property: Key("objectId")] Guid ObjectId,
+    [property: Key("eventKind")] byte EventKind,
+    [property: Key("payload")] Dictionary<string, object?>? Payload);
+
 [MessagePackObject]
 public record GuidLongPair(
     [property: Key(0)] Guid Id,

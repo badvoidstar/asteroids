@@ -93,9 +93,10 @@ public class WireSizeBenchTests
             ["velocityY"] = -0.03,
             ["rotationSpeed"] = 0.01,
             ["thrusting"] = true,
-            ["invulnerable"] = false,
-            ["score"] = 100,
-            ["hitCount"] = 2
+            ["invulnerable"] = false
+            // Phase 2.3 (A4): score and hitCount no longer ride on per-frame
+            // updates; pushed via OnObjectEvent instead. Snapshot reconciliation
+            // (toSyncData / SampleShipInfo) still includes them.
         },
         Version: 42L);
 
@@ -148,10 +149,10 @@ public class WireSizeBenchTests
     public void Baseline_ShipUpdate_PerFrame()
     {
         var size = Size(SampleShipUpdate());
-        // Measured baseline (wireopt phase 0): 185 B
-        // Phase 2 (A4) drops score+hitCount; expected post-A4 reduction ~16 B.
+        // Phase 2.3 measured (was 185 B baseline, now ~165 B): -20 B / -11%.
+        // A4: score+hitCount removed (each ~10 B as msgpack int + key string).
         // Phase 4 typed schema reduces further; Phase 5 quantization further still.
-        size.Should().BeInRange(170, 200, "ship per-frame update baseline");
+        size.Should().BeInRange(150, 180, "ship per-frame update post-Phase-2.3");
     }
 
     [Fact]
@@ -194,8 +195,9 @@ public class WireSizeBenchTests
             SampleBulletUpdate(), SampleBulletUpdate()
         };
         var size = Size(batch);
-        // Measured baseline (wireopt phase 0): 898 B
-        size.Should().BeInRange(870, 930, "mixed steady-state OnObjectsUpdated baseline");
+        // Phase 2.3 measured (was 898 B baseline, now ~878 B): -20 B from
+        // SampleShipUpdate stripping score+hitCount.
+        size.Should().BeInRange(850, 910, "mixed steady-state OnObjectsUpdated post-Phase-2.3");
     }
 
     // ── Snapshot baselines (rare path; one-shot per join) ─────────────────────
@@ -253,5 +255,30 @@ public class WireSizeBenchTests
         // Phase 1 measured (was 184 B baseline, now 112 B): -72 B / -39%.
         // B3: versions Dict<string,long>(N=3) → GuidLongPair[N=3]. ~24 B per entry vs ~47 B per entry.
         size.Should().BeInRange(95, 130, "UpdateObjectsResponse 3-versions post-Phase-1");
+    }
+
+    // ── Phase 2.1 — generic OnObjectEvent broadcast ────────────────────────────
+
+    [Fact]
+    public void Baseline_ObjectEvent_ShipStateChanged()
+    {
+        // Phase 2.3: replaces per-frame score+hitCount on the ship update.
+        // Sent only when score/hitCount changes (1 per asteroid kill, 1 per
+        // ship hit) — far rarer than per-frame.
+        var dto = new ObjectEventInfo(
+            ObjectId: Guid.NewGuid(),
+            EventKind: 1, // SHIP_STATE_CHANGED
+            Payload: new Dictionary<string, object?>
+            {
+                ["score"] = 100,
+                ["hitCount"] = 2
+            });
+        var size = Size(dto);
+        // Measured: 73 B. Composition: ObjectId binary GUID (~18 B) + EventKind
+        // (1 B) + payload dict (~50 B for 2 keys + 2 small ints) + envelope.
+        // The break-even vs leaving fields in per-frame updates depends on
+        // event-rate vs send-rate. At 10 Hz send-rate and ~1 score change per
+        // second per ship, A4 saves ~150 B/s/ship.
+        size.Should().BeInRange(60, 90, "ObjectEvent ship-state-changed payload");
     }
 }

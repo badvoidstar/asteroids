@@ -698,6 +698,58 @@ public class SessionHub : Hub
     }
 
     /// <summary>
+    /// Broadcasts a small per-object event to all other members of the session.
+    /// Server is a relay — <paramref name="payload"/> is opaque (game-defined
+    /// dictionary). Used for low-frequency state transitions that don't belong
+    /// on the per-frame update path (score changes, one-shot impact reports,
+    /// etc.). Owner-only: caller must own <paramref name="objectId"/>.
+    ///
+    /// Ordering: emitted under the same broadcast pattern as OnObjectsUpdated /
+    /// OnObjectReplaced, so SignalR per-connection FIFO preserves
+    /// "event-before-next-update" at every receiver. Hazard L2 (bullet-hit
+    /// must arrive before asteroid Replace) is structurally satisfied so long
+    /// as the sender emits the event before the next per-frame flush.
+    /// </summary>
+    /// <param name="clientValidAt">
+    /// Owner's NTP-aligned server-time estimate of the simulation moment that
+    /// produced this event. Forwarded to receivers as the broadcast's
+    /// <c>validAt</c> trailing argument after a ±2s sanity clamp. Null when
+    /// the owner's clock isn't yet initialized; server falls back to its
+    /// hub-entry timestamp.
+    /// </param>
+    public async Task<bool> BroadcastObjectEvent(Guid objectId, byte eventKind, Dictionary<string, object?>? payload, long? clientValidAt = null)
+    {
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        var ctx = GetCallerContext();
+        if (ctx == null) return false;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(objectId, eventKind, payload, clientValidAt));
+
+        // Ownership check — events are owner-attested observations about the
+        // object's state; non-owners cannot fabricate them.
+        var owned = GetOwnedObject(member, objectId);
+        if (owned == null) return false;
+
+        var memberSequence = NextMemberSequence(member);
+
+        // Inline ±2s clamp (events don't go through ObjectService.ValidateValidAt).
+        long validAt = serverTimestamp;
+        if (clientValidAt.HasValue)
+        {
+            var diff = clientValidAt.Value - serverTimestamp;
+            if (diff >= -2000 && diff <= 2000) validAt = clientValidAt.Value;
+        }
+
+        var eventInfo = new ObjectEventInfo(objectId, eventKind, payload);
+        await BroadcastToOthersAsync(session, member.Id, "OnObjectEvent",
+            eventInfo, member.Id, memberSequence, serverTimestamp, validAt);
+
+        return true;
+    }
+
+    /// <summary>
     /// Returns the current server UTC time in unix milliseconds. Used by clients
     /// to compute their clock offset relative to the server (NTP-style):
     /// <c>offset = serverTime + (rtt / 2) − clientReceiveTime</c>.

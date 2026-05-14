@@ -31,6 +31,7 @@ const SessionClient = (function() {
         onObjectsUpdated: null,
         onObjectDeleted: null,
         onObjectReplaced: null,
+        onObjectEvent: null,
         onSessionsChanged: null,
         onSessionExpired: null,
         onError: null
@@ -262,6 +263,15 @@ const SessionClient = (function() {
             }
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
+            }
+        }));
+
+        // Generic per-object event channel (Phase 2.1).
+        // Server is a relay — eventInfo.payload is opaque (game-defined dict).
+        // ObjectSync dispatches to game-registered handlers by eventKind byte.
+        connection.on('OnObjectEvent', guard((eventInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            if (callbacks.onObjectEvent) {
+                callbacks.onObjectEvent(eventInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
@@ -520,6 +530,17 @@ const SessionClient = (function() {
         return invokeHub('DeleteObject', objectId);
     }
 
+    /**
+     * Broadcast a per-object event to all other members of the session.
+     * Server is a relay — payload is opaque (game-defined dict). Caller
+     * must own objectId; the server enforces this and returns false on
+     * mismatch. Use for low-frequency state transitions that don't
+     * belong on the per-frame update path.
+     */
+    async function broadcastObjectEvent(objectId, eventKind, payload, clientValidAt = null) {
+        return invokeHub('BroadcastObjectEvent', objectId, eventKind, payload, clientValidAt);
+    }
+
     async function getSessionState() {
         const snapshot = await invokeHub('GetSessionState');
         if (snapshot) {
@@ -622,6 +643,7 @@ const SessionClient = (function() {
         updateObjects,
         replaceObject,
         deleteObject,
+        broadcastObjectEvent,
         getSessionState,
         ping,
         on,

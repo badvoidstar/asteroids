@@ -1280,6 +1280,15 @@
         GAME_STATE: 'gameState'
     };
 
+    // Phase 2.1: per-object event channel kinds. Both peers must register
+    // the same name ↔ byte mapping (done at ObjectSync.init time).
+    const EVENT_KIND = {
+        SHIP_STATE_CHANGED: 'ship-state-changed'
+    };
+    const EVENT_KIND_BYTE = {
+        SHIP_STATE_CHANGED: 1
+    };
+
     // Ship colors for up to 4 players (distinct, high-contrast)
     const SHIP_COLORS = [
         '#00FF00',  // Green (Player 1 / typically Server)
@@ -2862,6 +2871,12 @@
          * 'type' is omitted: delta encoding would suppress it after the first send,
          * but removing it from the local update data avoids the baseline-diff cost
          * and shrinks the rare full-sync payloads (FULL_SYNC_INTERVAL).
+         *
+         * Phase 2.3: score and hitCount are NOT included here. They change rarely
+         * (asteroid kill, ship hit) and are pushed via the per-object event
+         * channel ('ship-state-changed' / EVENT_KIND.SHIP_STATE_CHANGED) so they
+         * don't pay per-frame wire cost. Snapshot reconciliation still carries
+         * them via toSyncData() so late joiners see correct values.
          */
         toUpdateData() {
             return {
@@ -2872,9 +2887,7 @@
                 velocityY: this.velocityY,
                 rotationSpeed: this.rotationSpeed,
                 thrusting: this.thrusting,
-                invulnerable: this.invulnerable,
-                score: this.score || 0,
-                hitCount: this.hitCount || 0
+                invulnerable: this.invulnerable
             };
         }
 
@@ -2893,6 +2906,10 @@
             if (data.invulnerable !== undefined) this.invulnerable = data.invulnerable;
             if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
             if (data.memberId !== undefined) this.memberId = data.memberId;
+            // score / hitCount come via 'ship-state-changed' events (Phase 2.3)
+            // but reconciliation snapshots include them in data, so apply when present.
+            if (data.score !== undefined) this.score = data.score;
+            if (data.hitCount !== undefined) this.hitCount = data.hitCount;
         }
 
         /**
@@ -3711,6 +3728,22 @@
     function syncLocalShip() {
         if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
         ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toUpdateData());
+    }
+
+    /**
+     * Phase 2.3: emit a 'ship-state-changed' event whenever the local ship's
+     * score or hitCount changes. This is a low-frequency replacement for
+     * including those fields in every per-frame update. The event handler
+     * registered in connectToSessionHub() patches obj.data.score / hitCount
+     * on every peer (including locally for symmetry); the GameState owner
+     * reads ship.data.hitCount via the standard object-sync path.
+     */
+    function emitShipStateChanged() {
+        if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
+        ObjectSync.emitEvent(game.multiplayer.myShipObjectId, EVENT_KIND.SHIP_STATE_CHANGED, {
+            score: game.ship.score || 0,
+            hitCount: game.ship.hitCount || 0
+        });
     }
     
     /**
@@ -5076,6 +5109,7 @@
                             // Self-award score on own ship
                             if (game.ship) {
                                 game.ship.score = (game.ship.score || 0) + points;
+                                emitShipStateChanged();
                             }
                         } else {
                             // Asteroid owned by someone else — mark bullet with pendingHit
@@ -5170,6 +5204,7 @@
                     const points = bullet.pendingPoints || CONFIG.POINTS_SMALL;
                     if (game.ship) {
                         game.ship.score = (game.ship.score || 0) + points;
+                        emitShipStateChanged();
                     }
                     const removedBullet = game.bullets.splice(i, 1)[0];
                     if (removedBullet.syncObjectId) {
@@ -5233,7 +5268,11 @@
         if (isSessionMode()) {
             // Increment monotonic hitCount on ship (GameState owner watches this)
             ship.hitCount = (ship.hitCount || 0) + 1;
-            
+            // Phase 2.3: hitCount no longer rides on toUpdateData(); push it
+            // through the per-object event channel so other peers see it
+            // before the next per-frame batch.
+            emitShipStateChanged();
+
             // Reset ship locally
             ship.reset();
             if (game.multiplayer.myShipObjectId) {
@@ -6072,6 +6111,19 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
+                // Phase 2.3: per-object event channel registrations.
+                // Score and hitCount move off the per-frame update path onto a
+                // tiny "ship-state-changed" event that fires only when the
+                // values change. Snapshot reconciliation (Ship.toSyncData)
+                // still carries them so late joiners see correct values.
+                ObjectSync.registerEventKind(EVENT_KIND.SHIP_STATE_CHANGED, EVENT_KIND_BYTE.SHIP_STATE_CHANGED);
+                ObjectSync.on(`objectEvent:${EVENT_KIND.SHIP_STATE_CHANGED}`, (objectId, payload) => {
+                    const obj = ObjectSync.getObject(objectId);
+                    if (obj && obj.data) {
+                        if (payload.score !== undefined) obj.data.score = payload.score;
+                        if (payload.hitCount !== undefined) obj.data.hitCount = payload.hitCount;
+                    }
+                });
                 ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp));
                 // Detect GameState creation (replaces onGameStarted event)
                 ObjectSync.on('onObjectCreated', (obj) => {
