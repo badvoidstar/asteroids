@@ -20,6 +20,7 @@ public record JoinSessionResponse(
     [property: Key("role")] string Role,
     [property: Key("members")] IEnumerable<MemberInfo> Members,
     [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
+    [property: Key("validAts")] Dictionary<string, long> ValidAts,
     [property: Key("metadata")] Dictionary<string, object?> Metadata
 );
 
@@ -41,6 +42,7 @@ public record SessionListItem(
 public record SessionStateSnapshot(
     [property: Key("members")] IEnumerable<MemberInfo> Members,
     [property: Key("objects")] IEnumerable<ObjectInfo> Objects,
+    [property: Key("validAts")] Dictionary<string, long> ValidAts,
     [property: Key("memberSequences")] Dictionary<string, long> MemberSequences);
 
 // Member info
@@ -60,6 +62,11 @@ public record MemberLeftInfo(
 );
 
 // Object info and operations
+// ValidAt is no longer per-object on the wire. Live broadcasts (OnObjectCreated,
+// OnObjectsUpdated, OnObjectReplaced) carry a single batch-level validAt trailing
+// argument. Snapshot DTOs (JoinSessionResponse, SessionStateSnapshot) carry a
+// parallel ValidAts dictionary keyed by objectId so each pre-existing object
+// keeps its own age. SessionObject.ValidAt remains the server-side storage.
 [MessagePackObject]
 public record ObjectInfo(
     [property: Key("id")] Guid Id,
@@ -67,21 +74,18 @@ public record ObjectInfo(
     [property: Key("ownerMemberId")] Guid OwnerMemberId,
     [property: Key("scope")] string Scope,
     [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("version")] long Version,
-    [property: Key("validAt")] long ValidAt);
+    [property: Key("version")] long Version);
 
 [MessagePackObject]
 public record ObjectUpdateInfo(
     [property: Key("id")] Guid Id,
     [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("version")] long Version,
-    [property: Key("validAt")] long ValidAt);
+    [property: Key("version")] long Version);
 
 [MessagePackObject]
 public record ObjectUpdateRequest(
     [property: Key("objectId")] Guid ObjectId,
-    [property: Key("data")] Dictionary<string, object?> Data,
-    [property: Key("validAt")] long? ValidAt = null);
+    [property: Key("data")] Dictionary<string, object?> Data);
 
 [MessagePackObject]
 public record ObjectReplacedEvent(
@@ -92,7 +96,8 @@ public record ObjectReplacedEvent(
 [MessagePackObject]
 public record CreateObjectResponse(
     [property: Key("objectInfo")] ObjectInfo ObjectInfo,
-    [property: Key("memberSequence")] long MemberSequence);
+    [property: Key("memberSequence")] long MemberSequence,
+    [property: Key("validAt")] long ValidAt);
 
 [MessagePackObject]
 public record UpdateObjectsResponse(

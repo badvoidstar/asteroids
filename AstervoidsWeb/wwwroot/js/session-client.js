@@ -230,19 +230,20 @@ const SessionClient = (function() {
         }));
 
         // Object events
-        // ValidAt is now embedded in each ObjectInfo / ObjectUpdateInfo as a top-level
-        // property (server-validated: ±2 s sanity bound + monotonic cap). The wire no
-        // longer carries a trailing validAt argument on these events, and the legacy
-        // clientTimestamp echo on OnObjectsUpdated has been retired.
-        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
+        // ValidAt is now a single batch-level trailing argument on each broadcast
+        // (every object in a single broadcast shares the same owner-stamped sample
+        // time after server validation). Snapshot DTOs (JoinSessionResponse,
+        // SessionStateSnapshot) carry a parallel validAts dictionary keyed by
+        // objectId so each pre-existing object keeps its own age.
+        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
-        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs) => {
+        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt) => {
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs, validAt);
             }
         }));
 
@@ -252,9 +253,9 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
             }
         }));
 
@@ -377,6 +378,7 @@ const SessionClient = (function() {
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
+                validAts: response.validAts || {},
                 metadata: response.metadata || {}
             };
             currentMember = {

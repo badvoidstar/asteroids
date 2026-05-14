@@ -6111,9 +6111,10 @@
                 // Locally-owned children are skipped: they're driven by local
                 // physics (the adopt branch in updateAstervoidsFromSync), not
                 // by interpolation, so a bridge would be ignored.
-                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects) => {
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, batchValidAt) => {
                     if (!CONFIG.SPAWN_BRIDGE_ENABLED) return;
                     if (!RemoteObjects.isClockOffsetInitialized()) return;
+                    if (batchValidAt == null) return;
                     const myMemberId = SessionClient.getCurrentMember()?.id;
                     const renderTime = performance.now();
                     const parentInterp = RemoteObjects.getInterpolated(deletedObjectId, renderTime);
@@ -6128,11 +6129,10 @@
                         // Skip locally-owned children — local game physics drives
                         // their position, not the interpolator.
                         if (child.ownerMemberId === myMemberId) continue;
-                        // Each child's validAt is server-validated and stamped per
-                        // ObjectInfo (all replacement children share the parent's
-                        // collision moment). Skip if absent.
-                        const childValidAt = child.validAt;
-                        if (childValidAt == null) continue;
+                        // All children in a Replace broadcast share the same
+                        // server-validated collision-time validAt (passed as the
+                        // batch-level argument).
+                        const childValidAt = batchValidAt;
                         // Bridge anchor in server-time: "where the renderer is
                         // currently displaying objects from this owner".
                         const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);

@@ -513,8 +513,11 @@ public class ObjectServiceTests : TestBase
     }
 
     [Fact]
-    public void UpdateObjects_PerObjectValidAt_OverridesCallLevelFallback()
+    public void UpdateObjects_AllObjectsShareCallLevelValidAt()
     {
+        // Per-object ValidAt was removed in favor of a single per-batch validAt.
+        // All objects in a single UpdateObjects call must receive the same
+        // validated call-level stamp.
         var (session, creator) = CreateTestSession();
         var receiveCreate = 1_000_000_000_000L;
         var obj1 = ObjectService.CreateObject(
@@ -529,24 +532,23 @@ public class ObjectServiceTests : TestBase
             serverReceiveTimeMs: receiveCreate)!;
 
         var receiveUpdate = receiveCreate + 1000;
-        var perObjectStamp = receiveCreate + 750;
-        var callLevelFallback = receiveCreate + 250;
+        var callLevelStamp = receiveCreate + 500;
 
         var updated = ObjectService.UpdateObjects(
             session.Id, creator.Id,
             new List<ObjectUpdate>
             {
-                new(obj1.Id, new Dictionary<string, object?> { ["x"] = 10.0 }, ValidAt: perObjectStamp),
-                new(obj2.Id, new Dictionary<string, object?> { ["x"] = 20.0 }) // null → call-level
+                new(obj1.Id, new Dictionary<string, object?> { ["x"] = 10.0 }),
+                new(obj2.Id, new Dictionary<string, object?> { ["x"] = 20.0 })
             },
-            callLevelClientValidAt: callLevelFallback,
+            callLevelClientValidAt: callLevelStamp,
             serverReceiveTimeMs: receiveUpdate).ToList();
 
         updated.Should().HaveCount(2);
-        updated.First(o => o.Id == obj1.Id).ValidAt.Should().Be(perObjectStamp,
-            "per-object ValidAt must override call-level fallback");
-        updated.First(o => o.Id == obj2.Id).ValidAt.Should().Be(callLevelFallback,
-            "null per-object ValidAt must fall back to the call-level value");
+        updated.First(o => o.Id == obj1.Id).ValidAt.Should().Be(callLevelStamp,
+            "all objects in a batch must share the call-level validAt");
+        updated.First(o => o.Id == obj2.Id).ValidAt.Should().Be(callLevelStamp,
+            "all objects in a batch must share the call-level validAt");
     }
 
 }

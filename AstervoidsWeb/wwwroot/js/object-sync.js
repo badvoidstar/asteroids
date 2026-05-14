@@ -389,11 +389,17 @@ const ObjectSync = (function() {
      * snapshot from clobbering a live OnObjectsUpdated broadcast that arrived
      * between the hub's AddToGroupAsync and the snapshot delivery in the JoinSession
      * response. (See SessionHub.JoinSession ordering.)
+     *
+     * Per-object validAt timing is carried in the parallel `session.validAts`
+     * dictionary (objectId → validAt ms) so each pre-existing object keeps its
+     * own age — the live broadcast wire shape is per-batch, but a snapshot
+     * legitimately mixes objects of different ages.
      */
     function handleSessionJoined(session, member) {
         resetState();
 
         if (session.objects) {
+            const validAts = session.validAts || {};
             for (const obj of session.objects) {
                 obj.data = expandData(obj.data);
                 const existing = objects.get(obj.id);
@@ -401,7 +407,11 @@ const ObjectSync = (function() {
                     // A live broadcast already populated this object at >= this version
                     continue;
                 }
-                registerObject(obj, false);
+                const registered = registerObject(obj, false);
+                const va = validAts[obj.id];
+                if (registered && va !== undefined && va !== null) {
+                    registered.validAt = va;
+                }
             }
         }
 
@@ -419,16 +429,17 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      *
-     * @param {object} objectInfo - Includes server-validated `validAt` (top-level
-     *   property): owner-stamped server-time ms (NTP-aligned), clamped within
-     *   ±2 s of hub-entry receive time and monotonically capped against the
-     *   object's previous ValidAt. This is THE unified interpolation axis:
-     *   snap[0] is keyed at validAt. Stored on `obj.validAt`; consumed by
-     *   RemoteObjects.updateState.
+     * @param {object} objectInfo - The object metadata (no validAt field; carried
+     *   as the trailing argument).
      * @param {string} senderMemberId
      * @param {number} memberSequence
+     * @param {number} validAt - Server-validated owner-stamped server-time ms
+     *   (NTP-aligned), clamped within ±2 s of hub-entry receive time and
+     *   monotonically capped against the object's previous ValidAt. THE unified
+     *   interpolation axis: snap[0] is keyed at validAt. Stored on `obj.validAt`;
+     *   consumed by RemoteObjects.updateState.
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -452,8 +463,6 @@ const ObjectSync = (function() {
         if (objectInfo.data && objectInfo.data.spawnTimestamp !== undefined) {
             delete objectInfo.data.spawnTimestamp;
         }
-
-        const validAt = objectInfo.validAt;
 
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -529,7 +538,13 @@ const ObjectSync = (function() {
      * @param {number} memberSequence
      * @param {number} senderSendIntervalMs
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
+    /**
+     * Handle remote objects updated batch.
+     * `validAt` is a single batch-level value (server-validated, owner-stamped) —
+     * fanned out to each updated object so RemoteObjects.updateState uses it as
+     * the unified interpolation axis (same axis as live OnObjectCreated).
+     */
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
 
         // Capture the actual network arrival time once per packet. Stamping each
@@ -548,10 +563,9 @@ const ObjectSync = (function() {
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
-        // Updates contain id, data, version, validAt (metadata stripped for bandwidth)
+        // Updates contain id, data, version (validAt is batch-level, applied below).
         for (const update of updatedObjects) {
             update.data = expandData(update.data);
-            const updateValidAt = update.validAt;
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
@@ -561,8 +575,8 @@ const ObjectSync = (function() {
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
                     existing.arrivalServerTime = arrivalServerTime;
-                    if (updateValidAt !== undefined && updateValidAt !== null) {
-                        existing.validAt = updateValidAt;
+                    if (validAt !== undefined && validAt !== null) {
+                        existing.validAt = validAt;
                     }
 
                     // Update type index if type changed (only when type is present in delta)
@@ -586,7 +600,7 @@ const ObjectSync = (function() {
                     version: update.version,
                     arrivalTime: arrivalTime,
                     arrivalServerTime: arrivalServerTime,
-                    validAt: (updateValidAt !== undefined && updateValidAt !== null) ? updateValidAt : undefined
+                    validAt: (validAt !== undefined && validAt !== null) ? validAt : undefined
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -612,29 +626,29 @@ const ObjectSync = (function() {
     /**
      * Handle remote object replaced (atomic delete + create).
      *
-     * Each ObjectInfo in event.createdObjects carries its own validated validAt
-     * (server stamps all children with the same collision-time value). The
-     * downstream onObjectReplaced callback consumers use createdObjects[i].validAt
-     * directly when synthesizing spawn-bridge snapshots.
+     * `validAt` is a single batch-level value (the collision instant on the
+     * owner) shared by every child in `event.createdObjects`. It is fanned out
+     * via handleRemoteObjectCreated so each child's `obj.validAt` is set
+     * consistently for the spawn-bridge / bracket-interpolation paths.
      *
      * @param {object} event - { deletedObjectId, createdObjects }
      * @param {string} senderMemberId
      * @param {number} memberSequence
+     * @param {number} validAt - Batch-level server-validated collision time.
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
         // Create all replacement objects (no sequence tracking — already tracked above).
-        // validAt is per-child inside each ObjectInfo (all children share the same
-        // server-validated collision-time from ObjectService.ReplaceObject).
+        // All children share the same server-validated collision-time validAt.
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo, undefined, undefined);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined, validAt);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, validAt);
         }
     }
 
@@ -714,9 +728,11 @@ const ObjectSync = (function() {
             
             // Build set of server-known object IDs
             const serverObjectIds = new Set();
+            const validAts = snapshot.validAts || {};
             for (const obj of (snapshot.objects || [])) {
                 serverObjectIds.add(obj.id);
                 obj.data = expandData(obj.data);
+                const snapValidAt = validAts[obj.id];
                 
                 const existing = objects.get(obj.id);
                 if (existing) {
@@ -727,6 +743,9 @@ const ObjectSync = (function() {
                         existing.data = obj.data || {};
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
+                        if (snapValidAt !== undefined && snapValidAt !== null) {
+                            existing.validAt = snapValidAt;
+                        }
                         // Reconciliation snapshots now carry the same validated
                         // server-time validAt as live broadcasts (monotonically
                         // capped, ±2 s clamped). The interpolator pushes them
@@ -743,6 +762,9 @@ const ObjectSync = (function() {
                 } else {
                     // Add missing object
                     const localObj = registerObject(obj);
+                    if (snapValidAt !== undefined && snapValidAt !== null) {
+                        localObj.validAt = snapValidAt;
+                    }
                     if (callbacks.onObjectCreated) {
                         callbacks.onObjectCreated(localObj);
                     }
@@ -828,6 +850,12 @@ const ObjectSync = (function() {
             const existing = objects.get(objectInfo.id);
             if (!existing) {
                 const obj = registerObject(objectInfo);
+                // Stamp the server-validated batch-level validAt from the response
+                // so any path that consults obj.validAt (e.g. ownership migration
+                // back to this client) sees the same anchor remote receivers see.
+                if (response.validAt !== undefined && response.validAt !== null) {
+                    obj.validAt = response.validAt;
+                }
 
                 if (callbacks.onObjectCreated) {
                     callbacks.onObjectCreated(obj);

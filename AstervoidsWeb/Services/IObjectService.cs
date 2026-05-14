@@ -40,10 +40,9 @@ public interface IObjectService
     /// Ownership is validated atomically inside the session lock; hub-layer pre-filtering
     /// is not required for correctness.
     ///
-    /// Each <see cref="ObjectUpdate.ValidAt"/> overrides <paramref name="callLevelClientValidAt"/>
-    /// when present; null means "use the call-level fallback". Both are validated
-    /// (±2 s vs <paramref name="serverReceiveTimeMs"/>; monotonic vs the object's
-    /// previous ValidAt) before storage.
+    /// All updates in the batch share <paramref name="callLevelClientValidAt"/> as the
+    /// owner-stamped sample time; it is validated (±2 s vs <paramref name="serverReceiveTimeMs"/>;
+    /// monotonic vs each object's previous ValidAt) before storage.
     /// </summary>
     IEnumerable<SessionObject> UpdateObjects(Guid sessionId, Guid ownerMemberId, IEnumerable<ObjectUpdate> updates, long? callLevelClientValidAt = null, long? serverReceiveTimeMs = null);
 
@@ -100,18 +99,13 @@ public record ReplacementObjectSpec(
 );
 
 /// <summary>
-/// Represents a batch update for an object.
-///
-/// Per-object <paramref name="ValidAt"/> takes precedence over the call-level
-/// <c>clientValidAt</c> on <c>SessionHub.UpdateObjects</c>; null means
-/// "fall back to the call-level value". This lets a sender batch updates that
-/// were sampled at slightly different ticks (rare but exact when the renderer
-/// stamps each object at its own simulation moment).
+/// Represents a batch update for an object. The owner-stamped sample time is
+/// supplied at the call level on <c>SessionHub.UpdateObjects</c> and shared by
+/// every entry in the batch (a single owner tick produces the whole batch).
 /// </summary>
 public record ObjectUpdate(
     Guid ObjectId,
-    Dictionary<string, object?> Data,
-    long? ValidAt = null
+    Dictionary<string, object?> Data
 );
 
 /// <summary>

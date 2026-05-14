@@ -380,10 +380,10 @@ public class SessionHubTests
         response.Should().NotBeNull();
         capturedMethod.Should().Be("OnObjectCreated");
         capturedArgs.Should().NotBeNull();
-        // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp) = 4 args.
-        // validAt is now embedded in ObjectInfo (not a trailing arg).
-        // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 4).
-        capturedArgs!.Length.Should().Be(4,
+        // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp, validAt) = 5 args.
+        // validAt is a single batch-level trailing argument.
+        // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 5).
+        capturedArgs!.Length.Should().Be(5,
             "broadcast helpers must spread args via SendCoreAsync, not wrap them through SendAsync(string, object?)");
     }
 
@@ -427,16 +427,16 @@ public class SessionHubTests
             ownerMemberId: null,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast carries 4 args: replaceEvent, memberId, memberSeq, serverTimestamp.
-        // validAt is now embedded in each ObjectInfo inside replaceEvent.CreatedObjects.
+        // Assert — broadcast carries 5 args: replaceEvent, memberId, memberSeq, serverTimestamp, validAt.
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4,
-            "OnObjectReplaced broadcast must include serverTimestamp (hub-entry, for recordPacketArrival); validAt is per-child inside ObjectInfo");
+        capturedArgs!.Length.Should().Be(5,
+            "OnObjectReplaced broadcast must include serverTimestamp (hub-entry, for recordPacketArrival) and a single batch-level validAt trailing argument");
         var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
         replaceEvent.CreatedObjects.Should().NotBeEmpty();
-        replaceEvent.CreatedObjects[0].ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each child");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -476,11 +476,11 @@ public class SessionHubTests
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
-        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
-            "out-of-bounds clientValidAt must be rejected and the child's validAt should fall back to the hub-entry serverTimestamp");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "out-of-bounds clientValidAt must be rejected and the batch-level validAt should fall back to the hub-entry serverTimestamp");
     }
 
     [Fact]
@@ -513,10 +513,10 @@ public class SessionHubTests
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
-        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -560,15 +560,14 @@ public class SessionHubTests
             ownerMemberId: null,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast is OnObjectCreated(objectInfo, memberId, memberSeq, serverTimestamp) = 4 args.
-        // validAt is embedded in ObjectInfo.
+        // Assert — broadcast is OnObjectCreated(objectInfo, memberId, memberSeq, serverTimestamp, validAt) = 5 args.
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4,
-            "OnObjectCreated broadcast carries serverTimestamp; validAt is embedded in ObjectInfo");
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor");
+        capturedArgs!.Length.Should().Be(5,
+            "OnObjectCreated broadcast carries serverTimestamp + a single batch-level validAt trailing argument");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -598,10 +597,10 @@ public class SessionHubTests
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -627,10 +626,10 @@ public class SessionHubTests
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -671,16 +670,14 @@ public class SessionHubTests
             senderSendIntervalMs: 100,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast is OnObjectsUpdated(updateInfos, memberId, senderSeq, memberSeq, serverTimestamp, senderSendIntervalMs) = 6 args.
-        // validAt is per-object inside each ObjectUpdateInfo.
+        // Assert — broadcast is OnObjectsUpdated(updateInfos, memberId, senderSeq, memberSeq, serverTimestamp, senderSendIntervalMs, validAt) = 7 args.
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6,
-            "OnObjectsUpdated broadcast carries serverTimestamp + senderSendIntervalMs; validAt is per-object inside each ObjectUpdateInfo");
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos.Should().NotBeEmpty();
-        updateInfos[0].ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each update");
+        capturedArgs!.Length.Should().Be(7,
+            "OnObjectsUpdated broadcast carries serverTimestamp + senderSendIntervalMs + a single batch-level validAt trailing argument");
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -719,10 +716,10 @@ public class SessionHubTests
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6);
+        capturedArgs!.Length.Should().Be(7);
         var serverTimestamp = (long)capturedArgs[4]!;
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -755,10 +752,10 @@ public class SessionHubTests
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6);
+        capturedArgs!.Length.Should().Be(7);
         var serverTimestamp = (long)capturedArgs[4]!;
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 

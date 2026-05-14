@@ -150,8 +150,7 @@ public class ObjectService : IObjectService
                 if (obj.OwnerMemberId != ownerMemberId)
                     continue;
 
-                var requestedValidAt = update.ValidAt ?? callLevelClientValidAt;
-                var validAt = ValidateValidAt(requestedValidAt, receive, obj.ValidAt);
+                var validAt = ValidateValidAt(callLevelClientValidAt, receive, obj.ValidAt);
                 ApplyUpdate(obj, update.Data, validAt);
                 results.Add(obj);
             }
