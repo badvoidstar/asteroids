@@ -25,7 +25,14 @@
  *   - 'nullable-str' : 1-byte presence flag + (if present) 2-byte len + UTF-8
  *   - 'nullable-guid': 1-byte presence flag + (if present) 16 bytes
  *
- * Phase 5 will layer on quantization tags (q16, q16_2pi, q8, q16s).
+ * Phase 5 quantized type tags (lossy fixed-point, 2 bytes each):
+ *   - 'q16'      : uint16 over [0, 1)        — resolution 1/65535 ≈ 1.5e-5
+ *   - 'q16s'     : int16  over [-1, 1]       — resolution 2/65534 ≈ 3.0e-5
+ *   - 'q16_2pi'  : uint16 over [0, 2π)       — resolution ≈ 9.6e-5 rad ≈ 0.0055°
+ *   - 'q8'       : uint8  over [0, 1)        — resolution 1/255 ≈ 4e-3
+ *
+ * All quantized encoders clamp / wrap into the canonical range before
+ * rounding. Decoders return float in the same range.
  *
  * Schemas are identified by a single byte SchemaId >= 1 (0 reserved for the
  * Phase 3 legacy dict envelope). Maximum 32 fields per schema (4-byte bitmask).
@@ -42,7 +49,18 @@ const SchemaCodec = (function () {
         'i32', 'i16', 'i8',
         'bool', 'str', 'guid', 'bytes',
         'nullable-str', 'nullable-guid',
+        // Phase 5 quantized types — all 2 bytes on the wire
+        'q16', 'q16s', 'q16_2pi', 'q8',
     ]);
+
+    const TWO_PI = Math.PI * 2;
+    function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+    function clamp11(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
+    function wrap2pi(v) {
+        // Normalize into [0, 2π) so q16_2pi roundtrips cleanly across 0/2π edge.
+        const m = v % TWO_PI;
+        return m < 0 ? m + TWO_PI : m;
+    }
 
     function bitmaskByteCount(fieldCount) {
         return Math.ceil(fieldCount / 8);
@@ -152,6 +170,8 @@ const SchemaCodec = (function () {
                 case 'u32': case 'i32': bodySize += 4; break;
                 case 'u16': case 'i16': bodySize += 2; break;
                 case 'u8':  case 'i8':  bodySize += 1; break;
+                case 'q16': case 'q16s': case 'q16_2pi': bodySize += 2; break;
+                case 'q8':  bodySize += 1; break;
                 case 'bool': bodySize += 1; break;
                 case 'guid': bodySize += 16; break;
                 case 'nullable-guid':
@@ -205,6 +225,22 @@ const SchemaCodec = (function () {
                 case 'i16': view.setInt16(off, ((v << 16) >> 16), true); off += 2; break;
                 case 'u8':  out[off] = v & 0xff; off += 1; break;
                 case 'i8':  view.setInt8(off, ((v << 24) >> 24)); off += 1; break;
+                case 'q16': {
+                    const q = Math.round(clamp01(+v) * 65535);
+                    view.setUint16(off, q, true); off += 2; break;
+                }
+                case 'q16s': {
+                    const q = Math.round(clamp11(+v) * 32767);
+                    view.setInt16(off, q, true); off += 2; break;
+                }
+                case 'q16_2pi': {
+                    const q = Math.round(wrap2pi(+v) / TWO_PI * 65536) & 0xffff;
+                    view.setUint16(off, q, true); off += 2; break;
+                }
+                case 'q8': {
+                    const q = Math.round(clamp01(+v) * 255) & 0xff;
+                    out[off] = q; off += 1; break;
+                }
                 case 'bool': out[off] = v ? 1 : 0; off += 1; break;
                 case 'guid': {
                     const bytes = guidStringToBytes(v);
@@ -278,6 +314,10 @@ const SchemaCodec = (function () {
                 case 'i16': need(2, f.name); out[f.name] = view.getInt16(off, true); off += 2; break;
                 case 'u8':  need(1, f.name); out[f.name] = bytes[off]; off += 1; break;
                 case 'i8':  need(1, f.name); out[f.name] = view.getInt8(off); off += 1; break;
+                case 'q16': need(2, f.name); out[f.name] = view.getUint16(off, true) / 65535; off += 2; break;
+                case 'q16s': need(2, f.name); out[f.name] = view.getInt16(off, true) / 32767; off += 2; break;
+                case 'q16_2pi': need(2, f.name); out[f.name] = view.getUint16(off, true) / 65536 * TWO_PI; off += 2; break;
+                case 'q8':  need(1, f.name); out[f.name] = bytes[off] / 255; off += 1; break;
                 case 'bool': need(1, f.name); out[f.name] = bytes[off] !== 0; off += 1; break;
                 case 'guid': need(16, f.name); out[f.name] = bytesToGuidString(bytes, off); off += 16; break;
                 case 'nullable-guid': {

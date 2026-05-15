@@ -1308,15 +1308,22 @@
     // SchemaId=0 path because the pendingHit handshake still rides on the
     // per-frame data (Phase 2.2 deferred); converting it now would require an
     // integration test harness we don't have yet.
+    //
+    // ── Phase 5 quantization (lossy) ─────────────────────────────────────
+    // Position fields use q16 (2 B, 1.5e-5 resolution over [0,1) — finer than
+    // 1 px on a 65535-wide normalized canvas). Angle uses q16_2pi (2 B,
+    // ~0.0055° resolution). Velocity uses q16s (2 B, signed [-1,1] — game
+    // velocities saturate well below ±1). Together this drops asteroid update
+    // body from 25 B (1+24) to 7 B (1+6); ship update body from 51 B to 17 B.
     const WIREOPT_SCHEMAS = [
         { id: 1, fields: [
-            ['x', 'f64'], ['y', 'f64'], ['angle', 'f64'],
-            ['velocityX', 'f64'], ['velocityY', 'f64'],
-            ['rotationSpeed', 'f64'],
+            ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
             ['thrusting', 'bool'], ['invulnerable', 'bool'],
         ]},
         { id: 3, fields: [
-            ['x', 'f64'], ['y', 'f64'], ['angle', 'f64'],
+            ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
         ]},
     ];
     const SCHEMA_ID_UPDATE = {

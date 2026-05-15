@@ -138,6 +138,27 @@ public class WireSizeBenchTests
             new PositionalSchemaCodec.FieldSpec("invulnerable", "bool"),
         });
 
+    // ── Phase 5 quantized variants ─────────────────────────────────────────
+    // Mirror the live game schemas registered in index.html WIREOPT_SCHEMAS.
+    private static readonly PositionalSchemaCodec.Schema AsteroidUpdateSchemaQ =
+        new(3, new[] {
+            new PositionalSchemaCodec.FieldSpec("x", "q16"),
+            new PositionalSchemaCodec.FieldSpec("y", "q16"),
+            new PositionalSchemaCodec.FieldSpec("angle", "q16_2pi"),
+        });
+
+    private static readonly PositionalSchemaCodec.Schema ShipUpdateSchemaQ =
+        new(1, new[] {
+            new PositionalSchemaCodec.FieldSpec("x", "q16"),
+            new PositionalSchemaCodec.FieldSpec("y", "q16"),
+            new PositionalSchemaCodec.FieldSpec("angle", "q16_2pi"),
+            new PositionalSchemaCodec.FieldSpec("velocityX", "q16s"),
+            new PositionalSchemaCodec.FieldSpec("velocityY", "q16s"),
+            new PositionalSchemaCodec.FieldSpec("rotationSpeed", "q16s"),
+            new PositionalSchemaCodec.FieldSpec("thrusting", "bool"),
+            new PositionalSchemaCodec.FieldSpec("invulnerable", "bool"),
+        });
+
     private static ObjectUpdateInfo SampleAsteroidUpdatePositional() => new(
         Id: Guid.NewGuid(),
         Data: new SyncPayload(3, PositionalSchemaCodec.Encode(AsteroidUpdateSchema, new Dictionary<string, object?>
@@ -384,5 +405,84 @@ public class WireSizeBenchTests
         var size = Size(update);
         // Measured: 49 B (down from 78 B full Phase 3 dict path).
         size.Should().BeInRange(40, 60, "asteroid delta update with only x present (Phase 4 positional)");
+    }
+
+    // ── Phase 5 quantized schema baselines ─────────────────────────────────────
+
+    private static ObjectUpdateInfo SampleAsteroidUpdateQuantized() => new(
+        Id: Guid.NewGuid(),
+        Data: new SyncPayload(3, PositionalSchemaCodec.Encode(AsteroidUpdateSchemaQ, new Dictionary<string, object?>
+        {
+            ["x"] = 0.523,
+            ["y"] = 0.412,
+            ["angle"] = 1.234,
+        })),
+        Version: 42L);
+
+    private static ObjectUpdateInfo SampleShipUpdateQuantized() => new(
+        Id: Guid.NewGuid(),
+        Data: new SyncPayload(1, PositionalSchemaCodec.Encode(ShipUpdateSchemaQ, new Dictionary<string, object?>
+        {
+            ["x"] = 0.523,
+            ["y"] = 0.412,
+            ["angle"] = 1.234,
+            ["velocityX"] = 0.05,
+            ["velocityY"] = -0.03,
+            ["rotationSpeed"] = 0.01,
+            ["thrusting"] = true,
+            ["invulnerable"] = false,
+        })),
+        Version: 42L);
+
+    [Fact]
+    public void Phase5_AsteroidUpdate_PerFrame_Quantized()
+    {
+        var size = Size(SampleAsteroidUpdateQuantized());
+        // Measured: 47 B (down from 65 B Phase 4 f64 = -18 B; -28% just from Phase 5).
+        // Body: bitmask(1) + 3×u16(6) = 7 B (vs 25 B for Phase 4 f64).
+        // Wrapper dominates: id GUID(18) + version(varint) + SyncPayload header(3) ≈ 22 B.
+        size.Should().BeInRange(40, 55, "asteroid per-frame update (Phase 5 quantized)");
+    }
+
+    [Fact]
+    public void Phase5_ShipUpdate_PerFrame_Quantized()
+    {
+        var size = Size(SampleShipUpdateQuantized());
+        // Body: bitmask(1) + 6×i/u16(12) + 2×bool(2) = 15 B (vs 51 B Phase 4 f64 = -36 B).
+        // Wrapped ObjectUpdateInfo: ~40-50 B (vs 91 B Phase 4 f64; ~50% reduction).
+        size.Should().BeInRange(35, 55, "ship per-frame update (Phase 5 quantized)");
+    }
+
+    [Fact]
+    public void Phase5_OnObjectsUpdated_3Asteroids_Quantized()
+    {
+        var batch = new List<ObjectUpdateInfo>
+        {
+            SampleAsteroidUpdateQuantized(),
+            SampleAsteroidUpdateQuantized(),
+            SampleAsteroidUpdateQuantized()
+        };
+        var size = Size(batch);
+        // Measured: 142 B (3 × ~47 B + array header). Vs 196 B Phase 4 (-28%); vs 235 B Phase 3 (-40%).
+        size.Should().BeInRange(125, 165, "OnObjectsUpdated 3 asteroids (Phase 5 quantized)");
+    }
+
+    [Fact]
+    public void Phase5_OnObjectsUpdated_MixedSession_Quantized()
+    {
+        // Realistic steady-state with quantized schemas in flight.
+        // 4 quantized asteroids + 1 quantized ship + 2 legacy bullet updates.
+        var batch = new List<ObjectUpdateInfo>
+        {
+            SampleAsteroidUpdateQuantized(), SampleAsteroidUpdateQuantized(),
+            SampleAsteroidUpdateQuantized(), SampleAsteroidUpdateQuantized(),
+            SampleShipUpdateQuantized(),
+            SampleBulletUpdate(), SampleBulletUpdate()
+        };
+        var size = Size(batch);
+        // Ships and asteroids dominate the savings; bullets stay on the legacy
+        // dict path until the pendingHit handshake (Phase 2.2) is converted.
+        // Phase 3 baseline: 901 B. Expected Phase 5: ~600-650 B (~30% further reduction).
+        size.Should().BeInRange(550, 700, "mixed steady-state OnObjectsUpdated (Phase 5 quantized)");
     }
 }

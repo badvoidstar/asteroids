@@ -133,3 +133,14 @@ test('cross-wire: JS encode → C# hex round-trip (asteroid update)', () => {
         '182d4454fb21f93f'
     );
 });
+
+test('cross-wire (Phase 5): quantized asteroid update produces canonical hex', () => {
+    freshRegistry();
+    const schema = SchemaCodec.register(3, [['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi']]);
+    const bytes = SchemaCodec.encode(schema, { x: 0.5, y: 0.25, angle: Math.PI });
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+    // bitmask=0x07 + x=Math.round(0.5*65535)=32768→0x8000 (LE 0080)
+    //              + y=Math.round(0.25*65535)=16384→0x4000 (LE 0040)
+    //              + angle=π→65536/2=32768→0x8000 (LE 0080)
+    assert.equal(hex, '07008000400080');
+});

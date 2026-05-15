@@ -29,10 +29,19 @@ namespace AstervoidsWeb.Hubs;
 ///   <item><c>bytes</c> — 4-byte LE length + raw bytes</item>
 ///   <item><c>nullable-str</c>, <c>nullable-guid</c> — 1-byte presence flag + (if set) the value</item>
 /// </list>
+///
+/// Phase 5 quantized type tags (lossy fixed-point):
+/// <list type="bullet">
+///   <item><c>q16</c>     — uint16 over [0, 1)   (2 B; resolution ≈ 1.5e-5)</item>
+///   <item><c>q16s</c>    — int16  over [-1, 1]  (2 B; resolution ≈ 3.0e-5)</item>
+///   <item><c>q16_2pi</c> — uint16 over [0, 2π)  (2 B; resolution ≈ 9.6e-5 rad)</item>
+///   <item><c>q8</c>      — uint8  over [0, 1)   (1 B; resolution ≈ 4e-3)</item>
+/// </list>
 /// </summary>
 public static class PositionalSchemaCodec
 {
     public const int MaxFields = 32;
+    private const double TwoPi = Math.PI * 2.0;
 
     public sealed record FieldSpec(string Name, string Type);
 
@@ -68,6 +77,7 @@ public static class PositionalSchemaCodec
                 case "i32": case "i16": case "i8":
                 case "bool": case "str": case "guid": case "bytes":
                 case "nullable-str": case "nullable-guid":
+                case "q16": case "q16s": case "q16_2pi": case "q8":
                     return;
                 default:
                     throw new ArgumentException($"Schema {schemaId} field '{fieldName}': unknown type tag '{type}'");
@@ -107,6 +117,8 @@ public static class PositionalSchemaCodec
                 case "u32": case "i32": bodySize += 4; break;
                 case "u16": case "i16": bodySize += 2; break;
                 case "u8":  case "i8":  bodySize += 1; break;
+                case "q16": case "q16s": case "q16_2pi": bodySize += 2; break;
+                case "q8":  bodySize += 1; break;
                 case "bool": bodySize += 1; break;
                 case "guid": bodySize += 16; break;
                 case "nullable-guid":
@@ -175,6 +187,33 @@ public static class PositionalSchemaCodec
                     off += 2; break;
                 case "u8":  span[off] = Convert.ToByte(v); off += 1; break;
                 case "i8":  span[off] = (byte)Convert.ToSByte(v); off += 1; break;
+                case "q16":
+                {
+                    var d = Clamp01(Convert.ToDouble(v));
+                    var q = (ushort)Math.Round(d * 65535.0, MidpointRounding.AwayFromZero);
+                    BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(off, 2), q);
+                    off += 2; break;
+                }
+                case "q16s":
+                {
+                    var d = Clamp11(Convert.ToDouble(v));
+                    var q = (short)Math.Round(d * 32767.0, MidpointRounding.AwayFromZero);
+                    BinaryPrimitives.WriteInt16LittleEndian(span.Slice(off, 2), q);
+                    off += 2; break;
+                }
+                case "q16_2pi":
+                {
+                    var d = Wrap2Pi(Convert.ToDouble(v));
+                    var q = (ushort)(((long)Math.Round(d / TwoPi * 65536.0, MidpointRounding.AwayFromZero)) & 0xffff);
+                    BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(off, 2), q);
+                    off += 2; break;
+                }
+                case "q8":
+                {
+                    var d = Clamp01(Convert.ToDouble(v));
+                    span[off] = (byte)Math.Round(d * 255.0, MidpointRounding.AwayFromZero);
+                    off += 1; break;
+                }
                 case "bool": span[off] = (Convert.ToBoolean(v) ? (byte)1 : (byte)0); off += 1; break;
                 case "guid":
                 {
@@ -263,6 +302,10 @@ public static class PositionalSchemaCodec
                 case "i16": Need(2, f.Name, span, off); result[f.Name] = (long)BinaryPrimitives.ReadInt16LittleEndian(span.Slice(off, 2)); off += 2; break;
                 case "u8":  Need(1, f.Name, span, off); result[f.Name] = (long)span[off]; off += 1; break;
                 case "i8":  Need(1, f.Name, span, off); result[f.Name] = (long)(sbyte)span[off]; off += 1; break;
+                case "q16": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(off, 2)) / 65535.0; off += 2; break;
+                case "q16s": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadInt16LittleEndian(span.Slice(off, 2)) / 32767.0; off += 2; break;
+                case "q16_2pi": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(off, 2)) / 65536.0 * TwoPi; off += 2; break;
+                case "q8":  Need(1, f.Name, span, off); result[f.Name] = (double)span[off] / 255.0; off += 1; break;
                 case "bool": Need(1, f.Name, span, off); result[f.Name] = span[off] != 0; off += 1; break;
                 case "guid": Need(16, f.Name, span, off); result[f.Name] = new Guid(span.Slice(off, 16)).ToString(); off += 16; break;
                 case "nullable-guid":
@@ -330,5 +373,13 @@ public static class PositionalSchemaCodec
         if (value is Guid g) return g;
         if (value is string s) return Guid.Parse(s);
         throw new InvalidOperationException($"guid field expects Guid or string; got {value?.GetType().Name}");
+    }
+
+    private static double Clamp01(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
+    private static double Clamp11(double v) => v < -1 ? -1 : v > 1 ? 1 : v;
+    private static double Wrap2Pi(double v)
+    {
+        var m = v % TwoPi;
+        return m < 0 ? m + TwoPi : m;
     }
 }
