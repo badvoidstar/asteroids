@@ -12,6 +12,8 @@ const require = createRequire(import.meta.url);
 const MsgpackCodec = require('./wwwroot/js/msgpack-codec.js');
 // sync-payload.js depends on the global MsgpackCodec — attach it before requiring.
 globalThis.MsgpackCodec = MsgpackCodec;
+const SchemaCodec = require('./wwwroot/js/schema-codec.js');
+globalThis.SchemaCodec = SchemaCodec;
 const SyncPayload = require('./wwwroot/js/sync-payload.js');
 
 test('wrap returns [0, Uint8Array] for a plain dict', () => {
@@ -66,7 +68,11 @@ test('round-trip preserves common game-dict value shapes', () => {
 });
 
 test('unwrap throws on an unknown schema id', () => {
-    assert.throws(() => SyncPayload.unwrap([5, new Uint8Array([0x80])]), /schemaId=5 not supported/);
+    // Phase 4: schemaId=5 dispatches to SchemaCodec; with no schema registered
+    // the error mentions the registry/metadata path so debugging stays obvious.
+    assert.throws(
+        () => SyncPayload.unwrap([5, new Uint8Array([0x80])]),
+        /schemaId=5 not registered/);
 });
 
 test('unwrapObjectData mutates and returns the same object', () => {
@@ -101,4 +107,47 @@ test('wrap of an empty dict still produces a valid envelope', () => {
 test('unwrap accepts an envelope with empty/null Data and returns {}', () => {
     assert.deepEqual(SyncPayload.unwrap([0, new Uint8Array(0)]), {});
     assert.deepEqual(SyncPayload.unwrap([0, null]), {});
+});
+
+// ── Phase 4: positional schema dispatch via SchemaCodec ────────────────────
+
+test('phase 4 wrap dispatches to SchemaCodec for schemaId>=1', () => {
+    SchemaCodec.clear();
+    SchemaCodec.register(7, [['x', 'f64'], ['y', 'f64']]);
+    const wrapped = SyncPayload.wrap({ x: 0.5, y: 0.25 }, 7);
+    assert.equal(wrapped[0], 7);
+    assert.ok(wrapped[1] instanceof Uint8Array);
+    // bitmask(1) + 2 × f64(8) = 17
+    assert.equal(wrapped[1].length, 17);
+});
+
+test('phase 4 wrap → unwrap round-trip matches original dict', () => {
+    SchemaCodec.clear();
+    SchemaCodec.register(11, [['x', 'f64'], ['y', 'f64'], ['angle', 'f64']]);
+    const original = { x: 0.5, y: 0.25, angle: Math.PI / 4 };
+    const wrapped = SyncPayload.wrap(original, 11);
+    const decoded = SyncPayload.unwrap(wrapped);
+    assert.equal(decoded.x, 0.5);
+    assert.equal(decoded.y, 0.25);
+    assert.ok(Math.abs(decoded.angle - Math.PI / 4) < 1e-12);
+});
+
+test('phase 4 wrap with no schema registered throws clear error', () => {
+    SchemaCodec.clear();
+    assert.throws(
+        () => SyncPayload.wrap({ x: 1 }, 99),
+        /no schema registered for id=99/);
+});
+
+test('phase 4 unwrap of unregistered schemaId throws guidance about metadata.schemas', () => {
+    SchemaCodec.clear();
+    assert.throws(
+        () => SyncPayload.unwrap([42, new Uint8Array([0x00])]),
+        /metadata\.schemas before processing object events/);
+});
+
+test('phase 4 wrap defaults to schemaId=0 when arg is omitted (back-compat)', () => {
+    SchemaCodec.clear();
+    const wrapped = SyncPayload.wrap({ a: 1 });
+    assert.equal(wrapped[0], 0);
 });

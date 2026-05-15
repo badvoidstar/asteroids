@@ -418,3 +418,6 @@ const SchemaCodec = (function () {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = SchemaCodec;
 }
+if (typeof window !== 'undefined') {
+    window.SchemaCodec = SchemaCodec;
+}

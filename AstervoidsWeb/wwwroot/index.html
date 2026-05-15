@@ -630,6 +630,8 @@
     <script src="/js/wire-enum.js"></script>
     <!-- MessagePack codec for the Phase 3 SyncPayload envelope (per-object data wrap/unwrap) -->
     <script src="/js/msgpack-codec.js"></script>
+    <!-- Phase 4 positional schema codec — must load BEFORE sync-payload.js so wrap/unwrap can dispatch -->
+    <script src="/js/schema-codec.js"></script>
     <!-- SyncPayload envelope adapter (mirror of AstervoidsWeb/Hubs/SyncPayloadCodec.cs) -->
     <script src="/js/sync-payload.js"></script>
     <!-- Debug toggle — set to true in browser console: window.ASTERVOIDS_DEBUG = true -->

@@ -12,16 +12,14 @@ namespace AstervoidsWeb.Hubs;
 /// <see cref="SyncPayload"/> envelope used by <see cref="ObjectInfo"/>,
 /// <see cref="ObjectUpdateInfo"/>, and <see cref="ObjectUpdateRequest"/>.
 ///
-/// SchemaId=0 (the only schema implemented in Phase 3) represents the
-/// dictionary as a MessagePack-serialized
+/// SchemaId=0 represents the dictionary as a MessagePack-serialized
 /// <c>Dictionary&lt;string, object?&gt;</c>. The byte stream is wire-compatible
 /// with the JS-side codec at <c>wwwroot/js/msgpack-codec.js</c>; both sides
 /// can read either party's encoding (see
 /// <c>SyncPayloadCrossWireFixturesTests</c> + <c>msgpack-codec-cross.test.mjs</c>).
 ///
-/// Phase 4 will add SchemaId 1..N for positional, type-tagged records;
-/// they bypass this codec on the JS side, but the server still treats the
-/// byte stream as opaque storage.
+/// SchemaId&gt;=1 is dispatched to <see cref="PositionalSchemaCodec"/> using
+/// schemas the session registered via metadata.schemas (Phase 4 wireopt).
 /// </summary>
 public static class SyncPayloadCodec
 {
@@ -39,7 +37,6 @@ public static class SyncPayloadCodec
 
     /// <summary>
     /// Sentinel: identifies the "legacy MessagePack-encoded dict" payload format.
-    /// Phase 4 will introduce additional schema ids registered per-session.
     /// </summary>
     public const byte LegacyDictSchemaId = 0;
 
@@ -58,9 +55,9 @@ public static class SyncPayloadCodec
     }
 
     /// <summary>
-    /// Decodes a wire payload back to the server-internal data dict. Throws
-    /// on unknown SchemaId so any future client→server schema-id collision
-    /// surfaces loudly during dev rather than silently corrupting state.
+    /// Decodes a wire payload back to the server-internal data dict.
+    /// Phase 3 single-arg form: handles SchemaId=0 only and throws on others
+    /// (caller forgot to pass a registry).
     /// </summary>
     public static Dictionary<string, object?> DecodeDict(SyncPayload payload)
     {
@@ -68,8 +65,8 @@ public static class SyncPayloadCodec
         if (payload.SchemaId != LegacyDictSchemaId)
         {
             throw new NotSupportedException(
-                $"SyncPayload SchemaId={payload.SchemaId} is not yet supported by the server-side decoder. " +
-                "Phase 3 only implements SchemaId=0 (legacy MessagePack-encoded dict).");
+                $"SyncPayload SchemaId={payload.SchemaId} requires a SyncSchemaRegistry overload of DecodeDict. " +
+                "Use DecodeDict(payload, sessionId, registry) for positional payloads.");
         }
         if (payload.Data is null || payload.Data.Length == 0)
         {
@@ -77,5 +74,32 @@ public static class SyncPayloadCodec
         }
         return MessagePackSerializer.Deserialize<Dictionary<string, object?>>(payload.Data, DictOptions)
                ?? new Dictionary<string, object?>(0);
+    }
+
+    /// <summary>
+    /// Phase 4 overload: decodes a wire payload using the per-session schema
+    /// registry. SchemaId=0 falls through to the legacy MessagePack path;
+    /// SchemaId&gt;=1 is decoded positionally via
+    /// <see cref="PositionalSchemaCodec.Decode"/> using the schema registered
+    /// for <paramref name="sessionId"/>.
+    ///
+    /// Throws on an unknown positional schema id so peers using mismatched
+    /// schemas surface loudly instead of silently corrupting state.
+    /// </summary>
+    public static Dictionary<string, object?> DecodeDict(SyncPayload payload, Guid sessionId, SyncSchemaRegistry registry)
+    {
+        if (payload is null) return new Dictionary<string, object?>(0);
+        if (payload.SchemaId == LegacyDictSchemaId)
+        {
+            return DecodeDict(payload);
+        }
+        var schema = registry.GetSchema(sessionId, payload.SchemaId);
+        if (schema is null)
+        {
+            throw new InvalidOperationException(
+                $"Session {sessionId} has no schema registered for SchemaId={payload.SchemaId}. " +
+                "Schemas must be registered at session-create time via metadata.schemas.");
+        }
+        return PositionalSchemaCodec.Decode(schema, payload.Data ?? Array.Empty<byte>());
     }
 }

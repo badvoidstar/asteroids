@@ -19,6 +19,7 @@ public class SessionHub : Hub
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
     private readonly ServerMetricsService _metrics;
+    private readonly SyncSchemaRegistry _schemaRegistry;
 
     // Group name for all connected clients to receive session list updates
     internal const string AllClientsGroup = "AllClients";
@@ -27,12 +28,14 @@ public class SessionHub : Hub
         ISessionService sessionService,
         IObjectService objectService,
         ILogger<SessionHub> logger,
-        ServerMetricsService metrics)
+        ServerMetricsService metrics,
+        SyncSchemaRegistry schemaRegistry)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
         _metrics = metrics;
+        _schemaRegistry = schemaRegistry;
     }
 
     // ── Payload byte estimation ────────────────────────────────────────
@@ -215,6 +218,28 @@ public class SessionHub : Hub
         var creator = result.Creator!;
 
         _metrics.OnHubInvocation(creator.Id, EstimatePayloadBytes(metadata));
+
+        // Phase 4 wireopt: register any schemas the game declared in
+        // metadata.schemas before any object events can flow. Schemas are
+        // session-create-time only; later joins inherit them via the
+        // metadata round-trip in JoinSessionResponse.
+        try
+        {
+            var schemas = SyncSchemaRegistry.ParseFromMetadata(metadata);
+            _schemaRegistry.SetSessionSchemas(session.Id, schemas);
+            if (schemas.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Session {SessionId} registered {Count} positional schemas: {Ids}",
+                    session.Id, schemas.Count, string.Join(",", schemas.Select(s => s.Id)));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Session {SessionId} metadata.schemas parse failed; positional payloads will be rejected",
+                session.Id);
+        }
 
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
@@ -402,6 +427,9 @@ public class SessionHub : Hub
         }
         else if (result.RemainingMemberIds.Count == 0)
         {
+            // Last member departed → the service tore down the session;
+            // clean up any positional schemas registered for it (Phase 4).
+            _schemaRegistry.ClearSession(result.SessionId);
             _logger.LogInformation("Session {SessionName} ({SessionId}) is now empty",
                 result.SessionName, result.SessionId);
         }
@@ -478,9 +506,12 @@ public class SessionHub : Hub
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId, clientValidAt));
 
         // Phase 3 envelope: decode the wire payload to the server-internal
-        // dict shape that ObjectService consumes. SchemaId is validated here;
-        // unknown ids throw (caught by SignalR and surfaced as an error).
-        var dataDict = SyncPayloadCodec.DecodeDict(data ?? SyncPayloadCodec.EncodeDict(null));
+        // dict shape that ObjectService consumes. SchemaId=0 → MessagePack
+        // dict; SchemaId>=1 → positional codec via the per-session registry.
+        var dataDict = SyncPayloadCodec.DecodeDict(
+            data ?? SyncPayloadCodec.EncodeDict(null),
+            member.SessionId,
+            _schemaRegistry);
 
         var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), dataDict, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
         if (obj == null)
@@ -544,7 +575,7 @@ public class SessionHub : Hub
             .GroupBy(u => u.ObjectId)
             .ToDictionary(g => g.Key, g => g.Last().Data);
         var serviceUpdates = updatesList
-            .Select(u => new ObjectUpdate(u.ObjectId, SyncPayloadCodec.DecodeDict(u.Data)))
+            .Select(u => new ObjectUpdate(u.ObjectId, SyncPayloadCodec.DecodeDict(u.Data, member.SessionId, _schemaRegistry)))
             .ToList();
         var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates, clientValidAt, serverTimestamp).ToList();
 
@@ -660,7 +691,7 @@ public class SessionHub : Hub
         // the validated collision-time on each child's ValidAt. Phase 3 envelope:
         // each replacement's SyncPayload is decoded to the dict the service expects.
         var specs = replacements
-            .Select(payload => new ReplacementObjectSpec(objectScope, SyncPayloadCodec.DecodeDict(payload), ownerGuid))
+            .Select(payload => new ReplacementObjectSpec(objectScope, SyncPayloadCodec.DecodeDict(payload, member.SessionId, _schemaRegistry), ownerGuid))
             .ToList();
 
         var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs, clientValidAt, serverTimestamp);

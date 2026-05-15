@@ -96,6 +96,30 @@ const ObjectSync = (function() {
         return out;
     }
 
+    // ── Phase 4 wireopt: positional schema selection ───────────────────────
+    // The game registers a selector via setSchemaIdSelector(fn). It is called
+    // for every outbound create/update/replace with (data, kind) where kind is
+    // 'create' | 'update' | 'replace'. Returning 0 (or null/undefined) keeps
+    // the legacy MessagePack dict path; returning >=1 sends positionally via
+    // the locally-registered SchemaCodec entry of that id.
+    let schemaIdSelector = null;
+    function setSchemaIdSelector(fn) {
+        if (fn !== null && typeof fn !== 'function') {
+            throw new Error('setSchemaIdSelector requires a function or null');
+        }
+        schemaIdSelector = fn;
+    }
+    function pickSchemaId(data, kind) {
+        if (!schemaIdSelector) return 0;
+        try {
+            const id = schemaIdSelector(data, kind);
+            return (typeof id === 'number' && id >= 1 && id <= 255) ? id : 0;
+        } catch (err) {
+            _warn('[ObjectSync] schemaIdSelector threw; falling back to schemaId=0', err);
+            return 0;
+        }
+    }
+
     // Local object registry
     const objects = new Map();
     
@@ -398,6 +422,20 @@ const ObjectSync = (function() {
      */
     function handleSessionJoined(session, member) {
         resetState();
+
+        // Phase 4 wireopt: register positional schemas published by the
+        // session creator via metadata.schemas BEFORE processing any objects,
+        // so SyncPayload.unwrap can dispatch positional payloads. Failures are
+        // logged but non-fatal — the legacy SchemaId=0 path still works.
+        try {
+            const schemas = session && session.metadata && session.metadata.schemas;
+            if (schemas && typeof window !== 'undefined' && window.SchemaCodec) {
+                window.SchemaCodec.replaceAll(schemas);
+                _log('[ObjectSync] Loaded', schemas.length, 'positional schemas from session metadata');
+            }
+        } catch (err) {
+            _warn('[ObjectSync] Failed to apply session schemas:', err);
+        }
 
         if (session.objects) {
             const validAts = session.validAts || {};
@@ -835,7 +873,7 @@ const ObjectSync = (function() {
             const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
                 ? Math.round(clockSource.nowMs())
                 : null;
-            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId, clientValidAt);
+            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId, clientValidAt, pickSchemaId(data, 'create'));
             if (!response || !response.objectInfo) return null;
 
             const objectInfo = response.objectInfo;
@@ -886,6 +924,7 @@ const ObjectSync = (function() {
 
         try {
             const compressedReplacements = replacements.map(r => compressData(r));
+            const replacementSchemaIds = compressedReplacements.map(r => pickSchemaId(r, 'replace'));
             // Stamp owner's best estimate of server time NOW (collision moment).
             // Server clamps to ±2s of its own UtcNow before forwarding as the
             // unified-axis validAt. If the clock isn't initialized yet, send
@@ -903,7 +942,7 @@ const ObjectSync = (function() {
                 ? Math.round(clockSource.nowMs())
                 : null;
             const createdInfos = await SessionClient.replaceObject(
-                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientValidAt);
+                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientValidAt, replacementSchemaIds);
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {
@@ -1083,10 +1122,17 @@ const ObjectSync = (function() {
             ? Math.round(clockSource.nowMs())
             : null;
         // Compress field names for the wire — game logic stays readable
-        const wireUpdates = updates.map(u => ({
-            objectId: u.objectId,
-            data: compressData(u.data)
-        }));
+        // Phase 4: each update carries its own schemaId so heterogeneous
+        // batches (mix of asteroid update + ship full-sync, for example)
+        // can use distinct positional schemas without splitting batches.
+        const wireUpdates = updates.map(u => {
+            const compressed = compressData(u.data);
+            return {
+                objectId: u.objectId,
+                data: compressed,
+                schemaId: pickSchemaId(compressed, 'update')
+            };
+        });
         try {
             const response = await SessionClient.updateObjects(wireUpdates, currentSenderSequence, Math.round(nominalFrameTime * 1000), clientValidAt);
             // Capture response timestamp immediately — before processing
@@ -1424,6 +1470,7 @@ const ObjectSync = (function() {
         on,
         registerEventKind,
         emitEvent,
+        setSchemaIdSelector,
         clear
     };
 })();

@@ -492,8 +492,19 @@ const SessionClient = (function() {
      *   before forwarding as the broadcast's validAt. Pass null to fall back to
      *   the server's hub-entry timestamp (slightly upload-biased).
      */
-    async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null) {
-        const response = await invokeHub('CreateObject', SyncPayload.wrap(data), scope, ownerMemberId, clientValidAt);
+    /**
+     * Create a new object in the current session.
+     * @param {Object} data - The data payload (game-side dict).
+     * @param {string} [scope='Member'] - 'Session' or 'Member'.
+     * @param {string|null} [ownerMemberId=null]
+     * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
+     *   estimate of "now" at creation. Server clamps to ±2s of its own UtcNow
+     *   before forwarding as the broadcast's validAt. Pass null to fall back to
+     *   the server's hub-entry timestamp (slightly upload-biased).
+     * @param {number} [schemaId=0] Phase 4: positional schema id (0 = legacy MessagePack dict).
+     */
+    async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null, schemaId = 0) {
+        const response = await invokeHub('CreateObject', SyncPayload.wrap(data, schemaId), scope, ownerMemberId, clientValidAt);
         // Phase 3 envelope: response.objectInfo.data arrives as a SyncPayload
         // [schemaId, Uint8Array]; unwrap so the owner-side path in object-sync.js
         // sees the same plain dict shape as remote receivers.
@@ -505,7 +516,8 @@ const SessionClient = (function() {
 
     /**
      * Update multiple objects atomically.
-     * @param {Array} updates
+     * @param {Array} updates Each entry: { objectId, data, schemaId? }. schemaId
+     *   defaults to 0 (legacy dict).
      * @param {number|null} [senderSequence=null]
      * @param {number|null} [senderSendIntervalMs=null]
      * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
@@ -517,14 +529,18 @@ const SessionClient = (function() {
         // Phase 3 envelope: wrap each update.data into the SyncPayload wire shape
         // before invoking. Avoid mutating the caller's request objects so callers
         // can keep using their `update.data` references for local bookkeeping.
+        // Phase 4: each update may carry an explicit schemaId; default 0.
         let wrapped = updates;
         if (Array.isArray(updates)) {
             wrapped = new Array(updates.length);
             for (let i = 0; i < updates.length; i++) {
                 const u = updates[i];
-                wrapped[i] = (u && u.data !== undefined)
-                    ? Object.assign({}, u, { data: SyncPayload.wrap(u.data) })
-                    : u;
+                if (u && u.data !== undefined) {
+                    const id = (u.schemaId === undefined || u.schemaId === null) ? 0 : u.schemaId;
+                    wrapped[i] = { objectId: u.objectId, data: SyncPayload.wrap(u.data, id) };
+                } else {
+                    wrapped[i] = u;
+                }
             }
         }
         const response = await invokeHub('UpdateObjects', wrapped, senderSequence, senderSendIntervalMs, clientValidAt);
@@ -549,10 +565,12 @@ const SessionClient = (function() {
      *   broadcast's validAt. Pass null to fall back to server's hub-entry
      *   timestamp (less accurate).
      */
-    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null) {
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null, schemaIds = null) {
         // Phase 3 envelope: each replacement is a raw game data dict; wrap before invoke.
+        // Phase 4: schemaIds may be a parallel array of schemaId per replacement;
+        // omitted/null entries fall back to 0 (legacy MessagePack dict).
         const wrapped = Array.isArray(replacements)
-            ? replacements.map(r => SyncPayload.wrap(r))
+            ? replacements.map((r, i) => SyncPayload.wrap(r, (schemaIds && schemaIds[i]) || 0))
             : replacements;
         const created = await invokeHub('ReplaceObject', deleteObjectId, wrapped, scope, ownerMemberId, clientValidAt);
         // Server returns List<ObjectInfo> for the owner; unwrap each so any

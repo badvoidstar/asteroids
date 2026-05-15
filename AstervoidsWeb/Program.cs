@@ -17,6 +17,7 @@ builder.Services.AddSingleton<ISessionNameGenerator, FruitNameGenerator>();
 builder.Services.AddSingleton<ISessionService, SessionService>();
 builder.Services.AddSingleton<IObjectService, ObjectService>();
 builder.Services.AddSingleton<ServerMetricsService>();
+builder.Services.AddSingleton<AstervoidsWeb.Hubs.SyncSchemaRegistry>();
 builder.Services.AddHostedService<SessionCleanupService>();
 
 // Use camelCase JSON property names for REST API endpoints
