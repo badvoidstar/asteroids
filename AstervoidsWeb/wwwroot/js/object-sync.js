@@ -2,6 +2,36 @@
  * Object Sync Module
  * Handles local object registry and synchronization with the session.
  *
+ * ## Game-Agnostic Boundary
+ *
+ * This module (and its server counterpart `SessionHub` / `ObjectService`)
+ * never inspects the contents of an object's `data` field. Asteroids,
+ * ships, and bullets are not first-class concepts here — they live only
+ * in the game adapter (`index.html`) which provides:
+ *
+ *   - `toSyncData()` / `toUpdateData()` per local game-object type
+ *     (full snapshot vs per-frame deltas)
+ *   - `fromSyncData(obj)` to apply incoming dicts to the right local
+ *     game-object class
+ *   - `WIREOPT_SCHEMAS` + a `setSchemaIdSelector(fn)` callback for
+ *     positional/quantized wire encoding (Phases 4-5)
+ *
+ * To add a new game on top of this stack, you would:
+ *   1. Define your game-object classes with `toSyncData/toUpdateData/
+ *      fromSyncData` methods.
+ *   2. Register positional schemas via `SchemaCodec.register(id, fields)`
+ *      and pass them into `SessionClient.createSession({schemas: …})`.
+ *   3. Implement a `selector(data, kind, ctx)` returning the schemaId
+ *      for each (type, kind) pair (return 0 to keep the legacy MsgPack
+ *      dict path).
+ *   4. Wire it up: `ObjectSync.setSchemaIdSelector(selector)` after
+ *      `ObjectSync.init()` and `SchemaCodec.replaceAll(schemas)`.
+ *
+ * The sync layer also exposes a generic event channel
+ * (`registerEventKind / emitEvent / on('objectEvent:<name>', handler)`)
+ * so games can move rare-change fields off the per-frame update path
+ * without coupling them to the schema (Phase 2.1).
+ *
  * ## Per-Member Event Sequencing
  *
  * Every broadcast from the backend carries (senderMemberId, memberSequence).
