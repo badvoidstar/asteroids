@@ -135,7 +135,7 @@ public class WireSizeBenchTests
             new PositionalSchemaCodec.FieldSpec("velocityY", "f64"),
             new PositionalSchemaCodec.FieldSpec("rotationSpeed", "f64"),
             new PositionalSchemaCodec.FieldSpec("thrusting", "bool"),
-            new PositionalSchemaCodec.FieldSpec("invulnerable", "bool"),
+            new PositionalSchemaCodec.FieldSpec("invulnerable", "u16"),
         });
 
     // ── Phase 5 quantized variants ─────────────────────────────────────────
@@ -156,7 +156,7 @@ public class WireSizeBenchTests
             new PositionalSchemaCodec.FieldSpec("velocityY", "q16s"),
             new PositionalSchemaCodec.FieldSpec("rotationSpeed", "q16s"),
             new PositionalSchemaCodec.FieldSpec("thrusting", "bool"),
-            new PositionalSchemaCodec.FieldSpec("invulnerable", "bool"),
+            new PositionalSchemaCodec.FieldSpec("invulnerable", "u16"),
         });
 
     private static ObjectUpdateInfo SampleAsteroidUpdatePositional() => new(
@@ -180,7 +180,8 @@ public class WireSizeBenchTests
             ["velocityY"] = -0.03,
             ["rotationSpeed"] = 0.01,
             ["thrusting"] = true,
-            ["invulnerable"] = false,
+            // Realistic mid-invuln value (frame counter 0..180); u16 encodes as 2 B.
+            ["invulnerable"] = 120,
         })),
         Version: 42L);
 
@@ -430,7 +431,8 @@ public class WireSizeBenchTests
             ["velocityY"] = -0.03,
             ["rotationSpeed"] = 0.01,
             ["thrusting"] = true,
-            ["invulnerable"] = false,
+            // Realistic mid-invuln value (frame counter 0..180); u16 encodes as 2 B.
+            ["invulnerable"] = 120,
         })),
         Version: 42L);
 
@@ -448,9 +450,12 @@ public class WireSizeBenchTests
     public void Phase5_ShipUpdate_PerFrame_Quantized()
     {
         var size = Size(SampleShipUpdateQuantized());
-        // Body: bitmask(1) + 6×i/u16(12) + 2×bool(2) = 15 B (vs 51 B Phase 4 f64 = -36 B).
-        // Wrapped ObjectUpdateInfo: ~40-50 B (vs 91 B Phase 4 f64; ~50% reduction).
-        size.Should().BeInRange(35, 55, "ship per-frame update (Phase 5 quantized)");
+        // Body: bitmask(1) + 6×i/u16(12) + 1×bool(1) + 1×u16(2) = 16 B (vs 51 B
+        // Phase 4 f64 = -35 B). `invulnerable` is u16 (frame counter), not bool —
+        // bool would freeze remote ships in the blink-off half of the invuln
+        // animation. Wrapped ObjectUpdateInfo: ~50-60 B (vs 91 B Phase 4 f64;
+        // ~38% reduction).
+        size.Should().BeInRange(40, 65, "ship per-frame update (Phase 5 quantized)");
     }
 
     [Fact]

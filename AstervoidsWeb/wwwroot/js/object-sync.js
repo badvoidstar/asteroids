@@ -905,7 +905,15 @@ const ObjectSync = (function() {
             const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
                 ? Math.round(clockSource.nowMs())
                 : null;
-            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId, clientValidAt, pickSchemaId(data, 'create'));
+            // Positional schemas (schemaId>=1) read field names directly from
+            // the dict and have no name bytes on the wire — compression is
+            // pointless AND silently zeroes fields whose name was remapped
+            // (e.g. fieldMap angle→'a' would make schema lookup of dict.angle
+            // return undefined, clearing its bitmask bit). Apply compression
+            // only on the legacy SchemaId=0 MessagePack-dict path.
+            const createSchemaId = pickSchemaId(data, 'create');
+            const wireData = (createSchemaId === 0) ? compressData(data) : data;
+            const response = await SessionClient.createObject(wireData, scope, ownerMemberId, clientValidAt, createSchemaId);
             if (!response || !response.objectInfo) return null;
 
             const objectInfo = response.objectInfo;
@@ -955,8 +963,13 @@ const ObjectSync = (function() {
         }
 
         try {
-            const compressedReplacements = replacements.map(r => compressData(r));
-            const replacementSchemaIds = compressedReplacements.map(r => pickSchemaId(r, 'replace'));
+            // Positional schemas have no name bytes on the wire — compression
+            // would silently zero out remapped fields. See createObject.
+            const compressedReplacements = replacements.map((r, i) => {
+                const rid = pickSchemaId(r, 'replace');
+                return (rid === 0) ? compressData(r) : r;
+            });
+            const replacementSchemaIds = replacements.map(r => pickSchemaId(r, 'replace'));
             // Stamp owner's best estimate of server time NOW (collision moment).
             // Server clamps to ±2s of its own UtcNow before forwarding as the
             // unified-axis validAt. If the clock isn't initialized yet, send
@@ -1153,19 +1166,27 @@ const ObjectSync = (function() {
         const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
             ? Math.round(clockSource.nowMs())
             : null;
-        // Compress field names for the wire — game logic stays readable
+        // Compress field names for the wire — game logic stays readable.
         // Phase 4: each update carries its own schemaId so heterogeneous
         // batches (mix of asteroid update + ship full-sync, for example)
         // can use distinct positional schemas without splitting batches. The
         // selector receives ctx.objectId + ctx.object so it can route by type
         // even when the update payload itself omits `type`.
+        //
+        // Positional schemas (schemaId>=1) read field names directly from
+        // the dict and have no name bytes on the wire — compression is
+        // pointless AND silently zeroes fields whose name was remapped (e.g.
+        // fieldMap angle→'a' would make schema lookup of dict.angle return
+        // undefined, clearing its bitmask bit). Apply compression only on
+        // the legacy SchemaId=0 MessagePack-dict path.
         const wireUpdates = updates.map(u => {
-            const compressed = compressData(u.data);
             const ctx = { objectId: u.objectId, object: objects.get(u.objectId) };
+            const schemaId = pickSchemaId(u.data, 'update', ctx);
+            const data = (schemaId === 0) ? compressData(u.data) : u.data;
             return {
                 objectId: u.objectId,
-                data: compressed,
-                schemaId: pickSchemaId(compressed, 'update', ctx)
+                data,
+                schemaId
             };
         });
         try {

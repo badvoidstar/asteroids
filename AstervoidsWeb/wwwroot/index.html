@@ -1313,14 +1313,18 @@
     // Position fields use q16 (2 B, 1.5e-5 resolution over [0,1) — finer than
     // 1 px on a 65535-wide normalized canvas). Angle uses q16_2pi (2 B,
     // ~0.0055° resolution). Velocity uses q16s (2 B, signed [-1,1] — game
-    // velocities saturate well below ±1). Together this drops asteroid update
-    // body from 25 B (1+24) to 7 B (1+6); ship update body from 51 B to 17 B.
+    // velocities saturate well below ±1). `invulnerable` is a frame counter
+    // (0..INVULNERABILITY_TIME, decremented by dt each frame; receivers use
+    // its integer value to drive the blink phase via Math.floor(v/BLINK_RATE)
+    // % 2), so it MUST be encoded as an integer — `bool` would collapse all
+    // nonzero values to 1, fixing the receiver in the "blink off" half and
+    // making the ship invisible for the entire invuln period.
     const WIREOPT_SCHEMAS = [
         { id: 1, fields: [
             ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
             ['velocityX', 'q16s'], ['velocityY', 'q16s'],
             ['rotationSpeed', 'q16s'],
-            ['thrusting', 'bool'], ['invulnerable', 'bool'],
+            ['thrusting', 'bool'], ['invulnerable', 'u16'],
         ]},
         { id: 3, fields: [
             ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
