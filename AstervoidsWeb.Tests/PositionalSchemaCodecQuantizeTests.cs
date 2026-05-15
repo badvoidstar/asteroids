@@ -45,6 +45,59 @@ public class PositionalSchemaCodecQuantizeTests
         ((double)lo["v"]!).Should().Be(0.0);
     }
 
+    // ── q16w (wrap-extended position) ─────────────────────────────────────
+    // q16w covers [-0.5, 1.5] so positions in the off-screen wrap-margin
+    // region survive the wire intact. Plain q16 would clamp them at 0/1
+    // and freeze remote asteroids/ships at the edge during wrap excursions.
+
+    [Fact]
+    public void Q16w_RoundTrip_AtCanonicalValues()
+    {
+        var s = MakeSchema(1, ("v", "q16w"));
+        // 2.0 / 65535 ≈ 3.05e-5 per unit; allow 2× quantization step for tolerance.
+        const double tol = 2.0 * 2.0 / 65535.0;
+        foreach (var v in new[] { -0.5, -0.1, 0.0, 0.5, 1.0, 1.1, 1.5 })
+        {
+            var bytes = PositionalSchemaCodec.Encode(s, new Dictionary<string, object?> { ["v"] = v });
+            var back = PositionalSchemaCodec.Decode(s, bytes);
+            ((double)back["v"]!).Should().BeApproximately(v, tol, $"q16w value {v}");
+        }
+    }
+
+    [Fact]
+    public void Q16w_WireSize_BitmaskPlus2()
+    {
+        var s = MakeSchema(1, ("v", "q16w"));
+        var bytes = PositionalSchemaCodec.Encode(s, new Dictionary<string, object?> { ["v"] = 0.5 });
+        bytes.Length.Should().Be(3);
+    }
+
+    [Fact]
+    public void Q16w_ClampsOutOfRange()
+    {
+        var s = MakeSchema(1, ("v", "q16w"));
+        var hi = PositionalSchemaCodec.Decode(s, PositionalSchemaCodec.Encode(s, new Dictionary<string, object?> { ["v"] = 5.0 }));
+        ((double)hi["v"]!).Should().Be(1.5);
+        var lo = PositionalSchemaCodec.Decode(s, PositionalSchemaCodec.Encode(s, new Dictionary<string, object?> { ["v"] = -5.0 }));
+        ((double)lo["v"]!).Should().Be(-0.5);
+    }
+
+    [Fact]
+    public void Q16w_PreservesWrapExtensionRegionThatQ16WouldClamp()
+    {
+        // Concrete regression from the wireopt-followup bug: an asteroid
+        // (r ≈ 0.083) sliding off the right edge passes through x ≈ 1.05
+        // before wrapping. q16 clamps that to 1.0; q16w must preserve it.
+        var sQ16  = MakeSchema(1, ("x", "q16"));
+        var sQ16w = MakeSchema(2, ("x", "q16w"));
+        var bytesQ16  = PositionalSchemaCodec.Encode(sQ16,  new Dictionary<string, object?> { ["x"] = 1.05 });
+        var bytesQ16w = PositionalSchemaCodec.Encode(sQ16w, new Dictionary<string, object?> { ["x"] = 1.05 });
+        var backQ16  = (double)PositionalSchemaCodec.Decode(sQ16,  bytesQ16 )["x"]!;
+        var backQ16w = (double)PositionalSchemaCodec.Decode(sQ16w, bytesQ16w)["x"]!;
+        backQ16.Should().Be(1.0, "q16 demonstrably clamps at 1.0 — this is the bug q16w fixes");
+        backQ16w.Should().BeApproximately(1.05, 2.0 * 2.0 / 65535.0, "q16w must preserve the wrap-extension value");
+    }
+
     [Fact]
     public void Q16s_RoundTrip_AcrossSignedRange()
     {

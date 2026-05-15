@@ -142,15 +142,15 @@ public class WireSizeBenchTests
     // Mirror the live game schemas registered in index.html WIREOPT_SCHEMAS.
     private static readonly PositionalSchemaCodec.Schema AsteroidUpdateSchemaQ =
         new(3, new[] {
-            new PositionalSchemaCodec.FieldSpec("x", "q16"),
-            new PositionalSchemaCodec.FieldSpec("y", "q16"),
+            new PositionalSchemaCodec.FieldSpec("x", "q16w"),
+            new PositionalSchemaCodec.FieldSpec("y", "q16w"),
             new PositionalSchemaCodec.FieldSpec("angle", "q16_2pi"),
         });
 
     private static readonly PositionalSchemaCodec.Schema ShipUpdateSchemaQ =
         new(1, new[] {
-            new PositionalSchemaCodec.FieldSpec("x", "q16"),
-            new PositionalSchemaCodec.FieldSpec("y", "q16"),
+            new PositionalSchemaCodec.FieldSpec("x", "q16w"),
+            new PositionalSchemaCodec.FieldSpec("y", "q16w"),
             new PositionalSchemaCodec.FieldSpec("angle", "q16_2pi"),
             new PositionalSchemaCodec.FieldSpec("velocityX", "q16s"),
             new PositionalSchemaCodec.FieldSpec("velocityY", "q16s"),

@@ -42,6 +42,16 @@ public static class PositionalSchemaCodec
 {
     public const int MaxFields = 32;
     private const double TwoPi = Math.PI * 2.0;
+    // q16w: wrap-extended quantized position. Maps [-0.5, 1.5] → [0, 65535].
+    // The game's wrapNormalized lets owner positions transit an off-screen
+    // margin of up to ~0.15 normalized (large asteroid on a tall portrait
+    // viewport) before snapping to the opposite edge. q16's [0,1] clamp would
+    // park remote objects at the edge for the whole excursion. q16w gives 3×
+    // headroom over the worst plausible margin while keeping resolution
+    // sub-pixel on a 4K canvas (2/65535 ≈ 3.05e-5).
+    private const double Q16wLo = -0.5;
+    private const double Q16wHi = 1.5;
+    private const double Q16wRange = Q16wHi - Q16wLo; // 2.0
 
     public sealed record FieldSpec(string Name, string Type);
 
@@ -77,7 +87,7 @@ public static class PositionalSchemaCodec
                 case "i32": case "i16": case "i8":
                 case "bool": case "str": case "guid": case "bytes":
                 case "nullable-str": case "nullable-guid":
-                case "q16": case "q16s": case "q16_2pi": case "q8":
+                case "q16": case "q16w": case "q16s": case "q16_2pi": case "q8":
                     return;
                 default:
                     throw new ArgumentException($"Schema {schemaId} field '{fieldName}': unknown type tag '{type}'");
@@ -117,7 +127,7 @@ public static class PositionalSchemaCodec
                 case "u32": case "i32": bodySize += 4; break;
                 case "u16": case "i16": bodySize += 2; break;
                 case "u8":  case "i8":  bodySize += 1; break;
-                case "q16": case "q16s": case "q16_2pi": bodySize += 2; break;
+                case "q16": case "q16w": case "q16s": case "q16_2pi": bodySize += 2; break;
                 case "q8":  bodySize += 1; break;
                 case "bool": bodySize += 1; break;
                 case "guid": bodySize += 16; break;
@@ -191,6 +201,14 @@ public static class PositionalSchemaCodec
                 {
                     var d = Clamp01(Convert.ToDouble(v));
                     var q = (ushort)Math.Round(d * 65535.0, MidpointRounding.AwayFromZero);
+                    BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(off, 2), q);
+                    off += 2; break;
+                }
+                case "q16w":
+                {
+                    // Wrap-extended position; see Q16w* constants for rationale.
+                    var d = ClampQ16w(Convert.ToDouble(v));
+                    var q = (ushort)Math.Round((d - Q16wLo) / Q16wRange * 65535.0, MidpointRounding.AwayFromZero);
                     BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(off, 2), q);
                     off += 2; break;
                 }
@@ -303,6 +321,7 @@ public static class PositionalSchemaCodec
                 case "u8":  Need(1, f.Name, span, off); result[f.Name] = (long)span[off]; off += 1; break;
                 case "i8":  Need(1, f.Name, span, off); result[f.Name] = (long)(sbyte)span[off]; off += 1; break;
                 case "q16": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(off, 2)) / 65535.0; off += 2; break;
+                case "q16w": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(off, 2)) / 65535.0 * Q16wRange + Q16wLo; off += 2; break;
                 case "q16s": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadInt16LittleEndian(span.Slice(off, 2)) / 32767.0; off += 2; break;
                 case "q16_2pi": Need(2, f.Name, span, off); result[f.Name] = (double)BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(off, 2)) / 65536.0 * TwoPi; off += 2; break;
                 case "q8":  Need(1, f.Name, span, off); result[f.Name] = (double)span[off] / 255.0; off += 1; break;
@@ -377,6 +396,7 @@ public static class PositionalSchemaCodec
 
     private static double Clamp01(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
     private static double Clamp11(double v) => v < -1 ? -1 : v > 1 ? 1 : v;
+    private static double ClampQ16w(double v) => v < Q16wLo ? Q16wLo : v > Q16wHi ? Q16wHi : v;
     private static double Wrap2Pi(double v)
     {
         var m = v % TwoPi;

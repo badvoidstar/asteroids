@@ -37,6 +37,45 @@ test('q16 clamps out-of-range values', () => {
     assert.strictEqual(lo.v, 0);
 });
 
+// ── q16w (wrap-extended position) ────────────────────────────────────────
+// q16w covers [-0.5, 1.5] so off-screen wrap-margin positions used by
+// wrapNormalized survive the wire intact. Plain q16 [0,1] would clamp them
+// at the edge and freeze remote asteroids/ships during wrap excursions.
+
+test('q16w roundtrip across wrap-extended range [-0.5, 1.5]', () => {
+    const s = fresh(1, [['v', 'q16w']]);
+    // 2.0 / 65535 ≈ 3.05e-5 per unit; allow 2× quantization step for tolerance.
+    const tol = 2 * 2 / 65535;
+    for (const v of [-0.5, -0.1, 0, 0.5, 1, 1.1, 1.5]) {
+        const out = SchemaCodec.decode(s, SchemaCodec.encode(s, { v }));
+        assert.ok(Math.abs(out.v - v) < tol, `expected ~${v}, got ${out.v}`);
+    }
+});
+
+test('q16w wire size: bitmask(1) + 2 = 3 bytes', () => {
+    const s = fresh(1, [['v', 'q16w']]);
+    assert.strictEqual(SchemaCodec.encode(s, { v: 0.5 }).length, 3);
+});
+
+test('q16w clamps out-of-range values to ±extended bound', () => {
+    const s = fresh(1, [['v', 'q16w']]);
+    assert.strictEqual(SchemaCodec.decode(s, SchemaCodec.encode(s, { v: 5 })).v, 1.5);
+    assert.strictEqual(SchemaCodec.decode(s, SchemaCodec.encode(s, { v: -5 })).v, -0.5);
+});
+
+test('q16w preserves wrap-extension positions that q16 would clamp', () => {
+    // Concrete regression: an asteroid (radius ≈ 0.083) sliding off the
+    // right edge passes through x ≈ 1.05 before wrapping. q16 clamps to
+    // 1.0 (frozen at the edge); q16w must preserve it.
+    SchemaCodec.clear();
+    const sQ16  = SchemaCodec.register(1, [['x', 'q16']]);
+    const sQ16w = SchemaCodec.register(2, [['x', 'q16w']]);
+    const backQ16  = SchemaCodec.decode(sQ16,  SchemaCodec.encode(sQ16,  { x: 1.05 })).x;
+    const backQ16w = SchemaCodec.decode(sQ16w, SchemaCodec.encode(sQ16w, { x: 1.05 })).x;
+    assert.strictEqual(backQ16, 1, 'q16 demonstrably clamps at 1 — this is the bug q16w fixes');
+    assert.ok(Math.abs(backQ16w - 1.05) < 2 * 2 / 65535, `q16w must preserve 1.05; got ${backQ16w}`);
+});
+
 test('q16s roundtrip across [-1, 1]', () => {
     const s = fresh(1, [['v', 'q16s']]);
     for (const v of [-1, -0.5, 0, 0.5, 1, 0.123456]) {

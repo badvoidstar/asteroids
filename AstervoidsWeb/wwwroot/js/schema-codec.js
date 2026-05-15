@@ -27,6 +27,11 @@
  *
  * Phase 5 quantized type tags (lossy fixed-point, 2 bytes each):
  *   - 'q16'      : uint16 over [0, 1)        — resolution 1/65535 ≈ 1.5e-5
+ *   - 'q16w'     : uint16 over [-0.5, 1.5]   — wrap-extended position; covers
+ *                  the off-screen margin region used by wrapNormalized so
+ *                  asteroids/ships transit smoothly across edges instead of
+ *                  clamping at 0 or 1. Resolution 2/65535 ≈ 3.05e-5
+ *                  (sub-pixel on a 4K canvas).
  *   - 'q16s'     : int16  over [-1, 1]       — resolution 2/65534 ≈ 3.0e-5
  *   - 'q16_2pi'  : uint16 over [0, 2π)       — resolution ≈ 9.6e-5 rad ≈ 0.0055°
  *   - 'q8'       : uint8  over [0, 1)        — resolution 1/255 ≈ 4e-3
@@ -50,12 +55,21 @@ const SchemaCodec = (function () {
         'bool', 'str', 'guid', 'bytes',
         'nullable-str', 'nullable-guid',
         // Phase 5 quantized types — all 2 bytes on the wire
-        'q16', 'q16s', 'q16_2pi', 'q8',
+        'q16', 'q16w', 'q16s', 'q16_2pi', 'q8',
     ]);
 
     const TWO_PI = Math.PI * 2;
+    // q16w covers the wrap-extended position range used by wrapNormalized.
+    // Asteroid wrapMargin can reach ~0.15 normalized on a tall portrait
+    // viewport (radius 0.083 × refDim/gameWidth where refDim = min(w,h)).
+    // [-0.5, 1.5] gives 3× headroom over the worst plausible margin while
+    // keeping resolution sub-pixel on a 4K canvas.
+    const Q16W_LO = -0.5;
+    const Q16W_HI = 1.5;
+    const Q16W_RANGE = Q16W_HI - Q16W_LO; // 2.0
     function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
     function clamp11(v) { return v < -1 ? -1 : v > 1 ? 1 : v; }
+    function clampQ16w(v) { return v < Q16W_LO ? Q16W_LO : v > Q16W_HI ? Q16W_HI : v; }
     function wrap2pi(v) {
         // Normalize into [0, 2π) so q16_2pi roundtrips cleanly across 0/2π edge.
         const m = v % TWO_PI;
@@ -170,7 +184,7 @@ const SchemaCodec = (function () {
                 case 'u32': case 'i32': bodySize += 4; break;
                 case 'u16': case 'i16': bodySize += 2; break;
                 case 'u8':  case 'i8':  bodySize += 1; break;
-                case 'q16': case 'q16s': case 'q16_2pi': bodySize += 2; break;
+                case 'q16': case 'q16w': case 'q16s': case 'q16_2pi': bodySize += 2; break;
                 case 'q8':  bodySize += 1; break;
                 case 'bool': bodySize += 1; break;
                 case 'guid': bodySize += 16; break;
@@ -227,6 +241,13 @@ const SchemaCodec = (function () {
                 case 'i8':  view.setInt8(off, ((v << 24) >> 24)); off += 1; break;
                 case 'q16': {
                     const q = Math.round(clamp01(+v) * 65535);
+                    view.setUint16(off, q, true); off += 2; break;
+                }
+                case 'q16w': {
+                    // Map [-0.5, 1.5] → [0, 65535]. Used for normalized x/y
+                    // positions so wrap-extended values (off-screen margin)
+                    // don't clamp at the canvas edge.
+                    const q = Math.round((clampQ16w(+v) - Q16W_LO) / Q16W_RANGE * 65535);
                     view.setUint16(off, q, true); off += 2; break;
                 }
                 case 'q16s': {
@@ -315,6 +336,7 @@ const SchemaCodec = (function () {
                 case 'u8':  need(1, f.name); out[f.name] = bytes[off]; off += 1; break;
                 case 'i8':  need(1, f.name); out[f.name] = view.getInt8(off); off += 1; break;
                 case 'q16': need(2, f.name); out[f.name] = view.getUint16(off, true) / 65535; off += 2; break;
+                case 'q16w': need(2, f.name); out[f.name] = view.getUint16(off, true) / 65535 * Q16W_RANGE + Q16W_LO; off += 2; break;
                 case 'q16s': need(2, f.name); out[f.name] = view.getInt16(off, true) / 32767; off += 2; break;
                 case 'q16_2pi': need(2, f.name); out[f.name] = view.getUint16(off, true) / 65536 * TWO_PI; off += 2; break;
                 case 'q8':  need(1, f.name); out[f.name] = bytes[off] / 255; off += 1; break;

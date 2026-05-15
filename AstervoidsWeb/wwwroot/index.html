@@ -1310,10 +1310,14 @@
     // integration test harness we don't have yet.
     //
     // ── Phase 5 quantization (lossy) ─────────────────────────────────────
-    // Position fields use q16 (2 B, 1.5e-5 resolution over [0,1) — finer than
-    // 1 px on a 65535-wide normalized canvas). Angle uses q16_2pi (2 B,
-    // ~0.0055° resolution). Velocity uses q16s (2 B, signed [-1,1] — game
-    // velocities saturate well below ±1). `invulnerable` is a frame counter
+    // Position fields use q16w (2 B, ~3.05e-5 resolution over [-0.5, 1.5] —
+    // sub-pixel on a 4K canvas AND large enough to carry the off-screen
+    // wrap-margin positions used by wrapNormalized without clamping at the
+    // edge. The plain q16 [0,1] tag clamped owner positions in the extended
+    // off-screen region to 0 or 1, freezing remote asteroids at the edge
+    // for the entire wrap excursion). Angle uses q16_2pi (2 B, ~0.0055°
+    // resolution). Velocity uses q16s (2 B, signed [-1,1] — game velocities
+    // saturate well below ±1). `invulnerable` is a frame counter
     // (0..INVULNERABILITY_TIME, decremented by dt each frame; receivers use
     // its integer value to drive the blink phase via Math.floor(v/BLINK_RATE)
     // % 2), so it MUST be encoded as an integer — `bool` would collapse all
@@ -1321,13 +1325,13 @@
     // making the ship invisible for the entire invuln period.
     const WIREOPT_SCHEMAS = [
         { id: 1, fields: [
-            ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
             ['velocityX', 'q16s'], ['velocityY', 'q16s'],
             ['rotationSpeed', 'q16s'],
             ['thrusting', 'bool'], ['invulnerable', 'u16'],
         ]},
         { id: 3, fields: [
-            ['x', 'q16'], ['y', 'q16'], ['angle', 'q16_2pi'],
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
         ]},
     ];
     const SCHEMA_ID_UPDATE = {
