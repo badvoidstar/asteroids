@@ -1295,6 +1295,41 @@
         SHIP_STATE_CHANGED: 1
     };
 
+    // ── Phase 4 wireopt: positional schemas ─────────────────────────────────
+    // Each (type, kind) gets a stable schema id. Servers register schemas via
+    // session metadata.schemas at create time; joiners apply the same set on
+    // join. The selector below routes outbound payloads to the right id.
+    //
+    // Update schemas omit `type` because the receiver already knows the type
+    // from the existing local object (looked up via objectId in fromSyncData
+    // dispatch). Create schemas keep `type` for the registerObject path.
+    //
+    // Bullet payloads (create + update) intentionally remain on the legacy
+    // SchemaId=0 path because the pendingHit handshake still rides on the
+    // per-frame data (Phase 2.2 deferred); converting it now would require an
+    // integration test harness we don't have yet.
+    const WIREOPT_SCHEMAS = [
+        { id: 1, fields: [
+            ['x', 'f64'], ['y', 'f64'], ['angle', 'f64'],
+            ['velocityX', 'f64'], ['velocityY', 'f64'],
+            ['rotationSpeed', 'f64'],
+            ['thrusting', 'bool'], ['invulnerable', 'bool'],
+        ]},
+        { id: 3, fields: [
+            ['x', 'f64'], ['y', 'f64'], ['angle', 'f64'],
+        ]},
+    ];
+    const SCHEMA_ID_UPDATE = {
+        [OBJECT_TYPES.SHIP]: 1,
+        [OBJECT_TYPES.ASTEROID]: 3,
+    };
+    function selectWireoptSchemaId(data, kind, ctx) {
+        if (kind !== 'update') return 0;
+        const obj = ctx && ctx.object;
+        const type = obj && obj.data && obj.data.type;
+        return SCHEMA_ID_UPDATE[type] || 0;
+    }
+
     // Ship colors for up to 4 players (distinct, high-contrast)
     const SHIP_COLORS = [
         '#00FF00',  // Green (Player 1 / typically Server)
@@ -6117,6 +6152,13 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
+                // Phase 4 wireopt: register positional schemas before any
+                // SyncPayload.wrap/unwrap can fire. SchemaCodec is loaded by
+                // schema-codec.js (browser) ahead of sync-payload.js.
+                if (window.SchemaCodec) {
+                    window.SchemaCodec.replaceAll(WIREOPT_SCHEMAS);
+                }
+                ObjectSync.setSchemaIdSelector(selectWireoptSchemaId);
                 // Phase 2.3: per-object event channel registrations.
                 // Score and hitCount move off the per-frame update path onto a
                 // tiny "ship-state-changed" event that fires only when the
@@ -6429,6 +6471,7 @@
             const result = await SessionClient.createSession({
                 aspectRatio: currentAspectRatio,
                 config: buildSessionConfigMetadata(),
+                schemas: WIREOPT_SCHEMAS,
             });
             if (result) {
                 // Enter lobby state as server

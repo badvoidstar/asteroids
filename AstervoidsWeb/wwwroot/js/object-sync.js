@@ -98,10 +98,12 @@ const ObjectSync = (function() {
 
     // ── Phase 4 wireopt: positional schema selection ───────────────────────
     // The game registers a selector via setSchemaIdSelector(fn). It is called
-    // for every outbound create/update/replace with (data, kind) where kind is
-    // 'create' | 'update' | 'replace'. Returning 0 (or null/undefined) keeps
-    // the legacy MessagePack dict path; returning >=1 sends positionally via
-    // the locally-registered SchemaCodec entry of that id.
+    // for every outbound create/update/replace with (data, kind, ctx) where
+    // kind is 'create' | 'update' | 'replace' and ctx is { objectId, object }
+    // (object may be undefined if the local registry hasn't seen it yet).
+    // Returning 0 (or null/undefined) keeps the legacy MessagePack dict path;
+    // returning >=1 sends positionally via the locally-registered SchemaCodec
+    // entry of that id.
     let schemaIdSelector = null;
     function setSchemaIdSelector(fn) {
         if (fn !== null && typeof fn !== 'function') {
@@ -109,10 +111,10 @@ const ObjectSync = (function() {
         }
         schemaIdSelector = fn;
     }
-    function pickSchemaId(data, kind) {
+    function pickSchemaId(data, kind, ctx) {
         if (!schemaIdSelector) return 0;
         try {
-            const id = schemaIdSelector(data, kind);
+            const id = schemaIdSelector(data, kind, ctx);
             return (typeof id === 'number' && id >= 1 && id <= 255) ? id : 0;
         } catch (err) {
             _warn('[ObjectSync] schemaIdSelector threw; falling back to schemaId=0', err);
@@ -1124,13 +1126,16 @@ const ObjectSync = (function() {
         // Compress field names for the wire — game logic stays readable
         // Phase 4: each update carries its own schemaId so heterogeneous
         // batches (mix of asteroid update + ship full-sync, for example)
-        // can use distinct positional schemas without splitting batches.
+        // can use distinct positional schemas without splitting batches. The
+        // selector receives ctx.objectId + ctx.object so it can route by type
+        // even when the update payload itself omits `type`.
         const wireUpdates = updates.map(u => {
             const compressed = compressData(u.data);
+            const ctx = { objectId: u.objectId, object: objects.get(u.objectId) };
             return {
                 objectId: u.objectId,
                 data: compressed,
-                schemaId: pickSchemaId(compressed, 'update')
+                schemaId: pickSchemaId(compressed, 'update', ctx)
             };
         });
         try {
