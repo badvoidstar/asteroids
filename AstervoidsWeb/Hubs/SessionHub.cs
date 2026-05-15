@@ -148,12 +148,14 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Converts a <see cref="SessionObject"/> to a <see cref="ObjectInfo"/> DTO.
-    /// Clones <c>Data</c> so the caller receives a stable snapshot that cannot be
-    /// mutated by concurrent object updates.
+    /// Wraps <c>Data</c> in a <see cref="SyncPayload"/> envelope (Phase 3 wire
+    /// shape: SchemaId=0 + MessagePack-encoded dict bytes); the underlying dict
+    /// is implicitly cloned by serialization so callers cannot mutate the
+    /// stored dict via the returned bytes.
     /// </summary>
     private static ObjectInfo ToObjectInfo(SessionObject o) =>
         new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope,
-            new Dictionary<string, object?>(o.Data), o.Version);
+            SyncPayloadCodec.EncodeDict(o.Data), o.Version);
 
     /// <summary>
     /// Takes a consistent point-in-time snapshot of a session's members and objects.
@@ -462,7 +464,7 @@ public class SessionHub : Hub
     /// the owner's clock isn't yet initialized; server falls back to its
     /// hub-entry timestamp (upload-biased but always usable).
     /// </param>
-    public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
+    public async Task<CreateObjectResponse?> CreateObject(SyncPayload? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale.
         // clientValidAt is forwarded into the service which validates it (±2 s
@@ -475,7 +477,12 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId, clientValidAt));
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
+        // Phase 3 envelope: decode the wire payload to the server-internal
+        // dict shape that ObjectService consumes. SchemaId is validated here;
+        // unknown ids throw (caught by SignalR and surfaced as an error).
+        var dataDict = SyncPayloadCodec.DecodeDict(data ?? SyncPayloadCodec.EncodeDict(null));
+
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), dataDict, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
@@ -527,22 +534,30 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, senderSendIntervalMs, clientValidAt));
 
-        // Map hub request type to service type; ownership enforcement is inside the service.
-        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data)).ToList();
+        // Phase 3 envelope: decode each request's SyncPayload to the dict
+        // shape the service consumes. We cache the original SyncPayload by
+        // objectId so the broadcast can echo the SAME bytes the sender sent
+        // (avoids a wasteful decode-then-reencode round-trip and preserves
+        // any compactness the sender's encoder achieved).
+        var updatesList = updates.ToList();
+        var requestPayloadByObjectId = updatesList
+            .GroupBy(u => u.ObjectId)
+            .ToDictionary(g => g.Key, g => g.Last().Data);
+        var serviceUpdates = updatesList
+            .Select(u => new ObjectUpdate(u.ObjectId, SyncPayloadCodec.DecodeDict(u.Data)))
+            .ToList();
         var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates, clientValidAt, serverTimestamp).ToList();
 
         long memberSequence = 0;
         if (updatedObjects.Count > 0)
         {
             memberSequence = NextMemberSequence(member);
-            // Build a map from objectId → requested data for the broadcast payload.
-            // Use the service updates (which own the data dictionaries we passed in).
-            var requestDataByObjectId = serviceUpdates
-                .GroupBy(u => u.ObjectId)
-                .ToDictionary(g => g.Key, g => g.Last().Data);
+            // Build broadcast payload from the cached request payloads (verbatim
+            // bytes from the sender) — no need to re-encode the dict the service
+            // already merged into obj.Data.
             var updateInfos = updatedObjects
-                .Where(o => requestDataByObjectId.ContainsKey(o.Id))
-                .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version))
+                .Where(o => requestPayloadByObjectId.ContainsKey(o.Id))
+                .Select(o => new ObjectUpdateInfo(o.Id, requestPayloadByObjectId[o.Id], o.Version))
                 .ToList();
 
             // ValidAt is a single batch-level trailing argument: every object in
@@ -624,7 +639,7 @@ public class SessionHub : Hub
     /// Null when the owner's clock isn't yet initialized; server falls back
     /// to its hub-entry timestamp.
     /// </param>
-    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null, long? clientValidAt = null)
+    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<SyncPayload> replacements, string scope = "Session", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — used by recordPacketArrival (network arrival
         // timing, includes server processing time). NOT used as the spawn anchor;
@@ -642,9 +657,10 @@ public class SessionHub : Hub
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
 
         // Build replacement specs; service enforces ownership atomically and stamps
-        // the validated collision-time on each child's ValidAt.
+        // the validated collision-time on each child's ValidAt. Phase 3 envelope:
+        // each replacement's SyncPayload is decoded to the dict the service expects.
         var specs = replacements
-            .Select(data => new ReplacementObjectSpec(objectScope, data, ownerGuid))
+            .Select(payload => new ReplacementObjectSpec(objectScope, SyncPayloadCodec.DecodeDict(payload), ownerGuid))
             .ToList();
 
         var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs, clientValidAt, serverTimestamp);

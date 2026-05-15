@@ -166,7 +166,7 @@ public class BinaryGuidFormatterTests
         var dto = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
             ObjectScope.Session,
-            new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 1.5 },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 1.5 }),
             42L);
 
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -177,6 +177,10 @@ public class BinaryGuidFormatterTests
         result.OwnerMemberId.Should().Be(dto.OwnerMemberId);
         result.Scope.Should().Be(dto.Scope);
         result.Version.Should().Be(dto.Version);
+        // Phase 3 envelope: Data is now wrapped, so verify the inner dict round-trips too.
+        var innerDict = SyncPayloadCodec.DecodeDict(result.Data);
+        innerDict["type"].Should().Be("ship");
+        innerDict["x"].Should().Be(1.5);
     }
 
     [Fact]
@@ -197,7 +201,7 @@ public class BinaryGuidFormatterTests
     {
         var created = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            ObjectScope.Session, new Dictionary<string, object?> { ["type"] = "asteroid" }, 1L);
+            ObjectScope.Session, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }), 1L);
 
         var dto = new ObjectReplacedEvent(Guid.NewGuid(), new List<ObjectInfo> { created });
         var bytes = MessagePackSerializer.Serialize(dto, Options);
@@ -214,7 +218,7 @@ public class BinaryGuidFormatterTests
         var member = new MemberInfo(Guid.NewGuid(), MemberRole.Client, DateTime.UtcNow);
         var obj = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            ObjectScope.Member, new Dictionary<string, object?>(), 1L);
+            ObjectScope.Member, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>()), 1L);
 
         var dto = new JoinSessionResponse(
             Guid.NewGuid(), "Banana", Guid.NewGuid(), MemberRole.Client,
@@ -254,7 +258,7 @@ public class BinaryGuidFormatterTests
         var dto = new ObjectInfo(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
             ObjectScope.Session,
-            new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 100.0, ["y"] = 200.0 },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "ship", ["x"] = 100.0, ["y"] = 200.0 }),
             42L);
 
         // Binary GUIDs

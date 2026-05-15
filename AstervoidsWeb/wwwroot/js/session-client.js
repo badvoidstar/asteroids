@@ -240,12 +240,16 @@ const SessionClient = (function() {
         // objectId so each pre-existing object keeps its own age.
         connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             WireEnum.translateObject(objectInfo);
+            SyncPayload.unwrapObjectData(objectInfo);
             if (callbacks.onObjectCreated) {
                 callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
         connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt) => {
+            if (Array.isArray(objects)) {
+                for (const u of objects) SyncPayload.unwrapObjectData(u);
+            }
             if (callbacks.onObjectsUpdated) {
                 callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs, validAt);
             }
@@ -259,7 +263,10 @@ const SessionClient = (function() {
 
         connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
             if (event && Array.isArray(event.createdObjects)) {
-                for (const o of event.createdObjects) WireEnum.translateObject(o);
+                for (const o of event.createdObjects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
             }
             if (callbacks.onObjectReplaced) {
                 callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
@@ -395,7 +402,10 @@ const SessionClient = (function() {
                 for (const m of response.members) WireEnum.translateMember(m);
             }
             if (Array.isArray(response.objects)) {
-                for (const o of response.objects) WireEnum.translateObject(o);
+                for (const o of response.objects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
             }
 
             currentSession = {
@@ -483,7 +493,14 @@ const SessionClient = (function() {
      *   the server's hub-entry timestamp (slightly upload-biased).
      */
     async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null) {
-        return invokeHub('CreateObject', data, scope, ownerMemberId, clientValidAt);
+        const response = await invokeHub('CreateObject', SyncPayload.wrap(data), scope, ownerMemberId, clientValidAt);
+        // Phase 3 envelope: response.objectInfo.data arrives as a SyncPayload
+        // [schemaId, Uint8Array]; unwrap so the owner-side path in object-sync.js
+        // sees the same plain dict shape as remote receivers.
+        if (response && response.objectInfo) {
+            SyncPayload.unwrapObjectData(response.objectInfo);
+        }
+        return response;
     }
 
     /**
@@ -497,7 +514,20 @@ const SessionClient = (function() {
      *   the server's hub-entry timestamp.
      */
     async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null, clientValidAt = null) {
-        const response = await invokeHub('UpdateObjects', updates, senderSequence, senderSendIntervalMs, clientValidAt);
+        // Phase 3 envelope: wrap each update.data into the SyncPayload wire shape
+        // before invoking. Avoid mutating the caller's request objects so callers
+        // can keep using their `update.data` references for local bookkeeping.
+        let wrapped = updates;
+        if (Array.isArray(updates)) {
+            wrapped = new Array(updates.length);
+            for (let i = 0; i < updates.length; i++) {
+                const u = updates[i];
+                wrapped[i] = (u && u.data !== undefined)
+                    ? Object.assign({}, u, { data: SyncPayload.wrap(u.data) })
+                    : u;
+            }
+        }
+        const response = await invokeHub('UpdateObjects', wrapped, senderSequence, senderSendIntervalMs, clientValidAt);
         // Phase 1 wire-shape: response.versions is GuidLongPair[] on the wire (each
         // entry deserialized as [guidString, long]). Game code expects a string-keyed
         // object so it can do `versions[id]` and `Object.entries(versions)`.
@@ -520,7 +550,17 @@ const SessionClient = (function() {
      *   timestamp (less accurate).
      */
     async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null) {
-        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId, clientValidAt);
+        // Phase 3 envelope: each replacement is a raw game data dict; wrap before invoke.
+        const wrapped = Array.isArray(replacements)
+            ? replacements.map(r => SyncPayload.wrap(r))
+            : replacements;
+        const created = await invokeHub('ReplaceObject', deleteObjectId, wrapped, scope, ownerMemberId, clientValidAt);
+        // Server returns List<ObjectInfo> for the owner; unwrap each so any
+        // downstream consumer sees the canonical dict shape.
+        if (Array.isArray(created)) {
+            for (const info of created) SyncPayload.unwrapObjectData(info);
+        }
+        return created;
     }
 
     /**
@@ -554,7 +594,10 @@ const SessionClient = (function() {
                 for (const m of snapshot.members) WireEnum.translateMember(m);
             }
             if (Array.isArray(snapshot.objects)) {
-                for (const o of snapshot.objects) WireEnum.translateObject(o);
+                for (const o of snapshot.objects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
             }
             snapshot.validAts = WireEnum.pairsToObject(snapshot.validAts);
             snapshot.memberSequences = WireEnum.pairsToObject(snapshot.memberSequences);

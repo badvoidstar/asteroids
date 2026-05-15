@@ -35,7 +35,7 @@ public class WireSizeBenchTests
         CreatorMemberId: Guid.NewGuid(),
         OwnerMemberId: Guid.NewGuid(),
         Scope: ObjectScope.Session,
-        Data: new Dictionary<string, object?>
+        Data: SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>
         {
             ["type"] = "asteroid",
             ["x"] = 0.5,
@@ -46,7 +46,7 @@ public class WireSizeBenchTests
             ["angle"] = 1.234,
             ["rotationSpeed"] = 0.02,
             ["seed"] = 12345
-        },
+        }),
         Version: 1L);
 
     private static ObjectInfo SampleShipInfo() => new(
@@ -54,7 +54,7 @@ public class WireSizeBenchTests
         CreatorMemberId: Guid.NewGuid(),
         OwnerMemberId: Guid.NewGuid(),
         Scope: ObjectScope.Member,
-        Data: new Dictionary<string, object?>
+        Data: SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>
         {
             ["type"] = "ship",
             ["x"] = 0.5,
@@ -69,22 +69,22 @@ public class WireSizeBenchTests
             ["memberId"] = Guid.NewGuid().ToString(),
             ["score"] = 0,
             ["hitCount"] = 0
-        },
+        }),
         Version: 1L);
 
     private static ObjectUpdateInfo SampleAsteroidUpdate() => new(
         Id: Guid.NewGuid(),
-        Data: new Dictionary<string, object?>
+        Data: SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>
         {
             ["x"] = 0.523,
             ["y"] = 0.412,
             ["angle"] = 1.234
-        },
+        }),
         Version: 42L);
 
     private static ObjectUpdateInfo SampleShipUpdate() => new(
         Id: Guid.NewGuid(),
-        Data: new Dictionary<string, object?>
+        Data: SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>
         {
             ["x"] = 0.523,
             ["y"] = 0.412,
@@ -97,12 +97,12 @@ public class WireSizeBenchTests
             // Phase 2.3 (A4): score and hitCount no longer ride on per-frame
             // updates; pushed via OnObjectEvent instead. Snapshot reconciliation
             // (toSyncData / SampleShipInfo) still includes them.
-        },
+        }),
         Version: 42L);
 
     private static ObjectUpdateInfo SampleBulletUpdate() => new(
         Id: Guid.NewGuid(),
-        Data: new Dictionary<string, object?>
+        Data: SyncPayloadCodec.EncodeDict(new Dictionary<string, object?>
         {
             ["x"] = 0.523,
             ["y"] = 0.412,
@@ -112,7 +112,7 @@ public class WireSizeBenchTests
             ["hitImpactTorque"] = 0.05,
             ["hitBulletAngle"] = 1.57,
             ["hitOffsetN"] = 0.3
-        },
+        }),
         Version: 17L);
 
     // ── Per-payload baselines (current main, as of wireopt phase 0) ────────────
@@ -123,46 +123,45 @@ public class WireSizeBenchTests
         // 9 data fields including string GUIDs for member ids embedded as keys/values.
         // Expected ranges accommodate slight variation per Guid (binary GUIDs are fixed 18 B).
         var size = Size(SampleAsteroidInfo());
-        // Measured baseline (wireopt phase 0): 255 B
-        size.Should().BeInRange(240, 270, "asteroid full-create payload baseline");
+        // Phase 3 envelope (measured: 252 B). Wire shape now includes
+        // SyncPayload(fixarray2 + schemaId byte + bin8 length header) ≈ +4 B vs
+        // the pre-envelope dict-in-place encoding.
+        size.Should().BeInRange(240, 270, "asteroid full-create payload (Phase 3 envelope)");
     }
 
     [Fact]
     public void Baseline_ShipInfo_FullCreate()
     {
         var size = Size(SampleShipInfo());
-        // Measured baseline (wireopt phase 0): 337 B (ship has more fields and a
-        // string-encoded memberId inside data)
-        size.Should().BeInRange(320, 355, "ship full-create payload baseline");
+        // Phase 3 envelope (measured: 335 B). +~4 B envelope absorbed in range.
+        size.Should().BeInRange(320, 355, "ship full-create payload (Phase 3 envelope)");
     }
 
     [Fact]
     public void Baseline_AsteroidUpdate_PerFrame()
     {
         var size = Size(SampleAsteroidUpdate());
-        // Measured baseline (wireopt phase 0): ~75 B (dominant hot-path cost).
+        // Phase 3 envelope (measured: 78 B). Pre-Phase-3 baseline was ~75 B.
         // Goal in Phase 4 (typed schema): ~22 B. Goal in Phase 5 (quantized): ~10 B.
-        size.Should().BeInRange(65, 85, "asteroid per-frame update baseline");
+        size.Should().BeInRange(65, 85, "asteroid per-frame update (Phase 3 envelope)");
     }
 
     [Fact]
     public void Baseline_ShipUpdate_PerFrame()
     {
         var size = Size(SampleShipUpdate());
-        // Phase 2.3 measured (was 185 B baseline, now ~165 B): -20 B / -11%.
-        // A4: score+hitCount removed (each ~10 B as msgpack int + key string).
+        // Phase 3 envelope (measured: 164 B). Pre-Phase-3 baseline post-Phase-2.3 was ~165 B.
         // Phase 4 typed schema reduces further; Phase 5 quantization further still.
-        size.Should().BeInRange(150, 180, "ship per-frame update post-Phase-2.3");
+        size.Should().BeInRange(150, 180, "ship per-frame update (Phase 3 envelope, post-Phase-2.3)");
     }
 
     [Fact]
     public void Baseline_BulletUpdate_PerFrame_WithPendingHit()
     {
         var size = Size(SampleBulletUpdate());
-        // Measured baseline (wireopt phase 0): 208 B
-        // Phase 2 (A5) moves all 5 hit-related fields to a one-shot OnObjectEvent.
-        // Expected post-A5 reduction: ~100 B per hit-bearing bullet frame.
-        size.Should().BeInRange(195, 225, "bullet per-frame update baseline (with pendingHit)");
+        // Phase 3 envelope (measured: 212 B). Pre-Phase-3 baseline was ~208 B.
+        // Phase 2 (A5) deferred: still carries all 5 hit-related fields per frame.
+        size.Should().BeInRange(195, 225, "bullet per-frame update (Phase 3 envelope, A5 deferred)");
     }
 
     // ── Batch-level baselines (one OnObjectsUpdated broadcast) ────────────────
@@ -179,8 +178,8 @@ public class WireSizeBenchTests
             SampleAsteroidUpdate()
         };
         var size = Size(batch);
-        // Measured baseline (wireopt phase 0): ~225 B
-        size.Should().BeInRange(200, 250, "OnObjectsUpdated with 3 asteroids baseline");
+        // Phase 3 envelope (measured: 235 B). Pre-Phase-3 baseline was ~225 B (+~3 B/object).
+        size.Should().BeInRange(200, 250, "OnObjectsUpdated with 3 asteroids (Phase 3 envelope)");
     }
 
     [Fact]
@@ -195,9 +194,9 @@ public class WireSizeBenchTests
             SampleBulletUpdate(), SampleBulletUpdate()
         };
         var size = Size(batch);
-        // Phase 2.3 measured (was 898 B baseline, now ~878 B): -20 B from
-        // SampleShipUpdate stripping score+hitCount.
-        size.Should().BeInRange(850, 910, "mixed steady-state OnObjectsUpdated post-Phase-2.3");
+        // Phase 3 envelope (measured: 901 B). Pre-Phase-3 baseline post-Phase-2.3
+        // was ~878 B; +23 B = ~+3 B per object × 7 objects.
+        size.Should().BeInRange(850, 910, "mixed steady-state OnObjectsUpdated (Phase 3 envelope)");
     }
 
     // ── Snapshot baselines (rare path; one-shot per join) ─────────────────────
@@ -235,10 +234,11 @@ public class WireSizeBenchTests
             Metadata: new Dictionary<string, object?> { ["aspectRatio"] = 1.78 });
 
         var size = Size(dto);
-        // Phase 1 measured (was 2228 B baseline, now 2056 B): -172 B / -7.7%.
-        // Composition: B1 validAts → GuidLongPair[] (~13 B × 6 ≈ 78 B), C1 scope → byte
-        // (~7 B × 6 = 42 B), C2 role → byte (~7 B × 3 = 21 B). Includes joiner role too.
-        size.Should().BeInRange(2030, 2080, "JoinSessionResponse with 4 asteroids + 2 ships post-Phase-1");
+        // Phase 3 envelope: ObjectInfo×6 each gains ~+4 B (fixarray2 + schemaId
+        // + bin8 length header). Roughly +24 B vs the post-Phase-1 baseline of
+        // 2056 B (range had ~24 B headroom). Phase 4 typed schemas will then
+        // shrink each ObjectInfo's data slot considerably.
+        size.Should().BeInRange(2030, 2090, "JoinSessionResponse with 4 asteroids + 2 ships (Phase 3 envelope)");
     }
 
     [Fact]

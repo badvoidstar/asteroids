@@ -68,25 +68,34 @@ public record MemberLeftInfo(
 // argument. Snapshot DTOs (JoinSessionResponse, SessionStateSnapshot) carry a
 // parallel ValidAts array (GuidLongPair[]) so each pre-existing object keeps its
 // own age. SessionObject.ValidAt remains the server-side storage.
+//
+// Phase 3 (wireopt envelope): the per-object Data slot is now a SyncPayload —
+// a (byte SchemaId, byte[] Data) pair. SchemaId=0 means "Data bytes are a
+// MessagePack-serialized Dictionary<string, object?>" (the legacy form, lossless
+// round-trip with both the C# server-internal Dictionary and the JS game
+// dict). Phase 4+ will assign nonzero schemaIds to positional, type-tagged
+// records for individual game object types. The server treats the bytes as
+// opaque; only sync-layer code (ToObjectInfo / inbound decode) ever inspects
+// them. See SyncPayloadCodec for encode/decode.
 [MessagePackObject]
 public record ObjectInfo(
     [property: Key("id")] Guid Id,
     [property: Key("creatorMemberId")] Guid CreatorMemberId,
     [property: Key("ownerMemberId")] Guid OwnerMemberId,
     [property: Key("scope")] ObjectScope Scope,
-    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("data")] SyncPayload Data,
     [property: Key("version")] long Version);
 
 [MessagePackObject]
 public record ObjectUpdateInfo(
     [property: Key("id")] Guid Id,
-    [property: Key("data")] Dictionary<string, object?> Data,
+    [property: Key("data")] SyncPayload Data,
     [property: Key("version")] long Version);
 
 [MessagePackObject]
 public record ObjectUpdateRequest(
     [property: Key("objectId")] Guid ObjectId,
-    [property: Key("data")] Dictionary<string, object?> Data);
+    [property: Key("data")] SyncPayload Data);
 
 [MessagePackObject]
 public record ObjectReplacedEvent(
@@ -141,4 +150,33 @@ public record ObjectEventInfo(
 public record GuidLongPair(
     [property: Key(0)] Guid Id,
     [property: Key(1)] long Value);
+
+/// <summary>
+/// Phase 3 wire envelope for per-object game data. The server is opaque
+/// w.r.t. <c>Data</c>; <see cref="SchemaId"/> selects how clients (and the
+/// hub-layer encoders/decoders) interpret the bytes:
+///
+/// <list type="bullet">
+///   <item><b>0</b> = legacy form. Bytes are <c>MessagePackSerializer.Serialize&lt;Dictionary&lt;string, object?&gt;&gt;(...)</c>
+///         using the standard contractless resolver. Lossless round-trip with
+///         the JS msgpack codec at <c>wwwroot/js/msgpack-codec.js</c>.</item>
+///   <item><b>1..N</b> = Phase 4+ positional schemas (registered per session
+///         in <c>metadata.schemas</c>). Bytes are a packed positional
+///         representation; the server still treats them as opaque.</item>
+/// </list>
+///
+/// Wire cost vs the prior shape (raw <c>Dictionary&lt;string, object?&gt;</c>):
+/// <list type="bullet">
+///   <item>+2 B per object (1 B SchemaId + 1 B bin8 length header on the byte[]).</item>
+///   <item>Recouped many times over by Phase 4 typed schemas + Phase 5 quantization.</item>
+/// </list>
+///
+/// Positional <c>[Key(int)]</c> attributes serialize this as a 2-element
+/// MessagePack fixarray, the most compact wrapper we can produce
+/// (<c>0x92 &lt;schemaId byte&gt; &lt;bin8 ...&gt;</c>).
+/// </summary>
+[MessagePackObject]
+public record SyncPayload(
+    [property: Key(0)] byte SchemaId,
+    [property: Key(1)] byte[] Data);
 

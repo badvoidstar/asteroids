@@ -326,7 +326,10 @@ public class SessionHubTests
         response.Should().NotBeNull();
         addToGroupCalled.Should().BeTrue();
         snapshotCapturedAfterAdd = response!.Objects.Any(o =>
-            o.Data.TryGetValue("type", out var t) && (t as string) == "post-add");
+        {
+            var inner = SyncPayloadCodec.DecodeDict(o.Data);
+            return inner.TryGetValue("type", out var t) && (t as string) == "post-add";
+        });
         snapshotCapturedAfterAdd.Should().BeTrue(
             "snapshot must be captured after AddToGroupAsync to include concurrent state changes");
     }
@@ -375,7 +378,7 @@ public class SessionHubTests
 
         // Act
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" }, "Session");
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }), "Session");
 
         // Assert
         response.Should().NotBeNull();
@@ -420,9 +423,9 @@ public class SessionHubTests
 
         // Act
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             },
             scope: "Session",
             ownerMemberId: null,
@@ -466,9 +469,9 @@ public class SessionHubTests
 
         // Act
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             },
             scope: "Session",
             ownerMemberId: null,
@@ -506,9 +509,9 @@ public class SessionHubTests
 
         // Act — omit clientValidAt (older clients, or unbootstrapped offset).
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             });
 
         // Assert
@@ -556,7 +559,7 @@ public class SessionHubTests
 
         // Act
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session",
             ownerMemberId: null,
             clientValidAt: clientStamp);
@@ -591,7 +594,7 @@ public class SessionHubTests
         var clientStamp = hubEntryEstimate - 10_000; // 10s in the past — far outside the 2s window.
 
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session",
             ownerMemberId: null,
             clientValidAt: clientStamp);
@@ -622,7 +625,7 @@ public class SessionHubTests
         var hub = CreateHubWithProxy("connection-1", clientProxy);
 
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session");
 
         response.Should().NotBeNull();
@@ -661,7 +664,7 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         // Act
@@ -706,7 +709,7 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         var response = await hub.UpdateObjects(
@@ -746,7 +749,7 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         var response = await hub.UpdateObjects(updates);
