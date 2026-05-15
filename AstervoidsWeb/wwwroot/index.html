@@ -2298,7 +2298,25 @@
          */
         getBoundingRadius(data) {
             if (!data || !data.type) return 0;
-            if (data.type === OBJECT_TYPES.ASTEROID) return data.radius || 0;
+            if (data.type === OBJECT_TYPES.ASTEROID) {
+                // Mirror Asteroid.boundRadius from the sender so the receiver's
+                // wrap-detection range matches the sender's actual extended
+                // wrap margin (otherwise wrap-crossings can read as snaps).
+                // Vertices ride along on every snapshot for both spawn (seed-
+                // generated) and fracture (explicit) asteroids; if for any
+                // reason they're missing, fall back to the upper bound for
+                // jaggedness-generated polygons.
+                const verts = data.vertices;
+                if (Array.isArray(verts) && verts.length > 0) {
+                    let maxD = 0;
+                    for (let i = 0; i < verts.length; i++) {
+                        const d = verts[i] ? verts[i].distance || 0 : 0;
+                        if (d > maxD) maxD = d;
+                    }
+                    if (maxD > 0) return maxD;
+                }
+                return (data.radius || 0) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+            }
             if (data.type === OBJECT_TYPES.SHIP) return CONFIG.SHIP_SIZE;
             if (data.type === OBJECT_TYPES.BULLET) return CONFIG.BULLET_RADIUS;
             return 0;
@@ -3211,9 +3229,11 @@
                 angle: this.angle,
                 rotationSpeed: this.rotationSpeed,
                 seed: this.seed,
-                // Fracture children carry an explicit vertex list so all clients
-                // see the inherited silhouette; spawn asteroids omit it and
-                // regenerate from `seed` for compactness/back-compat.
+                // Both spawn (seed-generated) and fracture (explicit vertex
+                // list) asteroids ride their full vertex list across the wire
+                // so receivers see the same silhouette without re-running the
+                // seeded RNG. Used by RemoteObjects.getBoundingRadius to derive
+                // the wrap margin from the actual visible polygon extent.
                 vertices: this.vertices,
             };
         }
@@ -3359,9 +3379,15 @@
             // Rotate
             this.angle += this.rotationSpeed * dt;
             
-            // Wrap with margin so asteroid is fully off-screen before reappearing
-            this.x = wrapNormalized(this.x, wrapMarginX(this.radius));
-            this.y = wrapNormalized(this.y, wrapMarginY(this.radius));
+            // Wrap with margin so asteroid is fully off-screen before reappearing.
+            // Use boundRadius (max vertex distance from center) — not radius —
+            // because jagged vertices extend up to ~1.4× the design radius and
+            // fracture-shard polygons can be even more elongated. Wrapping on
+            // `radius` makes the asteroid disappear while a slice of its
+            // silhouette is still visible (~0.4·radius·refDim ≈ 30 px on a
+            // 720-tall canvas) — perceived as "wrap fires too early".
+            this.x = wrapNormalized(this.x, wrapMarginX(this.boundRadius));
+            this.y = wrapNormalized(this.y, wrapMarginY(this.boundRadius));
         }
 
         /**
