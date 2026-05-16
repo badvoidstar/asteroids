@@ -1023,7 +1023,7 @@
         // ramp up from 0 to ±SHIP_TURN_SPEED (accel) or back down to 0 (decel).
         // 0 = instantaneous (legacy behavior).
         SHIP_TURN_ACCEL_TIME: 0.0,  // Seconds for rotation speed: 0 -> ±SHIP_TURN_SPEED
-        SHIP_TURN_DECEL_TIME: 0.125,// Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
+        SHIP_TURN_DECEL_TIME: 0.0,  // Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
         // Maximum braking deceleration when brakeInput == 1.0, in the same
         // per-60fps-frame units as SHIP_THRUST. Used by the virtual-stick
         // touch scheme: braking is pure damping opposing current velocity and
