@@ -55,6 +55,34 @@ public static class SyncPayloadCodec
     }
 
     /// <summary>
+    /// Phase 4E overload: registry-aware re-encode used by
+    /// <c>SessionHub.ToObjectInfo</c> on every broadcast path
+    /// (OnObjectCreated, OnObjectReplaced, JoinSession snapshot).
+    ///
+    /// When <paramref name="schemaId"/> &gt;= 1 and the schema is registered for
+    /// <paramref name="sessionId"/>, emits the compact positional encoding so
+    /// the server preserves the wire-size win across the receive→store→re-
+    /// broadcast round-trip. Without this, every CreateObject reply and every
+    /// snapshot would collapse to legacy MessagePack even when the sender had
+    /// already paid the registration cost.
+    ///
+    /// Falls back to legacy MessagePack when SchemaId=0, when the schema isn't
+    /// (or no longer is) registered, or when <paramref name="registry"/> is
+    /// null. Falling back never breaks decode — receivers route on the
+    /// envelope's SchemaId via <see cref="DecodeDict(SyncPayload, Guid, SyncSchemaRegistry)"/>.
+    /// </summary>
+    public static SyncPayload EncodeDict(byte schemaId, Dictionary<string, object?>? data, SyncSchemaRegistry? registry, Guid sessionId)
+    {
+        if (schemaId == LegacyDictSchemaId || registry is null)
+            return EncodeDict(data);
+        var schema = registry.GetSchema(sessionId, schemaId);
+        if (schema is null)
+            return EncodeDict(data);
+        var bytes = PositionalSchemaCodec.Encode(schema, data ?? new Dictionary<string, object?>(0));
+        return new SyncPayload(schemaId, bytes);
+    }
+
+    /// <summary>
     /// Decodes a wire payload back to the server-internal data dict.
     /// Phase 3 single-arg form: handles SchemaId=0 only and throws on others
     /// (caller forgot to pass a registry).

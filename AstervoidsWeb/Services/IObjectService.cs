@@ -27,8 +27,14 @@ public interface IObjectService
     /// against <paramref name="serverReceiveTimeMs"/> by ±2 s sanity bound; out-of-bounds
     /// or null falls back to the receive time.</param>
     /// <param name="serverReceiveTimeMs">Server's hub-entry timestamp; defaults to <c>UtcNow</c>.</param>
+    /// <param name="schemaId">Phase 4E wire-format hint: the SchemaId of the inbound
+    /// <c>SyncPayload</c> that produced <paramref name="data"/>. Stored on the
+    /// <see cref="SessionObject.SchemaId"/> field so subsequent broadcasts re-emit the
+    /// same positional encoding instead of falling back to legacy MessagePack on every
+    /// re-broadcast. 0 = legacy dict (no schema). Defaults to 0 so existing callers
+    /// keep their current behavior.</param>
     /// <returns>The created object, or null if session/member not found or session is not active.</returns>
-    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null, long? clientValidAt = null, long? serverReceiveTimeMs = null);
+    SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null, long? clientValidAt = null, long? serverReceiveTimeMs = null, byte schemaId = 0);
 
     /// <summary>
     /// Updates an existing object (no ownership enforcement — use <see cref="UpdateObjects"/> for authoritative updates).
@@ -92,10 +98,18 @@ public interface IObjectService
 /// <summary>
 /// Specifies the properties of a single replacement object in a <c>ReplaceObject</c> call.
 /// </summary>
+/// <param name="Scope">Lifetime scope of the replacement.</param>
+/// <param name="Data">Initial data dictionary for the new object.</param>
+/// <param name="OwnerOverride">Optional explicit owner; defaults to the caller.</param>
+/// <param name="SchemaId">Phase 4E wire-format hint: SchemaId of the inbound positional
+/// payload (or 0 for legacy MessagePack). Stored on the new
+/// <see cref="SessionObject.SchemaId"/> so the broadcast and subsequent snapshots replay
+/// the same encoding.</param>
 public record ReplacementObjectSpec(
     ObjectScope Scope,
     Dictionary<string, object?> Data,
-    Guid? OwnerOverride = null
+    Guid? OwnerOverride = null,
+    byte SchemaId = 0
 );
 
 /// <summary>

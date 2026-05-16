@@ -151,14 +151,17 @@ public class SessionHub : Hub
 
     /// <summary>
     /// Converts a <see cref="SessionObject"/> to a <see cref="ObjectInfo"/> DTO.
-    /// Wraps <c>Data</c> in a <see cref="SyncPayload"/> envelope (Phase 3 wire
-    /// shape: SchemaId=0 + MessagePack-encoded dict bytes); the underlying dict
-    /// is implicitly cloned by serialization so callers cannot mutate the
-    /// stored dict via the returned bytes.
+    /// Wraps <c>Data</c> in a <see cref="SyncPayload"/> envelope; when the object
+    /// was created from a positional payload (<c>o.SchemaId &gt;= 1</c>) the
+    /// re-encode goes through <see cref="SyncPayloadCodec.EncodeDict(byte, Dictionary{string, object?}?, SyncSchemaRegistry, Guid)"/>
+    /// which replays the positional encoding using the per-session schema
+    /// registry. Otherwise falls back to the legacy MessagePack dict shape.
+    /// The underlying dict is implicitly cloned by serialization so callers
+    /// cannot mutate the stored dict via the returned bytes.
     /// </summary>
-    private static ObjectInfo ToObjectInfo(SessionObject o) =>
+    private ObjectInfo ToObjectInfo(SessionObject o) =>
         new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope,
-            SyncPayloadCodec.EncodeDict(o.Data), o.Version);
+            SyncPayloadCodec.EncodeDict(o.SchemaId, o.Data, _schemaRegistry, o.SessionId), o.Version);
 
     /// <summary>
     /// Takes a consistent point-in-time snapshot of a session's members and objects.
@@ -170,7 +173,7 @@ public class SessionHub : Hub
     /// <see cref="ObjectInfo"/>; live broadcasts use a single batch-level
     /// <c>validAt</c> trailing argument and never need this map.
     /// </summary>
-    private static (MemberInfo[] Members, ObjectInfo[] Objects, GuidLongPair[] ValidAts) ToSessionSnapshot(Session session)
+    private (MemberInfo[] Members, ObjectInfo[] Objects, GuidLongPair[] ValidAts) ToSessionSnapshot(Session session)
     {
         lock (session.SyncRoot)
         {
@@ -515,12 +518,16 @@ public class SessionHub : Hub
         // Phase 3 envelope: decode the wire payload to the server-internal
         // dict shape that ObjectService consumes. SchemaId=0 → MessagePack
         // dict; SchemaId>=1 → positional codec via the per-session registry.
+        // Phase 4E: the inbound SchemaId is also passed through to storage on
+        // SessionObject.SchemaId so the broadcast + future snapshot re-encodes
+        // can replay the same compact positional form via ToObjectInfo.
+        var inboundSchemaId = data?.SchemaId ?? SyncPayloadCodec.LegacyDictSchemaId;
         var dataDict = SyncPayloadCodec.DecodeDict(
             data ?? SyncPayloadCodec.EncodeDict(null),
             member.SessionId,
             _schemaRegistry);
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), dataDict, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), dataDict, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp, inboundSchemaId);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
@@ -697,8 +704,16 @@ public class SessionHub : Hub
         // Build replacement specs; service enforces ownership atomically and stamps
         // the validated collision-time on each child's ValidAt. Phase 3 envelope:
         // each replacement's SyncPayload is decoded to the dict the service expects.
+        // Phase 4E: per-spec SchemaId rides through so split children that arrived
+        // positionally are re-broadcast positionally on OnObjectReplaced (and on
+        // subsequent JoinSession snapshots) instead of collapsing to legacy
+        // MessagePack on the re-encode side.
         var specs = replacements
-            .Select(payload => new ReplacementObjectSpec(objectScope, SyncPayloadCodec.DecodeDict(payload, member.SessionId, _schemaRegistry), ownerGuid))
+            .Select(payload => new ReplacementObjectSpec(
+                objectScope,
+                SyncPayloadCodec.DecodeDict(payload, member.SessionId, _schemaRegistry),
+                ownerGuid,
+                payload?.SchemaId ?? SyncPayloadCodec.LegacyDictSchemaId))
             .ToList();
 
         var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs, clientValidAt, serverTimestamp);

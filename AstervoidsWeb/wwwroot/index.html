@@ -1323,12 +1323,39 @@
     // % 2), so it MUST be encoded as an integer — `bool` would collapse all
     // nonzero values to 1, fixing the receiver in the "blink off" half and
     // making the ship invisible for the entire invuln period.
+    // Phase 4E adds an additional create-time schema (id 2 for ship) to
+    // capture the join/respawn payload positionally; the server's
+    // ToObjectInfo replays the same SchemaId on every broadcast and on
+    // JoinSession snapshots so late joiners see the compact positional form
+    // instead of legacy MessagePack. Asteroid create (and split-children) is
+    // intentionally NOT positional in this phase: those payloads carry a
+    // per-instance `vertices` polygon list that would need a dedicated
+    // game-layer packer (a follow-on PR). Including them without packing
+    // would either silently drop vertices (wrong silhouette for fracture
+    // shards) or pay full MessagePack overhead inside a positional `bytes`
+    // slot (no savings).
     const WIREOPT_SCHEMAS = [
         { id: 1, fields: [
             ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
             ['velocityX', 'q16s'], ['velocityY', 'q16s'],
             ['rotationSpeed', 'q16s'],
             ['thrusting', 'bool'], ['invulnerable', 'u16'],
+        ]},
+        // Ship create schema (Phase 4E): full ship-toSyncData() shape.
+        // Includes static identity fields (type, colorIndex, memberId) so
+        // late joiners can reconstruct the player ship from the snapshot
+        // without a separate metadata round-trip. score/hitCount ride along
+        // for snapshot correctness even though steady-state updates use the
+        // SHIP_STATE_CHANGED per-object event channel instead.
+        { id: 2, fields: [
+            ['type', 'str'],
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
+            ['thrusting', 'bool'], ['invulnerable', 'u16'],
+            ['colorIndex', 'u8'],
+            ['memberId', 'guid'],
+            ['score', 'u32'], ['hitCount', 'u16'],
         ]},
         { id: 3, fields: [
             ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
@@ -1338,11 +1365,26 @@
         [OBJECT_TYPES.SHIP]: 1,
         [OBJECT_TYPES.ASTEROID]: 3,
     };
+    // Phase 4E: create/replace paths. Asteroid creates (including split
+    // children) stay on SchemaId=0 until the vertex-packing follow-on lands.
+    const SCHEMA_ID_CREATE = {
+        [OBJECT_TYPES.SHIP]: 2,
+    };
     function selectWireoptSchemaId(data, kind, ctx) {
-        if (kind !== 'update') return 0;
-        const obj = ctx && ctx.object;
-        const type = obj && obj.data && obj.data.type;
-        return SCHEMA_ID_UPDATE[type] || 0;
+        if (kind === 'update') {
+            const obj = ctx && ctx.object;
+            const type = obj && obj.data && obj.data.type;
+            return SCHEMA_ID_UPDATE[type] || 0;
+        }
+        if (kind === 'create' || kind === 'replace') {
+            // Replace-children and creates both carry the full create-time
+            // dict shape with `type` set, so the selector keys off data.type
+            // directly rather than walking ctx.object (which doesn't exist
+            // yet for a fresh create).
+            const type = data && data.type;
+            return SCHEMA_ID_CREATE[type] || 0;
+        }
+        return 0;
     }
 
     // Ship colors for up to 4 players (distinct, high-contrast)

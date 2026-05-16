@@ -158,3 +158,32 @@ test('cross-wire: null on non-nullable f64 slot is absent (matches C# bytes)', (
     // bitmask=0x01 (only x) + x=1.0 (IEEE-754 LE: 0x000000000000F03F)
     assert.equal(hex, '01' + '000000000000f03f');
 });
+
+// Phase 4E cross-wire parity for the ship-create schema. The matching C#
+// test is SyncPayloadCodecRegistryTests.EncodeDict_RegisteredPositionalSchema_
+// EmitsPositionalBytes (which compares to a direct PositionalSchemaCodec.Encode
+// call). Pinning the JS-side byte length here ensures the two implementations
+// stay aligned at every byte even when a future field-set tweak lands. If
+// either side drifts, both this test and its C# counterpart fire.
+test('cross-wire (Phase 4E): ship-create positional encoding length is byte-stable', () => {
+    freshRegistry();
+    // Minimal subset mirroring the production ship-create schema id 2.
+    const schema = SchemaCodec.register(2, [
+        ['type', 'str'],
+        ['x', 'f64'], ['y', 'f64'],
+    ]);
+    const bytes = SchemaCodec.encode(schema, { type: 'ship', x: 0.5, y: 0.25 });
+    // bitmask=0x07 (3 fields) + str len=2 + 4-byte "ship" + 8B x + 8B y
+    assert.equal(bytes.length, 1 + 2 + 4 + 8 + 8);
+    // The first three bytes are deterministic regardless of float values.
+    assert.equal(bytes[0], 0x07);
+    assert.equal(bytes[1], 0x04);
+    assert.equal(bytes[2], 0x00);
+    // Bytes 3-6 spell out "ship" in UTF-8.
+    assert.equal(String.fromCharCode(bytes[3], bytes[4], bytes[5], bytes[6]), 'ship');
+    // Round-trip must reproduce the dict exactly (no quantization on f64).
+    const decoded = SchemaCodec.decode(schema, bytes);
+    assert.equal(decoded.type, 'ship');
+    assert.equal(decoded.x, 0.5);
+    assert.equal(decoded.y, 0.25);
+});
