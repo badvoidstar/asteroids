@@ -124,6 +124,9 @@ public class WireSizeBenchTests
             new PositionalSchemaCodec.FieldSpec("x", "f64"),
             new PositionalSchemaCodec.FieldSpec("y", "f64"),
             new PositionalSchemaCodec.FieldSpec("angle", "f64"),
+            new PositionalSchemaCodec.FieldSpec("velocityX", "f64"),
+            new PositionalSchemaCodec.FieldSpec("velocityY", "f64"),
+            new PositionalSchemaCodec.FieldSpec("rotationSpeed", "f64"),
         });
 
     private static readonly PositionalSchemaCodec.Schema ShipUpdateSchema =
@@ -145,6 +148,9 @@ public class WireSizeBenchTests
             new PositionalSchemaCodec.FieldSpec("x", "q16w"),
             new PositionalSchemaCodec.FieldSpec("y", "q16w"),
             new PositionalSchemaCodec.FieldSpec("angle", "q16_2pi"),
+            new PositionalSchemaCodec.FieldSpec("velocityX", "q16s"),
+            new PositionalSchemaCodec.FieldSpec("velocityY", "q16s"),
+            new PositionalSchemaCodec.FieldSpec("rotationSpeed", "q16s"),
         });
 
     private static readonly PositionalSchemaCodec.Schema ShipUpdateSchemaQ =
@@ -166,6 +172,9 @@ public class WireSizeBenchTests
             ["x"] = 0.523,
             ["y"] = 0.412,
             ["angle"] = 1.234,
+            ["velocityX"] = 0.05,
+            ["velocityY"] = -0.03,
+            ["rotationSpeed"] = 0.01,
         })),
         Version: 42L);
 
@@ -358,12 +367,14 @@ public class WireSizeBenchTests
     public void Phase4_AsteroidUpdate_PerFrame_Positional()
     {
         var size = Size(SampleAsteroidUpdatePositional());
-        // Measured: 65 B (down from 78 B Phase 3 dict path; ~17% reduction).
-        // Composition: id GUID(18) + version(varint) + SyncPayload.SchemaId(1) +
-        // bin8 length header(2) + bitmask(1) + 3×f64(24) + array/wrap overhead.
-        // Goal in Phase 5 (q16 quantization): asteroid update body shrinks from
-        // 25 B to 7 B (1 B mask + 3×u16(6) = 7 B), reducing total to ~47 B.
-        size.Should().BeInRange(55, 75, "asteroid per-frame update (Phase 4 positional)");
+        // Measured: 89 B (Phase 4 f64 with 6 fields including velocity +
+        // rotationSpeed, which the receiver's interpolator extrapolation
+        // arm requires; see schema-codec-cross.test.mjs Phase 4D regression
+        // notes). Composition: id GUID(18) + version(varint) +
+        // SyncPayload.SchemaId(1) + bin8 length header(2) + bitmask(1) +
+        // 6×f64(48) + array/wrap overhead. Phase 5 quantization shrinks the
+        // body 6×f64 → 6×u/i16 (48 B → 12 B), reducing total to ~53 B.
+        size.Should().BeInRange(80, 100, "asteroid per-frame update (Phase 4 positional, 6 fields)");
     }
 
     [Fact]
@@ -386,8 +397,10 @@ public class WireSizeBenchTests
             SampleAsteroidUpdatePositional()
         };
         var size = Size(batch);
-        // Measured: 196 B (down from 235 B Phase 3 dict path; ~17% reduction).
-        size.Should().BeInRange(180, 215, "OnObjectsUpdated 3 asteroids (Phase 4 positional)");
+        // Measured: 268 B (3 × ~89 B + array header). Phase 4 f64 baseline
+        // includes velocity + rotationSpeed (required for receiver-side
+        // interpolation extrapolation). Phase 5 quantized batch is ~160 B.
+        size.Should().BeInRange(245, 295, "OnObjectsUpdated 3 asteroids (Phase 4 positional, 6 fields)");
     }
 
     [Fact]
@@ -417,6 +430,9 @@ public class WireSizeBenchTests
             ["x"] = 0.523,
             ["y"] = 0.412,
             ["angle"] = 1.234,
+            ["velocityX"] = 0.05,
+            ["velocityY"] = -0.03,
+            ["rotationSpeed"] = 0.01,
         })),
         Version: 42L);
 

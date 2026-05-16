@@ -1357,8 +1357,20 @@
             ['memberId', 'guid'],
             ['score', 'u32'], ['hitCount', 'u16'],
         ]},
+        // Asteroid update schema. velocityX/Y and rotationSpeed are NOT
+        // optional even though asteroid kinematics are constant in steady
+        // state — RemoteObjects.updateState reads them off every snapshot
+        // and feeds them to _baseInterpolated as Hermite tangents AND as
+        // the slope used to extrapolate forward when targetTime advances
+        // past the latest snapshot. Dropping them silently zeroes both,
+        // which freezes the rendered asteroid in the extrapolation zone
+        // (visible as a 30 Hz / sendRate-aligned "stutter" whenever the
+        // adaptive interpolation buffer is shorter than the send interval,
+        // i.e. on a low-jitter LAN). +6 B per update.
         { id: 3, fields: [
             ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
         ]},
     ];
     const SCHEMA_ID_UPDATE = {
