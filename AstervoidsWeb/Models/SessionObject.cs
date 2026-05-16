@@ -44,6 +44,20 @@ public class SessionObject
     public Dictionary<string, object?> Data { get; set; } = new();
 
     /// <summary>
+    /// Wire-format hint: when the inbound CreateObject/ReplaceObject sent a
+    /// positional payload (SchemaId &gt;= 1), this records which schema was used.
+    /// Server-side broadcast paths (OnObjectCreated, OnObjectReplaced, and
+    /// JoinSession snapshot) replay the same SchemaId via
+    /// <see cref="Hubs.SyncPayloadCodec.EncodeDict(byte, Dictionary{string, object?}?, Hubs.SyncSchemaRegistry, Guid)"/>
+    /// so the compact positional encoding survives the round-trip instead of
+    /// collapsing to legacy MessagePack on every re-broadcast.
+    ///
+    /// 0 means "legacy MessagePack dict" — the wire shape used pre-wireopt
+    /// and for any payload whose dict shape has no registered schema.
+    /// </summary>
+    public byte SchemaId { get; set; } = 0;
+
+    /// <summary>
     /// Version number for optimistic concurrency control.
     /// Incremented on each update.
     /// </summary>

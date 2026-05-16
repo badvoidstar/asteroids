@@ -1,4 +1,5 @@
 using AstervoidsWeb.Hubs;
+using AstervoidsWeb.Models;
 using AstervoidsWeb.Services;
 using FluentAssertions;
 using Microsoft.AspNetCore.SignalR;
@@ -69,8 +70,8 @@ public class SessionHubTests
         snapshot.Objects.Should().BeOfType<ObjectInfo[]>();
         snapshot.Members.Should().HaveCount(2);
         snapshot.Objects.Should().ContainSingle(o => o.Id == createdObject!.Id);
-        snapshot.MemberSequences.Should().ContainKey(creator.Id.ToString());
-        snapshot.MemberSequences.Should().ContainKey(client.Id.ToString());
+        snapshot.MemberSequences.Should().Contain(p => p.Id == creator.Id);
+        snapshot.MemberSequences.Should().Contain(p => p.Id == client.Id);
     }
 
     /// <summary>
@@ -151,7 +152,7 @@ public class SessionHubTests
         // so the snapshot taken immediately after always reflects the full post-join membership.
         response.Should().NotBeNull();
         response!.Members.Should().HaveCount(2, "snapshot must include both the creator and the joiner");
-        response.Members.Should().Contain(m => m.Role == "Client",
+        response.Members.Should().Contain(m => m.Role == MemberRole.Client,
             "the joining member should appear as Client in the snapshot");
     }
 
@@ -190,7 +191,8 @@ public class SessionHubTests
             _sessionService,
             _objectService,
             Mock.Of<ILogger<SessionHub>>(),
-            new ServerMetricsService());
+            new ServerMetricsService(),
+            new SyncSchemaRegistry());
 
         var context = new Mock<HubCallerContext>();
         context.SetupGet(c => c.ConnectionId).Returns(connectionId);
@@ -256,8 +258,7 @@ public class SessionHubTests
             .Callback<string, object?[], CancellationToken>((method, _, _) => callOrder.Add($"send:{method}"))
             .Returns(Task.CompletedTask);
 
-        var hub = new SessionHub(_sessionService, _objectService,
-            Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService());
+        var hub = new SessionHub(_sessionService, _objectService, Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService(), new SyncSchemaRegistry());
         var context = new Mock<HubCallerContext>();
         context.SetupGet(c => c.ConnectionId).Returns("connection-new");
         hub.Context = context.Object;
@@ -325,7 +326,10 @@ public class SessionHubTests
         response.Should().NotBeNull();
         addToGroupCalled.Should().BeTrue();
         snapshotCapturedAfterAdd = response!.Objects.Any(o =>
-            o.Data.TryGetValue("type", out var t) && (t as string) == "post-add");
+        {
+            var inner = SyncPayloadCodec.DecodeDict(o.Data);
+            return inner.TryGetValue("type", out var t) && (t as string) == "post-add";
+        });
         snapshotCapturedAfterAdd.Should().BeTrue(
             "snapshot must be captured after AddToGroupAsync to include concurrent state changes");
     }
@@ -358,8 +362,7 @@ public class SessionHubTests
             })
             .Returns(Task.CompletedTask);
 
-        var hub = new SessionHub(_sessionService, _objectService,
-            Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService());
+        var hub = new SessionHub(_sessionService, _objectService, Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService(), new SyncSchemaRegistry());
         var context = new Mock<HubCallerContext>();
         context.SetupGet(c => c.ConnectionId).Returns("connection-1");
         hub.Context = context.Object;
@@ -374,16 +377,16 @@ public class SessionHubTests
 
         // Act
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" }, "Session");
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }), "Session");
 
         // Assert
         response.Should().NotBeNull();
         capturedMethod.Should().Be("OnObjectCreated");
         capturedArgs.Should().NotBeNull();
-        // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp) = 4 args.
-        // validAt is now embedded in ObjectInfo (not a trailing arg).
-        // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 4).
-        capturedArgs!.Length.Should().Be(4,
+        // OnObjectCreated(objectInfo, memberId, memberSequence, serverTimestamp, validAt) = 5 args.
+        // validAt is a single batch-level trailing argument.
+        // If SendAsync wrapping bug regresses, this will be 1 (an object?[] of length 5).
+        capturedArgs!.Length.Should().Be(5,
             "broadcast helpers must spread args via SendCoreAsync, not wrap them through SendAsync(string, object?)");
     }
 
@@ -419,24 +422,24 @@ public class SessionHubTests
 
         // Act
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             },
             scope: "Session",
             ownerMemberId: null,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast carries 4 args: replaceEvent, memberId, memberSeq, serverTimestamp.
-        // validAt is now embedded in each ObjectInfo inside replaceEvent.CreatedObjects.
+        // Assert — broadcast carries 5 args: replaceEvent, memberId, memberSeq, serverTimestamp, validAt.
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4,
-            "OnObjectReplaced broadcast must include serverTimestamp (hub-entry, for recordPacketArrival); validAt is per-child inside ObjectInfo");
+        capturedArgs!.Length.Should().Be(5,
+            "OnObjectReplaced broadcast must include serverTimestamp (hub-entry, for recordPacketArrival) and a single batch-level validAt trailing argument");
         var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
         replaceEvent.CreatedObjects.Should().NotBeEmpty();
-        replaceEvent.CreatedObjects[0].ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each child");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -465,9 +468,9 @@ public class SessionHubTests
 
         // Act
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             },
             scope: "Session",
             ownerMemberId: null,
@@ -476,11 +479,11 @@ public class SessionHubTests
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
-        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
-            "out-of-bounds clientValidAt must be rejected and the child's validAt should fall back to the hub-entry serverTimestamp");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
+            "out-of-bounds clientValidAt must be rejected and the batch-level validAt should fall back to the hub-entry serverTimestamp");
     }
 
     [Fact]
@@ -505,18 +508,18 @@ public class SessionHubTests
 
         // Act — omit clientValidAt (older clients, or unbootstrapped offset).
         var result = await hub.ReplaceObject(parent.Id,
-            new List<Dictionary<string, object?>>
+            new List<SyncPayload>
             {
-                new() { ["type"] = "asteroid" }
+                SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" })
             });
 
         // Assert
         result.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var replaceEvent = (ObjectReplacedEvent)capturedArgs[0]!;
-        replaceEvent.CreatedObjects[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -555,20 +558,19 @@ public class SessionHubTests
 
         // Act
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session",
             ownerMemberId: null,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast is OnObjectCreated(objectInfo, memberId, memberSeq, serverTimestamp) = 4 args.
-        // validAt is embedded in ObjectInfo.
+        // Assert — broadcast is OnObjectCreated(objectInfo, memberId, memberSeq, serverTimestamp, validAt) = 5 args.
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4,
-            "OnObjectCreated broadcast carries serverTimestamp; validAt is embedded in ObjectInfo");
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor");
+        capturedArgs!.Length.Should().Be(5,
+            "OnObjectCreated broadcast carries serverTimestamp + a single batch-level validAt trailing argument");
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -591,17 +593,17 @@ public class SessionHubTests
         var clientStamp = hubEntryEstimate - 10_000; // 10s in the past — far outside the 2s window.
 
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session",
             ownerMemberId: null,
             clientValidAt: clientStamp);
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -622,15 +624,15 @@ public class SessionHubTests
         var hub = CreateHubWithProxy("connection-1", clientProxy);
 
         var response = await hub.CreateObject(
-            new Dictionary<string, object?> { ["type"] = "asteroid" },
+            SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["type"] = "asteroid" }),
             scope: "Session");
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(4);
+        capturedArgs!.Length.Should().Be(5);
         var serverTimestamp = (long)capturedArgs[3]!;
-        var objectInfo = (ObjectInfo)capturedArgs[0]!;
-        objectInfo.ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[4]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -661,7 +663,7 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         // Act
@@ -671,16 +673,14 @@ public class SessionHubTests
             senderSendIntervalMs: 100,
             clientValidAt: clientStamp);
 
-        // Assert — broadcast is OnObjectsUpdated(updateInfos, memberId, senderSeq, memberSeq, serverTimestamp, senderSendIntervalMs) = 6 args.
-        // validAt is per-object inside each ObjectUpdateInfo.
+        // Assert — broadcast is OnObjectsUpdated(updateInfos, memberId, senderSeq, memberSeq, serverTimestamp, senderSendIntervalMs, validAt) = 7 args.
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6,
-            "OnObjectsUpdated broadcast carries serverTimestamp + senderSendIntervalMs; validAt is per-object inside each ObjectUpdateInfo");
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos.Should().NotBeEmpty();
-        updateInfos[0].ValidAt.Should().Be(clientStamp,
-            "in-bounds clientValidAt should be forwarded verbatim as the unified-axis anchor on each update");
+        capturedArgs!.Length.Should().Be(7,
+            "OnObjectsUpdated broadcast carries serverTimestamp + senderSendIntervalMs + a single batch-level validAt trailing argument");
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().Be(clientStamp,
+            "in-bounds clientValidAt should be forwarded verbatim as the batch-level validAt");
     }
 
     [Fact]
@@ -708,7 +708,7 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         var response = await hub.UpdateObjects(
@@ -719,10 +719,10 @@ public class SessionHubTests
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6);
+        capturedArgs!.Length.Should().Be(7);
         var serverTimestamp = (long)capturedArgs[4]!;
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "out-of-bounds clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
@@ -748,24 +748,23 @@ public class SessionHubTests
 
         var updates = new List<ObjectUpdateRequest>
         {
-            new(obj.Id, new Dictionary<string, object?> { ["x"] = 0.5 })
+            new(obj.Id, SyncPayloadCodec.EncodeDict(new Dictionary<string, object?> { ["x"] = 0.5 }))
         };
 
         var response = await hub.UpdateObjects(updates);
 
         response.Should().NotBeNull();
         capturedArgs.Should().NotBeNull();
-        capturedArgs!.Length.Should().Be(6);
+        capturedArgs!.Length.Should().Be(7);
         var serverTimestamp = (long)capturedArgs[4]!;
-        var updateInfos = (List<ObjectUpdateInfo>)capturedArgs[0]!;
-        updateInfos[0].ValidAt.Should().BeCloseTo(serverTimestamp, 50,
+        var batchValidAt = (long)capturedArgs[6]!;
+        batchValidAt.Should().BeCloseTo(serverTimestamp, 50,
             "null clientValidAt must fall back to the hub-entry serverTimestamp");
     }
 
     private SessionHub CreateHubWithProxy(string connectionId, Mock<IClientProxy> proxy)
     {
-        var hub = new SessionHub(_sessionService, _objectService,
-            Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService());
+        var hub = new SessionHub(_sessionService, _objectService, Mock.Of<ILogger<SessionHub>>(), new ServerMetricsService(), new SyncSchemaRegistry());
         var context = new Mock<HubCallerContext>();
         context.SetupGet(c => c.ConnectionId).Returns(connectionId);
         hub.Context = context.Object;

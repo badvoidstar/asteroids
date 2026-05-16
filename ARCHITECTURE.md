@@ -881,6 +881,16 @@ flowchart LR
 * **Local-owner spawn projection.** The shooter who fires `replaceObject` adopts the resulting children ~RTT later. `updateAstervoidsFromSync` forward-projects from `obj.validAt` to `serverNowMs()` so the local sim asteroid's starting position matches the parent's continued motion (interpolation is not active for owned objects).
 * **Migration handoff.** When ownership migrates to the local member (previous owner left), `RemoteObjects.getMigrationSeed(objectId)` returns the latest snapshot dead-reckoned to `serverNowMs()`. The local game-object is seeded with that state, so the first authored snap on the new owner matches what every observer's bracket interpolation was already extrapolating — motion remains continuous through the handoff.
 
+### Per-batch `validAt` collapse on `OnObjectsUpdated`
+
+The hot-path `OnObjectsUpdated` broadcast carries one `validAt` for the whole batch (rather than one per object) — `updatedObjects[0].ValidAt` — saving 8 B per object on every per-frame batch. This is safe in practice because:
+
+* **Owners send monotonically.** Every batch is sampled from a single owner-tick, so the owner's `clientValidAt` is identical for every object in the batch. Per-object divergence cannot arise on the owner side.
+* **Server-side per-object monotonic cap is rarely heterogeneous within a batch.** `ObjectService.ValidateValidAt` clamps `result < previousValidAt → previousValidAt` per object. The cap only fires when the owner sends a `validAt` that's older than the prior accepted one for that object — a clock-skew or replay edge case. When it does fire, the clamp delta is bounded by the gap to the previous accepted `validAt`, typically tens of milliseconds.
+* **Receiver bracket-search tolerates small `validAt` jitter.** `RemoteObjects.updateState` runs the bracket search on the perf.now-converted snapshot times; sub-frame shifts in the snapshot key are absorbed by the existing interpolation hysteresis (no snap, no model switch).
+
+Snapshot/join paths are NOT affected: `JoinSessionResponse` and `SessionStateSnapshot` carry a parallel `validAts: Dictionary<string, long>` so pre-existing objects with unrelated ages keep their per-object timing exactly. The collapse applies only to the per-frame `OnObjectsUpdated` hot path.
+
 ## Ring Buffer Interpolation
 
 ```mermaid
@@ -1156,6 +1166,110 @@ flowchart TB
     SMS_EST --> SMS_API
     REST --> SMS_API
 ```
+
+## Networking: Wire Optimization (Phases 3-5)
+
+The hot-path object payload (`ObjectInfo.Data`, `ObjectUpdateInfo.Data`,
+`ObjectUpdateRequest.Data`) does not flow as a `Dictionary<string, object?>`
+on the wire. It is wrapped in a `SyncPayload(byte SchemaId, byte[] Data)`
+envelope so encoding can be selected per object type without re-shaping the
+DTOs.
+
+### Schema registry (game-agnostic)
+
+`object-sync.js` exposes a 3-call surface that the game uses to opt in:
+
+1. `SchemaCodec.register(id, fields)` — declare a positional schema.
+2. `ObjectSync.setSchemaIdSelector((data, kind, ctx) => id)` — given a
+   payload + its kind (`'create' | 'update' | 'replace'`) + context
+   (`{objectId, object}` for updates, where `data.type` may be absent),
+   return the byte schemaId or `0` for the legacy MsgPack dict path.
+3. Pass `schemas: [...]` into `SessionClient.createSession({...})` so
+   late joiners receive the same registry via `metadata.schemas`.
+
+The C# counterpart `SyncSchemaRegistry` (per-`SessionId` map) parses
+`metadata.schemas` at session create and clears it on the last leave.
+
+### Wire shape (SchemaId >= 1)
+
+```
+SyncPayload.Data = <bitmask: ceil(N/8) bytes>
+                  + <slot_i ...>   (only present slots, in declaration order)
+```
+
+A leading bit-presence mask preserves delta encoding: omitted slots are
+absent from both the bitmask and the body, and the receiver merges over
+prior state (matching the existing `Object.assign` semantics in JS and
+`ObjectService.ApplyUpdate` dict-merge in C#).
+
+### Type tags
+
+| Tag             | Bytes | Range                | Notes                          |
+| --------------- | ----- | -------------------- | ------------------------------ |
+| `f64`           | 8     | IEEE-754             | Lossless                       |
+| `f32`           | 4     | IEEE-754             | ~7 decimal digits              |
+| `u8/u16/u32`    | 1/2/4 | unsigned LE          |                                |
+| `i8/i16/i32`    | 1/2/4 | signed LE            |                                |
+| `bool`          | 1     | 0/1                  |                                |
+| `str`           | 2+N   | 2-byte LE len + UTF8 | max 65535 bytes                |
+| `guid`          | 16    | binary               | Matches `BinaryGuidResolver`   |
+| `bytes`         | 4+N   | 4-byte LE len + raw  |                                |
+| `nullable-str`  | 1+…   | flag + (str)         |                                |
+| `nullable-guid` | 1+…   | flag + (guid)        |                                |
+| `q16`           | 2     | [0, 1)               | resolution ≈ 1.5e-5; clamps    |
+| `q16s`          | 2     | [-1, 1]              | resolution ≈ 3.0e-5; clamps    |
+| `q16_2pi`       | 2     | [0, 2π)              | ~0.0055°; wraps negatives      |
+| `q8`            | 1     | [0, 1)               | resolution ≈ 4e-3; clamps      |
+
+`q16_2pi` normalizes via `((v % 2π) + 2π) % 2π` before quantizing so
+boundary inputs (e.g. -0.0001 vs +0.0001) round to angularly-close
+codes rather than opposite ends of the range.
+
+Both codecs use half-away-from-zero rounding (JS `Math.round`,
+C# `MidpointRounding.AwayFromZero`) to keep cross-wire bytes identical
+on midpoint inputs.
+
+### Game adoption (current)
+
+Registered in `index.html` `WIREOPT_SCHEMAS`:
+
+| SchemaId | Type             | Fields (positional)                                                              |
+| -------- | ---------------- | -------------------------------------------------------------------------------- |
+| 1        | ship-update      | x q16, y q16, angle q16_2pi, vx q16s, vy q16s, rotSpeed q16s, thrusting bool, invul bool |
+| 3        | asteroid-update  | x q16, y q16, angle q16_2pi                                                      |
+
+Bullets (create + update) intentionally remain on `SchemaId=0` (legacy
+MsgPack dict) because the `pendingHit` 3-way handshake still rides on the
+per-frame data; converting it cleanly needs a multiplayer integration test
+harness that the suite doesn't yet have. See Phase 2.2 deferral note.
+
+### Wire-size measurements (locked into `WireSizeBenchTests.cs`)
+
+| Payload                | Phase 3 | Phase 4 | Phase 5 | Total ↓ |
+| ---------------------- | ------- | ------- | ------- | ------- |
+| asteroid update        | 78 B    | 65 B    | 47 B    | -40%    |
+| ship update            | 164 B   | 91 B    | 47 B    | -71%    |
+| 3-asteroid batch       | 235 B   | 196 B   | 142 B   | -40%    |
+| 7-object mixed batch   | 901 B   | —       | ~640 B  | -29%    |
+
+(7-object batch includes 2 bullets which are still on SchemaId=0.)
+
+### Hazards verified by tests
+
+- **L6** delta encoding survives positional packing (bitmask preserves
+  partial updates) — `Phase4_AsteroidUpdate_DeltaOnly_Positional` /
+  `quantized fields work with delta encoding`.
+- **L8** joiner schema race: `handleSessionJoined` calls
+  `SchemaCodec.replaceAll(metadata.schemas)` BEFORE iterating
+  `response.objects`. JS is single-threaded so this is sequential.
+- **L10** angle wrap at 0/2π — `q16_2pi roundtrip: angle near 0 vs
+  near 2π wrap correctly`.
+- **L11** extrapolation drift: receiver uses `pos = snapshot.x + dt *
+  snapshot.vx` (non-integrating). 3600-frame simulation asserts max
+  render error stays within `quantum + lag × velocity_quantum`.
+- **L14** `validAt` continuity preserved — existing `validAt-axis`,
+  `spawn-extrapolation`, and `clock-offset` suites stay green at every
+  phase.
 
 ## Project Structure
 

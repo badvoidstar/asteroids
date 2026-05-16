@@ -31,6 +31,7 @@ const SessionClient = (function() {
         onObjectsUpdated: null,
         onObjectDeleted: null,
         onObjectReplaced: null,
+        onObjectEvent: null,
         onSessionsChanged: null,
         onSessionExpired: null,
         onError: null
@@ -190,6 +191,7 @@ const SessionClient = (function() {
         // Session events
         connection.on('OnMemberJoined', guard((memberInfo, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member joined:', memberInfo);
+            WireEnum.translateMember(memberInfo);
             // Add member to local session state
             if (currentSession && currentSession.members) {
                 currentSession.members.push(memberInfo);
@@ -201,7 +203,8 @@ const SessionClient = (function() {
 
         connection.on('OnMemberLeft', guard((info, senderMemberId, memberSequence, serverTimestamp) => {
             // console.log('[SessionClient] Member left:', info);
-            
+            if (info) info.promotedRole = WireEnum.roleFromWire(info.promotedRole);
+
             // Remove member from local session state
             if (currentSession && currentSession.members) {
                 currentSession.members = currentSession.members.filter(m => m.id !== info.memberId);
@@ -230,19 +233,25 @@ const SessionClient = (function() {
         }));
 
         // Object events
-        // ValidAt is now embedded in each ObjectInfo / ObjectUpdateInfo as a top-level
-        // property (server-validated: ±2 s sanity bound + monotonic cap). The wire no
-        // longer carries a trailing validAt argument on these events, and the legacy
-        // clientTimestamp echo on OnObjectsUpdated has been retired.
-        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp) => {
+        // ValidAt is now a single batch-level trailing argument on each broadcast
+        // (every object in a single broadcast shares the same owner-stamped sample
+        // time after server validation). Snapshot DTOs (JoinSessionResponse,
+        // SessionStateSnapshot) carry a parallel validAts dictionary keyed by
+        // objectId so each pre-existing object keeps its own age.
+        connection.on('OnObjectCreated', guard((objectInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            WireEnum.translateObject(objectInfo);
+            SyncPayload.unwrapObjectData(objectInfo);
             if (callbacks.onObjectCreated) {
-                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence);
+                callbacks.onObjectCreated(objectInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
-        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs) => {
+        connection.on('OnObjectsUpdated', guard((objects, senderMemberId, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, validAt) => {
+            if (Array.isArray(objects)) {
+                for (const u of objects) SyncPayload.unwrapObjectData(u);
+            }
             if (callbacks.onObjectsUpdated) {
-                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs);
+                callbacks.onObjectsUpdated(objects, serverTimestamp, senderMemberId, senderSequence, memberSequence, senderSendIntervalMs, validAt);
             }
         }));
 
@@ -252,9 +261,24 @@ const SessionClient = (function() {
             }
         }));
 
-        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp) => {
+        connection.on('OnObjectReplaced', guard((event, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            if (event && Array.isArray(event.createdObjects)) {
+                for (const o of event.createdObjects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
+            }
             if (callbacks.onObjectReplaced) {
-                callbacks.onObjectReplaced(event, senderMemberId, memberSequence);
+                callbacks.onObjectReplaced(event, senderMemberId, memberSequence, validAt);
+            }
+        }));
+
+        // Generic per-object event channel (Phase 2.1).
+        // Server is a relay — eventInfo.payload is opaque (game-defined dict).
+        // ObjectSync dispatches to game-registered handlers by eventKind byte.
+        connection.on('OnObjectEvent', guard((eventInfo, senderMemberId, memberSequence, serverTimestamp, validAt) => {
+            if (callbacks.onObjectEvent) {
+                callbacks.onObjectEvent(eventInfo, senderMemberId, memberSequence, validAt);
             }
         }));
 
@@ -327,10 +351,10 @@ const SessionClient = (function() {
                 // console.log('[SessionClient] CreateSession failed - server at capacity');
                 return null;
             }
-            
+
             currentMember = {
                 id: response.memberId,
-                role: response.role,
+                role: WireEnum.roleFromWire(response.role),
                 joinedAt: new Date().toISOString()
             };
             currentSession = {
@@ -372,16 +396,29 @@ const SessionClient = (function() {
                 return null;
             }
 
+            // Translate Phase-1 wire-byte enums and pair-array snapshots to the legacy shapes
+            // game code expects (string roles/scopes, object-keyed validAts).
+            if (Array.isArray(response.members)) {
+                for (const m of response.members) WireEnum.translateMember(m);
+            }
+            if (Array.isArray(response.objects)) {
+                for (const o of response.objects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
+            }
+
             currentSession = {
                 id: response.sessionId,
                 name: response.sessionName,
                 members: response.members,
                 objects: response.objects,
+                validAts: WireEnum.pairsToObject(response.validAts),
                 metadata: response.metadata || {}
             };
             currentMember = {
                 id: response.memberId,
-                role: response.role
+                role: WireEnum.roleFromWire(response.role)
             };
 
             _log('[SessionClient] Joined session:', currentSession.name, 'as', currentMember.role);
@@ -455,13 +492,32 @@ const SessionClient = (function() {
      *   before forwarding as the broadcast's validAt. Pass null to fall back to
      *   the server's hub-entry timestamp (slightly upload-biased).
      */
-    async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null) {
-        return invokeHub('CreateObject', data, scope, ownerMemberId, clientValidAt);
+    /**
+     * Create a new object in the current session.
+     * @param {Object} data - The data payload (game-side dict).
+     * @param {string} [scope='Member'] - 'Session' or 'Member'.
+     * @param {string|null} [ownerMemberId=null]
+     * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
+     *   estimate of "now" at creation. Server clamps to ±2s of its own UtcNow
+     *   before forwarding as the broadcast's validAt. Pass null to fall back to
+     *   the server's hub-entry timestamp (slightly upload-biased).
+     * @param {number} [schemaId=0] Phase 4: positional schema id (0 = legacy MessagePack dict).
+     */
+    async function createObject(data, scope = 'Member', ownerMemberId = null, clientValidAt = null, schemaId = 0) {
+        const response = await invokeHub('CreateObject', SyncPayload.wrap(data, schemaId), scope, ownerMemberId, clientValidAt);
+        // Phase 3 envelope: response.objectInfo.data arrives as a SyncPayload
+        // [schemaId, Uint8Array]; unwrap so the owner-side path in object-sync.js
+        // sees the same plain dict shape as remote receivers.
+        if (response && response.objectInfo) {
+            SyncPayload.unwrapObjectData(response.objectInfo);
+        }
+        return response;
     }
 
     /**
      * Update multiple objects atomically.
-     * @param {Array} updates
+     * @param {Array} updates Each entry: { objectId, data, schemaId? }. schemaId
+     *   defaults to 0 (legacy dict).
      * @param {number|null} [senderSequence=null]
      * @param {number|null} [senderSendIntervalMs=null]
      * @param {number|null} [clientValidAt=null] - Owner's NTP-aligned server-time
@@ -470,7 +526,31 @@ const SessionClient = (function() {
      *   the server's hub-entry timestamp.
      */
     async function updateObjects(updates, senderSequence = null, senderSendIntervalMs = null, clientValidAt = null) {
-        return invokeHub('UpdateObjects', updates, senderSequence, senderSendIntervalMs, clientValidAt);
+        // Phase 3 envelope: wrap each update.data into the SyncPayload wire shape
+        // before invoking. Avoid mutating the caller's request objects so callers
+        // can keep using their `update.data` references for local bookkeeping.
+        // Phase 4: each update may carry an explicit schemaId; default 0.
+        let wrapped = updates;
+        if (Array.isArray(updates)) {
+            wrapped = new Array(updates.length);
+            for (let i = 0; i < updates.length; i++) {
+                const u = updates[i];
+                if (u && u.data !== undefined) {
+                    const id = (u.schemaId === undefined || u.schemaId === null) ? 0 : u.schemaId;
+                    wrapped[i] = { objectId: u.objectId, data: SyncPayload.wrap(u.data, id) };
+                } else {
+                    wrapped[i] = u;
+                }
+            }
+        }
+        const response = await invokeHub('UpdateObjects', wrapped, senderSequence, senderSendIntervalMs, clientValidAt);
+        // Phase 1 wire-shape: response.versions is GuidLongPair[] on the wire (each
+        // entry deserialized as [guidString, long]). Game code expects a string-keyed
+        // object so it can do `versions[id]` and `Object.entries(versions)`.
+        if (response) {
+            response.versions = WireEnum.pairsToObject(response.versions);
+        }
+        return response;
     }
 
     /**
@@ -485,8 +565,20 @@ const SessionClient = (function() {
      *   broadcast's validAt. Pass null to fall back to server's hub-entry
      *   timestamp (less accurate).
      */
-    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null) {
-        return invokeHub('ReplaceObject', deleteObjectId, replacements, scope, ownerMemberId, clientValidAt);
+    async function replaceObject(deleteObjectId, replacements, scope = 'Session', ownerMemberId = null, clientValidAt = null, schemaIds = null) {
+        // Phase 3 envelope: each replacement is a raw game data dict; wrap before invoke.
+        // Phase 4: schemaIds may be a parallel array of schemaId per replacement;
+        // omitted/null entries fall back to 0 (legacy MessagePack dict).
+        const wrapped = Array.isArray(replacements)
+            ? replacements.map((r, i) => SyncPayload.wrap(r, (schemaIds && schemaIds[i]) || 0))
+            : replacements;
+        const created = await invokeHub('ReplaceObject', deleteObjectId, wrapped, scope, ownerMemberId, clientValidAt);
+        // Server returns List<ObjectInfo> for the owner; unwrap each so any
+        // downstream consumer sees the canonical dict shape.
+        if (Array.isArray(created)) {
+            for (const info of created) SyncPayload.unwrapObjectData(info);
+        }
+        return created;
     }
 
     /**
@@ -496,8 +588,39 @@ const SessionClient = (function() {
         return invokeHub('DeleteObject', objectId);
     }
 
+    /**
+     * Broadcast a per-object event to all other members of the session.
+     * Server is a relay — payload is opaque (game-defined dict). Caller
+     * must own objectId; the server enforces this and returns false on
+     * mismatch. Use for low-frequency state transitions that don't
+     * belong on the per-frame update path.
+     */
+    async function broadcastObjectEvent(objectId, eventKind, payload, clientValidAt = null) {
+        return invokeHub('BroadcastObjectEvent', objectId, eventKind, payload, clientValidAt);
+    }
+
     async function getSessionState() {
-        return invokeHub('GetSessionState');
+        const snapshot = await invokeHub('GetSessionState');
+        if (snapshot) {
+            // Phase 1 wire-shape: SessionStateSnapshot now carries members with byte
+            // role, objects with byte scope, and validAts/memberSequences as
+            // GuidLongPair[] (deserialized as [guidString, long] arrays after
+            // GuidUtils.transformBinaryGuids). Translate to legacy shapes here so
+            // game/object-sync code keeps using string roles/scopes and string-keyed
+            // dicts for validAts/memberSequences.
+            if (Array.isArray(snapshot.members)) {
+                for (const m of snapshot.members) WireEnum.translateMember(m);
+            }
+            if (Array.isArray(snapshot.objects)) {
+                for (const o of snapshot.objects) {
+                    WireEnum.translateObject(o);
+                    SyncPayload.unwrapObjectData(o);
+                }
+            }
+            snapshot.validAts = WireEnum.pairsToObject(snapshot.validAts);
+            snapshot.memberSequences = WireEnum.pairsToObject(snapshot.memberSequences);
+        }
+        return snapshot;
     }
 
     /**
@@ -581,6 +704,7 @@ const SessionClient = (function() {
         updateObjects,
         replaceObject,
         deleteObject,
+        broadcastObjectEvent,
         getSessionState,
         ping,
         on,

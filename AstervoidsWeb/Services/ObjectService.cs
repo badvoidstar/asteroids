@@ -70,7 +70,7 @@ public class ObjectService : IObjectService
     private Session? GetValidSession(Guid sessionId)
         => _sessionService.GetSession(sessionId);
 
-    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null, long? clientValidAt = null, long? serverReceiveTimeMs = null)
+    public SessionObject? CreateObject(Guid sessionId, Guid creatorMemberId, ObjectScope scope, Dictionary<string, object?>? data = null, Guid? ownerMemberId = null, long? clientValidAt = null, long? serverReceiveTimeMs = null, byte schemaId = 0)
     {
         var session = GetValidSession(sessionId);
         if (session == null)
@@ -90,7 +90,7 @@ public class ObjectService : IObjectService
 
             var receive = serverReceiveTimeMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var validAt = ValidateValidAt(clientValidAt, receive);
-            var obj = NewSessionObject(sessionId, creatorMemberId, effectiveOwner, scope, data, validAt);
+            var obj = NewSessionObject(sessionId, creatorMemberId, effectiveOwner, scope, data, validAt, schemaId);
             session.Objects.TryAdd(obj.Id, obj);
             return obj;
         }
@@ -150,8 +150,7 @@ public class ObjectService : IObjectService
                 if (obj.OwnerMemberId != ownerMemberId)
                     continue;
 
-                var requestedValidAt = update.ValidAt ?? callLevelClientValidAt;
-                var validAt = ValidateValidAt(requestedValidAt, receive, obj.ValidAt);
+                var validAt = ValidateValidAt(callLevelClientValidAt, receive, obj.ValidAt);
                 ApplyUpdate(obj, update.Data, validAt);
                 results.Add(obj);
             }
@@ -222,7 +221,7 @@ public class ObjectService : IObjectService
                     ? spec.OwnerOverride.Value
                     : ownerMemberId;
 
-                var obj = NewSessionObject(sessionId, ownerMemberId, effectiveOwner, spec.Scope, spec.Data, validAt);
+                var obj = NewSessionObject(sessionId, ownerMemberId, effectiveOwner, spec.Scope, spec.Data, validAt, spec.SchemaId);
                 session.Objects.TryAdd(obj.Id, obj);
                 created.Add(obj);
             }
@@ -284,7 +283,8 @@ public class ObjectService : IObjectService
         Guid ownerMemberId,
         ObjectScope scope,
         Dictionary<string, object?>? data,
-        long validAt)
+        long validAt,
+        byte schemaId = 0)
         => new()
         {
             SessionId = sessionId,
@@ -292,6 +292,7 @@ public class ObjectService : IObjectService
             OwnerMemberId = ownerMemberId,
             Scope = scope,
             Data = data != null ? new Dictionary<string, object?>(data) : new Dictionary<string, object?>(),
-            ValidAt = validAt
+            ValidAt = validAt,
+            SchemaId = schemaId
         };
 }

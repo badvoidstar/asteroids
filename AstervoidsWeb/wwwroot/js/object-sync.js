@@ -2,6 +2,36 @@
  * Object Sync Module
  * Handles local object registry and synchronization with the session.
  *
+ * ## Game-Agnostic Boundary
+ *
+ * This module (and its server counterpart `SessionHub` / `ObjectService`)
+ * never inspects the contents of an object's `data` field. Asteroids,
+ * ships, and bullets are not first-class concepts here — they live only
+ * in the game adapter (`index.html`) which provides:
+ *
+ *   - `toSyncData()` / `toUpdateData()` per local game-object type
+ *     (full snapshot vs per-frame deltas)
+ *   - `fromSyncData(obj)` to apply incoming dicts to the right local
+ *     game-object class
+ *   - `WIREOPT_SCHEMAS` + a `setSchemaIdSelector(fn)` callback for
+ *     positional/quantized wire encoding (Phases 4-5)
+ *
+ * To add a new game on top of this stack, you would:
+ *   1. Define your game-object classes with `toSyncData/toUpdateData/
+ *      fromSyncData` methods.
+ *   2. Register positional schemas via `SchemaCodec.register(id, fields)`
+ *      and pass them into `SessionClient.createSession({schemas: …})`.
+ *   3. Implement a `selector(data, kind, ctx)` returning the schemaId
+ *      for each (type, kind) pair (return 0 to keep the legacy MsgPack
+ *      dict path).
+ *   4. Wire it up: `ObjectSync.setSchemaIdSelector(selector)` after
+ *      `ObjectSync.init()` and `SchemaCodec.replaceAll(schemas)`.
+ *
+ * The sync layer also exposes a generic event channel
+ * (`registerEventKind / emitEvent / on('objectEvent:<name>', handler)`)
+ * so games can move rare-change fields off the per-frame update path
+ * without coupling them to the schema (Phase 2.1).
+ *
  * ## Per-Member Event Sequencing
  *
  * Every broadcast from the backend carries (senderMemberId, memberSequence).
@@ -94,6 +124,32 @@ const ObjectSync = (function() {
             out[reverseMap[key] || key] = data[key];
         }
         return out;
+    }
+
+    // ── Phase 4 wireopt: positional schema selection ───────────────────────
+    // The game registers a selector via setSchemaIdSelector(fn). It is called
+    // for every outbound create/update/replace with (data, kind, ctx) where
+    // kind is 'create' | 'update' | 'replace' and ctx is { objectId, object }
+    // (object may be undefined if the local registry hasn't seen it yet).
+    // Returning 0 (or null/undefined) keeps the legacy MessagePack dict path;
+    // returning >=1 sends positionally via the locally-registered SchemaCodec
+    // entry of that id.
+    let schemaIdSelector = null;
+    function setSchemaIdSelector(fn) {
+        if (fn !== null && typeof fn !== 'function') {
+            throw new Error('setSchemaIdSelector requires a function or null');
+        }
+        schemaIdSelector = fn;
+    }
+    function pickSchemaId(data, kind, ctx) {
+        if (!schemaIdSelector) return 0;
+        try {
+            const id = schemaIdSelector(data, kind, ctx);
+            return (typeof id === 'number' && id >= 1 && id <= 255) ? id : 0;
+        } catch (err) {
+            _warn('[ObjectSync] schemaIdSelector threw; falling back to schemaId=0', err);
+            return 0;
+        }
     }
 
     // Local object registry
@@ -292,6 +348,7 @@ const ObjectSync = (function() {
         SessionClient.on('onObjectsUpdated', handleRemoteObjectsUpdated);
         SessionClient.on('onObjectDeleted', handleRemoteObjectDeleted);
         SessionClient.on('onObjectReplaced', handleRemoteObjectReplaced);
+        SessionClient.on('onObjectEvent', dispatchRemoteObjectEvent);
         SessionClient.on('onSessionJoined', handleSessionJoined);
         SessionClient.on('onSessionLeft', handleSessionLeft);
 
@@ -389,11 +446,31 @@ const ObjectSync = (function() {
      * snapshot from clobbering a live OnObjectsUpdated broadcast that arrived
      * between the hub's AddToGroupAsync and the snapshot delivery in the JoinSession
      * response. (See SessionHub.JoinSession ordering.)
+     *
+     * Per-object validAt timing is carried in the parallel `session.validAts`
+     * dictionary (objectId → validAt ms) so each pre-existing object keeps its
+     * own age — the live broadcast wire shape is per-batch, but a snapshot
+     * legitimately mixes objects of different ages.
      */
     function handleSessionJoined(session, member) {
         resetState();
 
+        // Phase 4 wireopt: register positional schemas published by the
+        // session creator via metadata.schemas BEFORE processing any objects,
+        // so SyncPayload.unwrap can dispatch positional payloads. Failures are
+        // logged but non-fatal — the legacy SchemaId=0 path still works.
+        try {
+            const schemas = session && session.metadata && session.metadata.schemas;
+            if (schemas && typeof window !== 'undefined' && window.SchemaCodec) {
+                window.SchemaCodec.replaceAll(schemas);
+                _log('[ObjectSync] Loaded', schemas.length, 'positional schemas from session metadata');
+            }
+        } catch (err) {
+            _warn('[ObjectSync] Failed to apply session schemas:', err);
+        }
+
         if (session.objects) {
+            const validAts = session.validAts || {};
             for (const obj of session.objects) {
                 obj.data = expandData(obj.data);
                 const existing = objects.get(obj.id);
@@ -401,7 +478,11 @@ const ObjectSync = (function() {
                     // A live broadcast already populated this object at >= this version
                     continue;
                 }
-                registerObject(obj, false);
+                const registered = registerObject(obj, false);
+                const va = validAts[obj.id];
+                if (registered && va !== undefined && va !== null) {
+                    registered.validAt = va;
+                }
             }
         }
 
@@ -419,16 +500,17 @@ const ObjectSync = (function() {
     /**
      * Handle remote object created.
      *
-     * @param {object} objectInfo - Includes server-validated `validAt` (top-level
-     *   property): owner-stamped server-time ms (NTP-aligned), clamped within
-     *   ±2 s of hub-entry receive time and monotonically capped against the
-     *   object's previous ValidAt. This is THE unified interpolation axis:
-     *   snap[0] is keyed at validAt. Stored on `obj.validAt`; consumed by
-     *   RemoteObjects.updateState.
+     * @param {object} objectInfo - The object metadata (no validAt field; carried
+     *   as the trailing argument).
      * @param {string} senderMemberId
      * @param {number} memberSequence
+     * @param {number} validAt - Server-validated owner-stamped server-time ms
+     *   (NTP-aligned), clamped within ±2 s of hub-entry receive time and
+     *   monotonically capped against the object's previous ValidAt. THE unified
+     *   interpolation axis: snap[0] is keyed at validAt. Stored on `obj.validAt`;
+     *   consumed by RemoteObjects.updateState.
      */
-    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence) {
+    function handleRemoteObjectCreated(objectInfo, senderMemberId, memberSequence, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
         objectInfo.data = expandData(objectInfo.data);
 
@@ -452,8 +534,6 @@ const ObjectSync = (function() {
         if (objectInfo.data && objectInfo.data.spawnTimestamp !== undefined) {
             delete objectInfo.data.spawnTimestamp;
         }
-
-        const validAt = objectInfo.validAt;
 
         const existing = objects.get(objectInfo.id);
         if (existing) {
@@ -529,7 +609,13 @@ const ObjectSync = (function() {
      * @param {number} memberSequence
      * @param {number} senderSendIntervalMs
      */
-    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs) {
+    /**
+     * Handle remote objects updated batch.
+     * `validAt` is a single batch-level value (server-validated, owner-stamped) —
+     * fanned out to each updated object so RemoteObjects.updateState uses it as
+     * the unified interpolation axis (same axis as live OnObjectCreated).
+     */
+    function handleRemoteObjectsUpdated(updatedObjects, serverTimestamp, senderMemberId, senderSeq, memberSequence, senderSendIntervalMs, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
 
         // Capture the actual network arrival time once per packet. Stamping each
@@ -548,10 +634,9 @@ const ObjectSync = (function() {
         if (callbacks.onBatchReceived) {
             callbacks.onBatchReceived(serverTimestamp, null, senderSendIntervalMs, senderMemberId);
         }
-        // Updates contain id, data, version, validAt (metadata stripped for bandwidth)
+        // Updates contain id, data, version (validAt is batch-level, applied below).
         for (const update of updatedObjects) {
             update.data = expandData(update.data);
-            const updateValidAt = update.validAt;
             const existing = objects.get(update.id);
             if (existing) {
                 // Only apply if version is newer
@@ -561,8 +646,8 @@ const ObjectSync = (function() {
                     existing.version = update.version;
                     existing.arrivalTime = arrivalTime;
                     existing.arrivalServerTime = arrivalServerTime;
-                    if (updateValidAt !== undefined && updateValidAt !== null) {
-                        existing.validAt = updateValidAt;
+                    if (validAt !== undefined && validAt !== null) {
+                        existing.validAt = validAt;
                     }
 
                     // Update type index if type changed (only when type is present in delta)
@@ -586,7 +671,7 @@ const ObjectSync = (function() {
                     version: update.version,
                     arrivalTime: arrivalTime,
                     arrivalServerTime: arrivalServerTime,
-                    validAt: (updateValidAt !== undefined && updateValidAt !== null) ? updateValidAt : undefined
+                    validAt: (validAt !== undefined && validAt !== null) ? validAt : undefined
                 };
                 objects.set(obj.id, obj);
                 addToTypeIndex(obj);
@@ -612,29 +697,29 @@ const ObjectSync = (function() {
     /**
      * Handle remote object replaced (atomic delete + create).
      *
-     * Each ObjectInfo in event.createdObjects carries its own validated validAt
-     * (server stamps all children with the same collision-time value). The
-     * downstream onObjectReplaced callback consumers use createdObjects[i].validAt
-     * directly when synthesizing spawn-bridge snapshots.
+     * `validAt` is a single batch-level value (the collision instant on the
+     * owner) shared by every child in `event.createdObjects`. It is fanned out
+     * via handleRemoteObjectCreated so each child's `obj.validAt` is set
+     * consistently for the spawn-bridge / bracket-interpolation paths.
      *
      * @param {object} event - { deletedObjectId, createdObjects }
      * @param {string} senderMemberId
      * @param {number} memberSequence
+     * @param {number} validAt - Batch-level server-validated collision time.
      */
-    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence) {
+    function handleRemoteObjectReplaced(event, senderMemberId, memberSequence, validAt) {
         trackMemberSequence(senderMemberId, memberSequence);
         // Delete the original object (no sequence tracking — already tracked above)
         handleRemoteObjectDeleted(event.deletedObjectId);
 
         // Create all replacement objects (no sequence tracking — already tracked above).
-        // validAt is per-child inside each ObjectInfo (all children share the same
-        // server-validated collision-time from ObjectService.ReplaceObject).
+        // All children share the same server-validated collision-time validAt.
         for (const objectInfo of event.createdObjects) {
-            handleRemoteObjectCreated(objectInfo, undefined, undefined);
+            handleRemoteObjectCreated(objectInfo, undefined, undefined, validAt);
         }
 
         if (callbacks.onObjectReplaced) {
-            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects);
+            callbacks.onObjectReplaced(event.deletedObjectId, event.createdObjects, validAt);
         }
     }
 
@@ -714,9 +799,11 @@ const ObjectSync = (function() {
             
             // Build set of server-known object IDs
             const serverObjectIds = new Set();
+            const validAts = snapshot.validAts || {};
             for (const obj of (snapshot.objects || [])) {
                 serverObjectIds.add(obj.id);
                 obj.data = expandData(obj.data);
+                const snapValidAt = validAts[obj.id];
                 
                 const existing = objects.get(obj.id);
                 if (existing) {
@@ -727,6 +814,9 @@ const ObjectSync = (function() {
                         existing.data = obj.data || {};
                         existing.version = obj.version;
                         updateTypeIndex(existing, oldType, existing.data?.type);
+                        if (snapValidAt !== undefined && snapValidAt !== null) {
+                            existing.validAt = snapValidAt;
+                        }
                         // Reconciliation snapshots now carry the same validated
                         // server-time validAt as live broadcasts (monotonically
                         // capped, ±2 s clamped). The interpolator pushes them
@@ -743,6 +833,9 @@ const ObjectSync = (function() {
                 } else {
                     // Add missing object
                     const localObj = registerObject(obj);
+                    if (snapValidAt !== undefined && snapValidAt !== null) {
+                        localObj.validAt = snapValidAt;
+                    }
                     if (callbacks.onObjectCreated) {
                         callbacks.onObjectCreated(localObj);
                     }
@@ -812,7 +905,15 @@ const ObjectSync = (function() {
             const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
                 ? Math.round(clockSource.nowMs())
                 : null;
-            const response = await SessionClient.createObject(compressData(data), scope, ownerMemberId, clientValidAt);
+            // Positional schemas (schemaId>=1) read field names directly from
+            // the dict and have no name bytes on the wire — compression is
+            // pointless AND silently zeroes fields whose name was remapped
+            // (e.g. fieldMap angle→'a' would make schema lookup of dict.angle
+            // return undefined, clearing its bitmask bit). Apply compression
+            // only on the legacy SchemaId=0 MessagePack-dict path.
+            const createSchemaId = pickSchemaId(data, 'create');
+            const wireData = (createSchemaId === 0) ? compressData(data) : data;
+            const response = await SessionClient.createObject(wireData, scope, ownerMemberId, clientValidAt, createSchemaId);
             if (!response || !response.objectInfo) return null;
 
             const objectInfo = response.objectInfo;
@@ -828,6 +929,12 @@ const ObjectSync = (function() {
             const existing = objects.get(objectInfo.id);
             if (!existing) {
                 const obj = registerObject(objectInfo);
+                // Stamp the server-validated batch-level validAt from the response
+                // so any path that consults obj.validAt (e.g. ownership migration
+                // back to this client) sees the same anchor remote receivers see.
+                if (response.validAt !== undefined && response.validAt !== null) {
+                    obj.validAt = response.validAt;
+                }
 
                 if (callbacks.onObjectCreated) {
                     callbacks.onObjectCreated(obj);
@@ -856,7 +963,13 @@ const ObjectSync = (function() {
         }
 
         try {
-            const compressedReplacements = replacements.map(r => compressData(r));
+            // Positional schemas have no name bytes on the wire — compression
+            // would silently zero out remapped fields. See createObject.
+            const compressedReplacements = replacements.map((r, i) => {
+                const rid = pickSchemaId(r, 'replace');
+                return (rid === 0) ? compressData(r) : r;
+            });
+            const replacementSchemaIds = replacements.map(r => pickSchemaId(r, 'replace'));
             // Stamp owner's best estimate of server time NOW (collision moment).
             // Server clamps to ±2s of its own UtcNow before forwarding as the
             // unified-axis validAt. If the clock isn't initialized yet, send
@@ -874,7 +987,7 @@ const ObjectSync = (function() {
                 ? Math.round(clockSource.nowMs())
                 : null;
             const createdInfos = await SessionClient.replaceObject(
-                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientValidAt);
+                deleteObjectId, compressedReplacements, scope, ownerMemberId, clientValidAt, replacementSchemaIds);
             // Objects will be added/removed via the onObjectReplaced event
             return createdInfos;
         } catch (err) {
@@ -1053,11 +1166,29 @@ const ObjectSync = (function() {
         const clientValidAt = (clockSource && clockSource.initialized && clockSource.initialized())
             ? Math.round(clockSource.nowMs())
             : null;
-        // Compress field names for the wire — game logic stays readable
-        const wireUpdates = updates.map(u => ({
-            objectId: u.objectId,
-            data: compressData(u.data)
-        }));
+        // Compress field names for the wire — game logic stays readable.
+        // Phase 4: each update carries its own schemaId so heterogeneous
+        // batches (mix of asteroid update + ship full-sync, for example)
+        // can use distinct positional schemas without splitting batches. The
+        // selector receives ctx.objectId + ctx.object so it can route by type
+        // even when the update payload itself omits `type`.
+        //
+        // Positional schemas (schemaId>=1) read field names directly from
+        // the dict and have no name bytes on the wire — compression is
+        // pointless AND silently zeroes fields whose name was remapped (e.g.
+        // fieldMap angle→'a' would make schema lookup of dict.angle return
+        // undefined, clearing its bitmask bit). Apply compression only on
+        // the legacy SchemaId=0 MessagePack-dict path.
+        const wireUpdates = updates.map(u => {
+            const ctx = { objectId: u.objectId, object: objects.get(u.objectId) };
+            const schemaId = pickSchemaId(u.data, 'update', ctx);
+            const data = (schemaId === 0) ? compressData(u.data) : u.data;
+            return {
+                objectId: u.objectId,
+                data,
+                schemaId
+            };
+        });
         try {
             const response = await SessionClient.updateObjects(wireUpdates, currentSenderSequence, Math.round(nominalFrameTime * 1000), clientValidAt);
             // Capture response timestamp immediately — before processing
@@ -1208,10 +1339,112 @@ const ObjectSync = (function() {
      * Register a callback.
      */
     function on(event, callback) {
+        if (event && event.indexOf('objectEvent:') === 0) {
+            const kindName = event.substring('objectEvent:'.length);
+            if (callback === null || callback === undefined) {
+                eventHandlers.delete(kindName);
+            } else {
+                eventHandlers.set(kindName, callback);
+            }
+            return;
+        }
         if (callbacks.hasOwnProperty(event)) {
             callbacks[event] = callback;
         } else {
             _warn('[ObjectSync] Unknown event:', event);
+        }
+    }
+
+    // ── Per-object event channel (Phase 2.1) ─────────────────────────────
+    // Game registers a byte ↔ name mapping for each event kind, plus a
+    // handler per kind name. Owner-side emitEvent() invokes the handler
+    // locally (synchronously) before sending so all peers run the same
+    // handler exactly once. Receiver side: SessionClient.onObjectEvent
+    // dispatches to the same handler by looking up name from byte.
+    const eventKindToName = new Map(); // byte -> kindName
+    const eventNameToKind = new Map(); // kindName -> byte
+    const eventHandlers = new Map();   // kindName -> handler(objectId, payload, ctx)
+
+    /**
+     * Register a byte ↔ name mapping for a per-object event kind. Both peers
+     * must register the same mapping. Throws if kindByte or kindName is
+     * already registered with a different counterpart.
+     * @param {string} kindName - Game-defined name (e.g. 'ship-state-changed')
+     * @param {number} kindByte - 0–255
+     */
+    function registerEventKind(kindName, kindByte) {
+        if (typeof kindName !== 'string' || !kindName) {
+            throw new Error('registerEventKind: kindName must be a non-empty string');
+        }
+        if (!Number.isInteger(kindByte) || kindByte < 0 || kindByte > 255) {
+            throw new Error('registerEventKind: kindByte must be an integer in [0, 255]');
+        }
+        const existingName = eventKindToName.get(kindByte);
+        const existingByte = eventNameToKind.get(kindName);
+        if (existingName !== undefined && existingName !== kindName) {
+            throw new Error(`registerEventKind: byte ${kindByte} already mapped to ${existingName}`);
+        }
+        if (existingByte !== undefined && existingByte !== kindByte) {
+            throw new Error(`registerEventKind: name ${kindName} already mapped to byte ${existingByte}`);
+        }
+        eventKindToName.set(kindByte, kindName);
+        eventNameToKind.set(kindName, kindByte);
+    }
+
+    /**
+     * Broadcast a per-object event to other members, and run the local
+     * handler synchronously so the owner sees the same effect everyone
+     * else will see. Returns true on send success.
+     * @param {string} objectId
+     * @param {string} kindName - Must have been registered via registerEventKind
+     * @param {object} payload - Game-defined dict
+     */
+    function emitEvent(objectId, kindName, payload) {
+        const kindByte = eventNameToKind.get(kindName);
+        if (kindByte === undefined) {
+            _warn('[ObjectSync] emitEvent: unknown kind', kindName);
+            return Promise.resolve(false);
+        }
+
+        // Run local handler synchronously so owner-side state matches what
+        // remote peers will observe when the broadcast arrives.
+        const handler = eventHandlers.get(kindName);
+        if (handler) {
+            try {
+                handler(objectId, payload, { local: true });
+            } catch (e) {
+                _warn('[ObjectSync] emitEvent local handler threw:', e);
+            }
+        }
+
+        const validAt = clockSource && typeof clockSource.nowMs === 'function'
+            ? Math.round(clockSource.nowMs())
+            : null;
+        return SessionClient.broadcastObjectEvent(objectId, kindByte, payload, validAt);
+    }
+
+    /**
+     * Dispatch a received OnObjectEvent to its registered handler.
+     * Wired into SessionClient by init().
+     */
+    function dispatchRemoteObjectEvent(eventInfo, senderMemberId, memberSequence, validAt) {
+        if (!eventInfo) return;
+        const kindName = eventKindToName.get(eventInfo.eventKind);
+        if (!kindName) {
+            _warn('[ObjectSync] OnObjectEvent: unknown kind byte', eventInfo.eventKind);
+            return;
+        }
+        const handler = eventHandlers.get(kindName);
+        if (!handler) return; // silently ignore — game may not subscribe to all kinds
+        try {
+            handler(eventInfo.objectId, eventInfo.payload, {
+                local: false,
+                senderMemberId,
+                memberSequence,
+                validAt
+            });
+        } catch (e) {
+            _warn('[ObjectSync] OnObjectEvent handler threw:', e);
         }
     }
 
@@ -1291,6 +1524,9 @@ const ObjectSync = (function() {
         trackEventSequence,
         isReconciling: () => reconciling,
         on,
+        registerEventKind,
+        emitEvent,
+        setSchemaIdSelector,
         clear
     };
 })();

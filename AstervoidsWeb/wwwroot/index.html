@@ -626,6 +626,14 @@
     <script src="/js/signalr-protocol-msgpack.min.js"></script>
     <!-- Binary GUID conversion (server sends 16-byte binary GUIDs; this converts to strings) -->
     <script src="/js/guid-utils.js"></script>
+    <!-- Wire enum translation (server sends MemberRole/ObjectScope as bytes; this converts to strings) -->
+    <script src="/js/wire-enum.js"></script>
+    <!-- MessagePack codec for the Phase 3 SyncPayload envelope (per-object data wrap/unwrap) -->
+    <script src="/js/msgpack-codec.js"></script>
+    <!-- Phase 4 positional schema codec — must load BEFORE sync-payload.js so wrap/unwrap can dispatch -->
+    <script src="/js/schema-codec.js"></script>
+    <!-- SyncPayload envelope adapter (mirror of AstervoidsWeb/Hubs/SyncPayloadCodec.cs) -->
+    <script src="/js/sync-payload.js"></script>
     <!-- Debug toggle — set to true in browser console: window.ASTERVOIDS_DEBUG = true -->
     <script>window.ASTERVOIDS_DEBUG = false;</script>
     <!-- Session client module -->
@@ -1277,6 +1285,119 @@
         BULLET: 'bullet',
         GAME_STATE: 'gameState'
     };
+
+    // Phase 2.1: per-object event channel kinds. Both peers must register
+    // the same name ↔ byte mapping (done at ObjectSync.init time).
+    const EVENT_KIND = {
+        SHIP_STATE_CHANGED: 'ship-state-changed'
+    };
+    const EVENT_KIND_BYTE = {
+        SHIP_STATE_CHANGED: 1
+    };
+
+    // ── Phase 4 wireopt: positional schemas ─────────────────────────────────
+    // Each (type, kind) gets a stable schema id. Servers register schemas via
+    // session metadata.schemas at create time; joiners apply the same set on
+    // join. The selector below routes outbound payloads to the right id.
+    //
+    // Update schemas omit `type` because the receiver already knows the type
+    // from the existing local object (looked up via objectId in fromSyncData
+    // dispatch). Create schemas keep `type` for the registerObject path.
+    //
+    // Bullet payloads (create + update) intentionally remain on the legacy
+    // SchemaId=0 path because the pendingHit handshake still rides on the
+    // per-frame data (Phase 2.2 deferred); converting it now would require an
+    // integration test harness we don't have yet.
+    //
+    // ── Phase 5 quantization (lossy) ─────────────────────────────────────
+    // Position fields use q16w (2 B, ~3.05e-5 resolution over [-0.5, 1.5] —
+    // sub-pixel on a 4K canvas AND large enough to carry the off-screen
+    // wrap-margin positions used by wrapNormalized without clamping at the
+    // edge. The plain q16 [0,1] tag clamped owner positions in the extended
+    // off-screen region to 0 or 1, freezing remote asteroids at the edge
+    // for the entire wrap excursion). Angle uses q16_2pi (2 B, ~0.0055°
+    // resolution). Velocity uses q16s (2 B, signed [-1,1] — game velocities
+    // saturate well below ±1). `invulnerable` is a frame counter
+    // (0..INVULNERABILITY_TIME, decremented by dt each frame; receivers use
+    // its integer value to drive the blink phase via Math.floor(v/BLINK_RATE)
+    // % 2), so it MUST be encoded as an integer — `bool` would collapse all
+    // nonzero values to 1, fixing the receiver in the "blink off" half and
+    // making the ship invisible for the entire invuln period.
+    // Phase 4E adds an additional create-time schema (id 2 for ship) to
+    // capture the join/respawn payload positionally; the server's
+    // ToObjectInfo replays the same SchemaId on every broadcast and on
+    // JoinSession snapshots so late joiners see the compact positional form
+    // instead of legacy MessagePack. Asteroid create (and split-children) is
+    // intentionally NOT positional in this phase: those payloads carry a
+    // per-instance `vertices` polygon list that would need a dedicated
+    // game-layer packer (a follow-on PR). Including them without packing
+    // would either silently drop vertices (wrong silhouette for fracture
+    // shards) or pay full MessagePack overhead inside a positional `bytes`
+    // slot (no savings).
+    const WIREOPT_SCHEMAS = [
+        { id: 1, fields: [
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
+            ['thrusting', 'bool'], ['invulnerable', 'u16'],
+        ]},
+        // Ship create schema (Phase 4E): full ship-toSyncData() shape.
+        // Includes static identity fields (type, colorIndex, memberId) so
+        // late joiners can reconstruct the player ship from the snapshot
+        // without a separate metadata round-trip. score/hitCount ride along
+        // for snapshot correctness even though steady-state updates use the
+        // SHIP_STATE_CHANGED per-object event channel instead.
+        { id: 2, fields: [
+            ['type', 'str'],
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
+            ['thrusting', 'bool'], ['invulnerable', 'u16'],
+            ['colorIndex', 'u8'],
+            ['memberId', 'guid'],
+            ['score', 'u32'], ['hitCount', 'u16'],
+        ]},
+        // Asteroid update schema. velocityX/Y and rotationSpeed are NOT
+        // optional even though asteroid kinematics are constant in steady
+        // state — RemoteObjects.updateState reads them off every snapshot
+        // and feeds them to _baseInterpolated as Hermite tangents AND as
+        // the slope used to extrapolate forward when targetTime advances
+        // past the latest snapshot. Dropping them silently zeroes both,
+        // which freezes the rendered asteroid in the extrapolation zone
+        // (visible as a 30 Hz / sendRate-aligned "stutter" whenever the
+        // adaptive interpolation buffer is shorter than the send interval,
+        // i.e. on a low-jitter LAN). +6 B per update.
+        { id: 3, fields: [
+            ['x', 'q16w'], ['y', 'q16w'], ['angle', 'q16_2pi'],
+            ['velocityX', 'q16s'], ['velocityY', 'q16s'],
+            ['rotationSpeed', 'q16s'],
+        ]},
+    ];
+    const SCHEMA_ID_UPDATE = {
+        [OBJECT_TYPES.SHIP]: 1,
+        [OBJECT_TYPES.ASTEROID]: 3,
+    };
+    // Phase 4E: create/replace paths. Asteroid creates (including split
+    // children) stay on SchemaId=0 until the vertex-packing follow-on lands.
+    const SCHEMA_ID_CREATE = {
+        [OBJECT_TYPES.SHIP]: 2,
+    };
+    function selectWireoptSchemaId(data, kind, ctx) {
+        if (kind === 'update') {
+            const obj = ctx && ctx.object;
+            const type = obj && obj.data && obj.data.type;
+            return SCHEMA_ID_UPDATE[type] || 0;
+        }
+        if (kind === 'create' || kind === 'replace') {
+            // Replace-children and creates both carry the full create-time
+            // dict shape with `type` set, so the selector keys off data.type
+            // directly rather than walking ctx.object (which doesn't exist
+            // yet for a fresh create).
+            const type = data && data.type;
+            return SCHEMA_ID_CREATE[type] || 0;
+        }
+        return 0;
+    }
 
     // Ship colors for up to 4 players (distinct, high-contrast)
     const SHIP_COLORS = [
@@ -2231,7 +2352,25 @@
          */
         getBoundingRadius(data) {
             if (!data || !data.type) return 0;
-            if (data.type === OBJECT_TYPES.ASTEROID) return data.radius || 0;
+            if (data.type === OBJECT_TYPES.ASTEROID) {
+                // Mirror Asteroid.boundRadius from the sender so the receiver's
+                // wrap-detection range matches the sender's actual extended
+                // wrap margin (otherwise wrap-crossings can read as snaps).
+                // Vertices ride along on every snapshot for both spawn (seed-
+                // generated) and fracture (explicit) asteroids; if for any
+                // reason they're missing, fall back to the upper bound for
+                // jaggedness-generated polygons.
+                const verts = data.vertices;
+                if (Array.isArray(verts) && verts.length > 0) {
+                    let maxD = 0;
+                    for (let i = 0; i < verts.length; i++) {
+                        const d = verts[i] ? verts[i].distance || 0 : 0;
+                        if (d > maxD) maxD = d;
+                    }
+                    if (maxD > 0) return maxD;
+                }
+                return (data.radius || 0) * (1 + CONFIG.ASTEROID_JAGGEDNESS);
+            }
             if (data.type === OBJECT_TYPES.SHIP) return CONFIG.SHIP_SIZE;
             if (data.type === OBJECT_TYPES.BULLET) return CONFIG.BULLET_RADIUS;
             return 0;
@@ -2860,6 +2999,12 @@
          * 'type' is omitted: delta encoding would suppress it after the first send,
          * but removing it from the local update data avoids the baseline-diff cost
          * and shrinks the rare full-sync payloads (FULL_SYNC_INTERVAL).
+         *
+         * Phase 2.3: score and hitCount are NOT included here. They change rarely
+         * (asteroid kill, ship hit) and are pushed via the per-object event
+         * channel ('ship-state-changed' / EVENT_KIND.SHIP_STATE_CHANGED) so they
+         * don't pay per-frame wire cost. Snapshot reconciliation still carries
+         * them via toSyncData() so late joiners see correct values.
          */
         toUpdateData() {
             return {
@@ -2870,9 +3015,7 @@
                 velocityY: this.velocityY,
                 rotationSpeed: this.rotationSpeed,
                 thrusting: this.thrusting,
-                invulnerable: this.invulnerable,
-                score: this.score || 0,
-                hitCount: this.hitCount || 0
+                invulnerable: this.invulnerable
             };
         }
 
@@ -2891,6 +3034,10 @@
             if (data.invulnerable !== undefined) this.invulnerable = data.invulnerable;
             if (data.colorIndex !== undefined) this.colorIndex = data.colorIndex;
             if (data.memberId !== undefined) this.memberId = data.memberId;
+            // score / hitCount come via 'ship-state-changed' events (Phase 2.3)
+            // but reconciliation snapshots include them in data, so apply when present.
+            if (data.score !== undefined) this.score = data.score;
+            if (data.hitCount !== undefined) this.hitCount = data.hitCount;
         }
 
         /**
@@ -3136,9 +3283,11 @@
                 angle: this.angle,
                 rotationSpeed: this.rotationSpeed,
                 seed: this.seed,
-                // Fracture children carry an explicit vertex list so all clients
-                // see the inherited silhouette; spawn asteroids omit it and
-                // regenerate from `seed` for compactness/back-compat.
+                // Both spawn (seed-generated) and fracture (explicit vertex
+                // list) asteroids ride their full vertex list across the wire
+                // so receivers see the same silhouette without re-running the
+                // seeded RNG. Used by RemoteObjects.getBoundingRadius to derive
+                // the wrap margin from the actual visible polygon extent.
                 vertices: this.vertices,
             };
         }
@@ -3284,9 +3433,15 @@
             // Rotate
             this.angle += this.rotationSpeed * dt;
             
-            // Wrap with margin so asteroid is fully off-screen before reappearing
-            this.x = wrapNormalized(this.x, wrapMarginX(this.radius));
-            this.y = wrapNormalized(this.y, wrapMarginY(this.radius));
+            // Wrap with margin so asteroid is fully off-screen before reappearing.
+            // Use boundRadius (max vertex distance from center) — not radius —
+            // because jagged vertices extend up to ~1.4× the design radius and
+            // fracture-shard polygons can be even more elongated. Wrapping on
+            // `radius` makes the asteroid disappear while a slice of its
+            // silhouette is still visible (~0.4·radius·refDim ≈ 30 px on a
+            // 720-tall canvas) — perceived as "wrap fires too early".
+            this.x = wrapNormalized(this.x, wrapMarginX(this.boundRadius));
+            this.y = wrapNormalized(this.y, wrapMarginY(this.boundRadius));
         }
 
         /**
@@ -3709,6 +3864,22 @@
     function syncLocalShip() {
         if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
         ObjectSync.updateObject(game.multiplayer.myShipObjectId, game.ship.toUpdateData());
+    }
+
+    /**
+     * Phase 2.3: emit a 'ship-state-changed' event whenever the local ship's
+     * score or hitCount changes. This is a low-frequency replacement for
+     * including those fields in every per-frame update. The event handler
+     * registered in connectToSessionHub() patches obj.data.score / hitCount
+     * on every peer (including locally for symmetry); the GameState owner
+     * reads ship.data.hitCount via the standard object-sync path.
+     */
+    function emitShipStateChanged() {
+        if (!isSessionMode() || !game.ship || !game.multiplayer.myShipObjectId) return;
+        ObjectSync.emitEvent(game.multiplayer.myShipObjectId, EVENT_KIND.SHIP_STATE_CHANGED, {
+            score: game.ship.score || 0,
+            hitCount: game.ship.hitCount || 0
+        });
     }
     
     /**
@@ -5074,6 +5245,7 @@
                             // Self-award score on own ship
                             if (game.ship) {
                                 game.ship.score = (game.ship.score || 0) + points;
+                                emitShipStateChanged();
                             }
                         } else {
                             // Asteroid owned by someone else — mark bullet with pendingHit
@@ -5168,6 +5340,7 @@
                     const points = bullet.pendingPoints || CONFIG.POINTS_SMALL;
                     if (game.ship) {
                         game.ship.score = (game.ship.score || 0) + points;
+                        emitShipStateChanged();
                     }
                     const removedBullet = game.bullets.splice(i, 1)[0];
                     if (removedBullet.syncObjectId) {
@@ -5231,7 +5404,11 @@
         if (isSessionMode()) {
             // Increment monotonic hitCount on ship (GameState owner watches this)
             ship.hitCount = (ship.hitCount || 0) + 1;
-            
+            // Phase 2.3: hitCount no longer rides on toUpdateData(); push it
+            // through the per-object event channel so other peers see it
+            // before the next per-frame batch.
+            emitShipStateChanged();
+
             // Reset ship locally
             ship.reset();
             if (game.multiplayer.myShipObjectId) {
@@ -6070,6 +6247,26 @@
             if (success) {
                 // Initialize ObjectSync after connection
                 ObjectSync.init();
+                // Phase 4 wireopt: register positional schemas before any
+                // SyncPayload.wrap/unwrap can fire. SchemaCodec is loaded by
+                // schema-codec.js (browser) ahead of sync-payload.js.
+                if (window.SchemaCodec) {
+                    window.SchemaCodec.replaceAll(WIREOPT_SCHEMAS);
+                }
+                ObjectSync.setSchemaIdSelector(selectWireoptSchemaId);
+                // Phase 2.3: per-object event channel registrations.
+                // Score and hitCount move off the per-frame update path onto a
+                // tiny "ship-state-changed" event that fires only when the
+                // values change. Snapshot reconciliation (Ship.toSyncData)
+                // still carries them so late joiners see correct values.
+                ObjectSync.registerEventKind(EVENT_KIND.SHIP_STATE_CHANGED, EVENT_KIND_BYTE.SHIP_STATE_CHANGED);
+                ObjectSync.on(`objectEvent:${EVENT_KIND.SHIP_STATE_CHANGED}`, (objectId, payload) => {
+                    const obj = ObjectSync.getObject(objectId);
+                    if (obj && obj.data) {
+                        if (payload.score !== undefined) obj.data.score = payload.score;
+                        if (payload.hitCount !== undefined) obj.data.hitCount = payload.hitCount;
+                    }
+                });
                 ObjectSync.on('onBatchReceived', (serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp) => RemoteObjects.recordPacketArrival(serverTimestamp, clientTimestamp, senderSendIntervalMs, senderMemberId, responseTimestamp));
                 // Detect GameState creation (replaces onGameStarted event)
                 ObjectSync.on('onObjectCreated', (obj) => {
@@ -6111,9 +6308,10 @@
                 // Locally-owned children are skipped: they're driven by local
                 // physics (the adopt branch in updateAstervoidsFromSync), not
                 // by interpolation, so a bridge would be ignored.
-                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects) => {
+                ObjectSync.on('onObjectReplaced', (deletedObjectId, createdObjects, batchValidAt) => {
                     if (!CONFIG.SPAWN_BRIDGE_ENABLED) return;
                     if (!RemoteObjects.isClockOffsetInitialized()) return;
+                    if (batchValidAt == null) return;
                     const myMemberId = SessionClient.getCurrentMember()?.id;
                     const renderTime = performance.now();
                     const parentInterp = RemoteObjects.getInterpolated(deletedObjectId, renderTime);
@@ -6128,11 +6326,10 @@
                         // Skip locally-owned children — local game physics drives
                         // their position, not the interpolator.
                         if (child.ownerMemberId === myMemberId) continue;
-                        // Each child's validAt is server-validated and stamped per
-                        // ObjectInfo (all replacement children share the parent's
-                        // collision moment). Skip if absent.
-                        const childValidAt = child.validAt;
-                        if (childValidAt == null) continue;
+                        // All children in a Replace broadcast share the same
+                        // server-validated collision-time validAt (passed as the
+                        // batch-level argument).
+                        const childValidAt = batchValidAt;
                         // Bridge anchor in server-time: "where the renderer is
                         // currently displaying objects from this owner".
                         const delay = RemoteObjects.getDelayForMember(child.ownerMemberId);
@@ -6369,6 +6566,7 @@
             const result = await SessionClient.createSession({
                 aspectRatio: currentAspectRatio,
                 config: buildSessionConfigMetadata(),
+                schemas: WIREOPT_SCHEMAS,
             });
             if (result) {
                 // Enter lobby state as server

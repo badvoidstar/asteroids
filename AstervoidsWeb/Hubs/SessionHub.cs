@@ -19,6 +19,7 @@ public class SessionHub : Hub
     private readonly IObjectService _objectService;
     private readonly ILogger<SessionHub> _logger;
     private readonly ServerMetricsService _metrics;
+    private readonly SyncSchemaRegistry _schemaRegistry;
 
     // Group name for all connected clients to receive session list updates
     internal const string AllClientsGroup = "AllClients";
@@ -27,12 +28,14 @@ public class SessionHub : Hub
         ISessionService sessionService,
         IObjectService objectService,
         ILogger<SessionHub> logger,
-        ServerMetricsService metrics)
+        ServerMetricsService metrics,
+        SyncSchemaRegistry schemaRegistry)
     {
         _sessionService = sessionService;
         _objectService = objectService;
         _logger = logger;
         _metrics = metrics;
+        _schemaRegistry = schemaRegistry;
     }
 
     // ── Payload byte estimation ────────────────────────────────────────
@@ -144,29 +147,42 @@ public class SessionHub : Hub
     }
 
     private static MemberInfo ToMemberInfo(Member member) =>
-        new(member.Id, member.Role.ToString(), member.JoinedAt);
+        new(member.Id, member.Role, member.JoinedAt);
 
     /// <summary>
     /// Converts a <see cref="SessionObject"/> to a <see cref="ObjectInfo"/> DTO.
-    /// Clones <c>Data</c> so the caller receives a stable snapshot that cannot be
-    /// mutated by concurrent object updates.
+    /// Wraps <c>Data</c> in a <see cref="SyncPayload"/> envelope; when the object
+    /// was created from a positional payload (<c>o.SchemaId &gt;= 1</c>) the
+    /// re-encode goes through <see cref="SyncPayloadCodec.EncodeDict(byte, Dictionary{string, object?}?, SyncSchemaRegistry, Guid)"/>
+    /// which replays the positional encoding using the per-session schema
+    /// registry. Otherwise falls back to the legacy MessagePack dict shape.
+    /// The underlying dict is implicitly cloned by serialization so callers
+    /// cannot mutate the stored dict via the returned bytes.
     /// </summary>
-    private static ObjectInfo ToObjectInfo(SessionObject o) =>
-        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope.ToString(),
-            new Dictionary<string, object?>(o.Data), o.Version, o.ValidAt);
+    private ObjectInfo ToObjectInfo(SessionObject o) =>
+        new(o.Id, o.CreatorMemberId, o.OwnerMemberId, o.Scope,
+            SyncPayloadCodec.EncodeDict(o.SchemaId, o.Data, _schemaRegistry, o.SessionId), o.Version);
 
     /// <summary>
     /// Takes a consistent point-in-time snapshot of a session's members and objects.
     /// Acquires <c>session.SyncRoot</c> for the duration of the read so that no
     /// concurrent mutation can produce a torn snapshot.
+    ///
+    /// Returns a parallel <c>validAts</c> array (objectId, validAt pairs) so the
+    /// snapshot keeps per-object timing without duplicating the field on every
+    /// <see cref="ObjectInfo"/>; live broadcasts use a single batch-level
+    /// <c>validAt</c> trailing argument and never need this map.
     /// </summary>
-    private static (MemberInfo[] Members, ObjectInfo[] Objects) ToSessionSnapshot(Session session)
+    private (MemberInfo[] Members, ObjectInfo[] Objects, GuidLongPair[] ValidAts) ToSessionSnapshot(Session session)
     {
         lock (session.SyncRoot)
         {
+            var objs = session.Objects.Values.ToArray();
+            var validAts = objs.Select(o => new GuidLongPair(o.Id, o.ValidAt)).ToArray();
             return (
                 [.. session.Members.Values.Select(ToMemberInfo)],
-                [.. session.Objects.Values.Select(ToObjectInfo)]
+                [.. objs.Select(ToObjectInfo)],
+                validAts
             );
         }
     }
@@ -206,6 +222,28 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(creator.Id, EstimatePayloadBytes(metadata));
 
+        // Phase 4 wireopt: register any schemas the game declared in
+        // metadata.schemas before any object events can flow. Schemas are
+        // session-create-time only; later joins inherit them via the
+        // metadata round-trip in JoinSessionResponse.
+        try
+        {
+            var schemas = SyncSchemaRegistry.ParseFromMetadata(metadata);
+            _schemaRegistry.SetSessionSchemas(session.Id, schemas);
+            if (schemas.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Session {SessionId} registered {Count} positional schemas: {Ids}",
+                    session.Id, schemas.Count, string.Join(",", schemas.Select(s => s.Id)));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Session {SessionId} metadata.schemas parse failed; positional payloads will be rejected",
+                session.Id);
+        }
+
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
         _logger.LogInformation(
@@ -219,7 +257,7 @@ public class SessionHub : Hub
             session.Id,
             session.Name,
             creator.Id,
-            creator.Role.ToString(),
+            creator.Role,
             session.Metadata
         );
     }
@@ -276,7 +314,7 @@ public class SessionHub : Hub
             var evictionInfo = new MemberLeftInfo(
                 eviction.EvictedMemberId,
                 eviction.PromotedMember?.Id,
-                eviction.PromotedMember?.Role.ToString(),
+                eviction.PromotedMember?.Role,
                 eviction.DeletedObjectIds,
                 eviction.MigratedObjects
             );
@@ -309,7 +347,7 @@ public class SessionHub : Hub
         // newer, so duplicates are dedup'd.
         await Groups.AddToGroupAsync(Context.ConnectionId, session.Id.ToString());
 
-        var (members, objects) = ToSessionSnapshot(session);
+        var (members, objects, validAts) = ToSessionSnapshot(session);
 
         var memberSequence = NextMemberSequence(member);
 
@@ -328,9 +366,10 @@ public class SessionHub : Hub
             session.Id,
             session.Name,
             member.Id,
-            member.Role.ToString(),
+            member.Role,
             members,
             objects,
+            validAts,
             session.Metadata
         );
     }
@@ -368,7 +407,7 @@ public class SessionHub : Hub
             var departureInfo = new MemberLeftInfo(
                 result.MemberId,
                 result.PromotedMember?.Id,
-                result.PromotedMember?.Role.ToString(),
+                result.PromotedMember?.Role,
                 result.DeletedObjectIds,
                 result.MigratedObjects
             );
@@ -391,6 +430,16 @@ public class SessionHub : Hub
         }
         else if (result.RemainingMemberIds.Count == 0)
         {
+            // Last member departed. The session is NOT torn down yet — the
+            // service only marks LastMemberLeftAt and lets the session sit
+            // in an empty grace window so a rejoin can promote the rejoiner
+            // to Server with the existing schemas/state intact.
+            // SyncSchemaRegistry.ClearSession is therefore deferred to
+            // SessionCleanupService, which calls it at the actual destroy
+            // point (ForceDestroySession). Clearing it here would break the
+            // rejoin path: positional payloads from the rejoiner would
+            // throw "Schema not registered for session" until the empty
+            // grace window expired and a brand-new session was created.
             _logger.LogInformation("Session {SessionName} ({SessionId}) is now empty",
                 result.SessionName, result.SessionId);
         }
@@ -453,7 +502,7 @@ public class SessionHub : Hub
     /// the owner's clock isn't yet initialized; server falls back to its
     /// hub-entry timestamp (upload-biased but always usable).
     /// </param>
-    public async Task<CreateObjectResponse?> CreateObject(Dictionary<string, object?>? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
+    public async Task<CreateObjectResponse?> CreateObject(SyncPayload? data, string scope = "Member", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale.
         // clientValidAt is forwarded into the service which validates it (±2 s
@@ -466,7 +515,19 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(data, scope, ownerMemberId, clientValidAt));
 
-        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), data, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp);
+        // Phase 3 envelope: decode the wire payload to the server-internal
+        // dict shape that ObjectService consumes. SchemaId=0 → MessagePack
+        // dict; SchemaId>=1 → positional codec via the per-session registry.
+        // Phase 4E: the inbound SchemaId is also passed through to storage on
+        // SessionObject.SchemaId so the broadcast + future snapshot re-encodes
+        // can replay the same compact positional form via ToObjectInfo.
+        var inboundSchemaId = data?.SchemaId ?? SyncPayloadCodec.LegacyDictSchemaId;
+        var dataDict = SyncPayloadCodec.DecodeDict(
+            data ?? SyncPayloadCodec.EncodeDict(null),
+            member.SessionId,
+            _schemaRegistry);
+
+        var obj = _objectService.CreateObject(member.SessionId, member.Id, ParseScope(scope), dataDict, ParseOwnerGuid(ownerMemberId), clientValidAt, serverTimestamp, inboundSchemaId);
         if (obj == null)
         {
             _logger.LogWarning("CreateObject failed - could not create object in session");
@@ -479,15 +540,15 @@ public class SessionHub : Hub
 
         // Broadcast to other members only — sender registers from invoke response (response-first).
         // Sender's own memberSequence is returned in the response, not via broadcast echo.
-        // ObjectInfo.ValidAt carries the validated owner-stamped server-time anchor for
-        // receiver-side interpolation; serverTimestamp is retained for receiver-side
-        // packet-arrival / RTT instrumentation.
+        // ValidAt is now a single batch-level trailing argument (per-batch is
+        // sufficient because every object in a single broadcast shares the same
+        // owner-stamped sample time after server validation).
         await BroadcastToOthersAsync(session, member.Id, "OnObjectCreated",
-            objectInfo, member.Id, memberSequence, serverTimestamp);
+            objectInfo, member.Id, memberSequence, serverTimestamp, obj.ValidAt);
 
         _logger.LogDebug("Object {ObjectId} created in session by member {MemberId} (scope: {Scope})", obj.Id, member.Id, obj.Scope);
 
-        return new CreateObjectResponse(objectInfo, memberSequence);
+        return new CreateObjectResponse(objectInfo, memberSequence, obj.ValidAt);
     }
 
     /// <summary>
@@ -498,19 +559,18 @@ public class SessionHub : Hub
     /// <param name="clientValidAt">
     /// Owner's NTP-aligned server-time estimate of the simulation tick that
     /// produced this batch of updates. Forwarded to receivers as the
-    /// broadcast's <c>validAt</c> after a ±2s sanity clamp so they can place
-    /// each snapshot on the unified server-time interpolation axis. Null when
-    /// the owner's clock isn't yet initialized; server falls back to its
-    /// hub-entry timestamp.
+    /// broadcast's <c>validAt</c> trailing argument after a ±2s sanity clamp +
+    /// per-object monotonic cap so they can place every snapshot on the unified
+    /// server-time interpolation axis. Null when the owner's clock isn't yet
+    /// initialized; server falls back to its hub-entry timestamp.
     /// </param>
     public async Task<UpdateObjectsResponse?> UpdateObjects(IEnumerable<ObjectUpdateRequest> updates, long? senderSequence = null, long? senderSendIntervalMs = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — see JoinSession for rationale. Always
         // populated (even when no objects are updated) so the response carries
         // a valid timestamp the client's clock-offset estimator can use.
-        // clientValidAt (call-level fallback) and per-update ObjectUpdateRequest.ValidAt
-        // are both validated inside the service (±2 s clamp + monotonic cap) and
-        // stamped on each SessionObject.ValidAt.
+        // clientValidAt is validated inside the service (±2 s clamp + monotonic cap)
+        // and stamped on each SessionObject.ValidAt.
         var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         var ctx = GetCallerContext();
@@ -519,42 +579,43 @@ public class SessionHub : Hub
 
         _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(updates, senderSequence, senderSendIntervalMs, clientValidAt));
 
-        // Map hub request type to service type; ownership enforcement is inside the service.
-        // Per-object ValidAt is preserved so a single batch can carry independently-stamped
-        // updates; null per-object falls back to call-level clientValidAt inside the service.
-        var serviceUpdates = updates.Select(u => new ObjectUpdate(u.ObjectId, u.Data, u.ValidAt)).ToList();
+        // Phase 3 envelope: decode each request's SyncPayload to the dict
+        // shape the service consumes. We cache the original SyncPayload by
+        // objectId so the broadcast can echo the SAME bytes the sender sent
+        // (avoids a wasteful decode-then-reencode round-trip and preserves
+        // any compactness the sender's encoder achieved).
+        var updatesList = updates.ToList();
+        var requestPayloadByObjectId = updatesList
+            .GroupBy(u => u.ObjectId)
+            .ToDictionary(g => g.Key, g => g.Last().Data);
+        var serviceUpdates = updatesList
+            .Select(u => new ObjectUpdate(u.ObjectId, SyncPayloadCodec.DecodeDict(u.Data, member.SessionId, _schemaRegistry)))
+            .ToList();
         var updatedObjects = _objectService.UpdateObjects(member.SessionId, member.Id, serviceUpdates, clientValidAt, serverTimestamp).ToList();
 
         long memberSequence = 0;
         if (updatedObjects.Count > 0)
         {
             memberSequence = NextMemberSequence(member);
-            // Build a map from objectId → requested data for the broadcast payload.
-            // Use the service updates (which own the data dictionaries we passed in).
-            var requestDataByObjectId = serviceUpdates
-                .GroupBy(u => u.ObjectId)
-                .ToDictionary(g => g.Key, g => g.Last().Data);
-            // Per-object ValidAt is read from the stored SessionObject so it carries
-            // the validated value (±2 s clamp + monotonic cap) — the same value any
-            // future reconciliation snapshot would carry. This is the unified
-            // interpolation timeline anchor; receivers no longer take it from the
-            // broadcast trailer, only from each ObjectUpdateInfo.
+            // Build broadcast payload from the cached request payloads (verbatim
+            // bytes from the sender) — no need to re-encode the dict the service
+            // already merged into obj.Data.
             var updateInfos = updatedObjects
-                .Where(o => requestDataByObjectId.ContainsKey(o.Id))
-                .Select(o => new ObjectUpdateInfo(o.Id, requestDataByObjectId[o.Id], o.Version, o.ValidAt))
+                .Where(o => requestPayloadByObjectId.ContainsKey(o.Id))
+                .Select(o => new ObjectUpdateInfo(o.Id, requestPayloadByObjectId[o.Id], o.Version))
                 .ToList();
 
-            // Broadcast to other members only — sender gets versions/RTT from the response.
-            // serverTimestamp is retained for receiver-side packet-arrival / jitter
-            // instrumentation. The legacy clientTimestamp echo and trailing validAt
-            // arg were removed: clientTimestamp was only useful to the sender (who
-            // never received the broadcast — OthersInGroup), and validAt is now
-            // per-object inside each ObjectUpdateInfo.
+            // ValidAt is a single batch-level trailing argument: every object in
+            // this batch was sampled at the same owner tick and shares the same
+            // server-validated value. Read it from any updated object — they're
+            // all equal after ValidateValidAt collapses to the call-level input.
+            var batchValidAt = updatedObjects[0].ValidAt;
+
             await BroadcastToOthersAsync(session, member.Id, "OnObjectsUpdated",
-                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs);
+                updateInfos, member.Id, senderSequence, memberSequence, serverTimestamp, senderSendIntervalMs, batchValidAt);
         }
 
-        var versions = updatedObjects.ToDictionary(o => o.Id.ToString(), o => o.Version);
+        var versions = updatedObjects.Select(o => new GuidLongPair(o.Id, o.Version)).ToArray();
         return new UpdateObjectsResponse(versions, memberSequence, serverTimestamp);
     }
 
@@ -623,7 +684,7 @@ public class SessionHub : Hub
     /// Null when the owner's clock isn't yet initialized; server falls back
     /// to its hub-entry timestamp.
     /// </param>
-    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<Dictionary<string, object?>> replacements, string scope = "Session", string? ownerMemberId = null, long? clientValidAt = null)
+    public async Task<List<ObjectInfo>?> ReplaceObject(Guid deleteObjectId, List<SyncPayload> replacements, string scope = "Session", string? ownerMemberId = null, long? clientValidAt = null)
     {
         // Hub-entry serverTimestamp — used by recordPacketArrival (network arrival
         // timing, includes server processing time). NOT used as the spawn anchor;
@@ -641,9 +702,18 @@ public class SessionHub : Hub
         var ownerGuid = ParseOwnerGuid(ownerMemberId);
 
         // Build replacement specs; service enforces ownership atomically and stamps
-        // the validated collision-time on each child's ValidAt.
+        // the validated collision-time on each child's ValidAt. Phase 3 envelope:
+        // each replacement's SyncPayload is decoded to the dict the service expects.
+        // Phase 4E: per-spec SchemaId rides through so split children that arrived
+        // positionally are re-broadcast positionally on OnObjectReplaced (and on
+        // subsequent JoinSession snapshots) instead of collapsing to legacy
+        // MessagePack on the re-encode side.
         var specs = replacements
-            .Select(data => new ReplacementObjectSpec(objectScope, data, ownerGuid))
+            .Select(payload => new ReplacementObjectSpec(
+                objectScope,
+                SyncPayloadCodec.DecodeDict(payload, member.SessionId, _schemaRegistry),
+                ownerGuid,
+                payload?.SchemaId ?? SyncPayloadCodec.LegacyDictSchemaId))
             .ToList();
 
         var createdObjects = _objectService.ReplaceObject(member.SessionId, deleteObjectId, member.Id, specs, clientValidAt, serverTimestamp);
@@ -662,11 +732,12 @@ public class SessionHub : Hub
         // NOTE: Cannot use OthersInGroup here — sender relies on this broadcast to
         // update its local object map (replaceObject is not local-first). Would need
         // to refactor replaceObject to process the invoke response locally first.
-        // ObjectInfo.ValidAt carries the validated owner-stamped collision time so
-        // receivers no longer need a broadcast-trailer validAt argument.
+        // ValidAt is a single batch-level trailing argument (all children share the
+        // same server-validated collision-time value).
+        var batchValidAt = createdObjects.Count > 0 ? createdObjects[0].ValidAt : serverTimestamp;
         var replaceEvent = new ObjectReplacedEvent(deleteObjectId, createdInfos);
         await BroadcastToAllAsync(session, "OnObjectReplaced",
-            replaceEvent, member.Id, memberSequence, serverTimestamp);
+            replaceEvent, member.Id, memberSequence, serverTimestamp, batchValidAt);
 
         _logger.LogDebug("Object {ObjectId} replaced with {Count} objects in session {SessionId}",
             deleteObjectId, createdObjects.Count, member.SessionId);
@@ -687,12 +758,64 @@ public class SessionHub : Hub
         _metrics.OnHubInvocation(member.Id, 1); // GetSessionState has no payload arguments
         _metrics.OnReconciliation(member.Id);
 
-        var (members, objects) = ToSessionSnapshot(session);
+        var (members, objects, validAts) = ToSessionSnapshot(session);
 
-        var memberSequences = session.Members.Values.ToDictionary(
-            m => m.Id.ToString(), m => Interlocked.Read(ref m.EventSequence));
+        var memberSequences = session.Members.Values.Select(
+            m => new GuidLongPair(m.Id, Interlocked.Read(ref m.EventSequence))).ToArray();
 
-        return new SessionStateSnapshot(members, objects, memberSequences);
+        return new SessionStateSnapshot(members, objects, validAts, memberSequences);
+    }
+
+    /// <summary>
+    /// Broadcasts a small per-object event to all other members of the session.
+    /// Server is a relay — <paramref name="payload"/> is opaque (game-defined
+    /// dictionary). Used for low-frequency state transitions that don't belong
+    /// on the per-frame update path (score changes, one-shot impact reports,
+    /// etc.). Owner-only: caller must own <paramref name="objectId"/>.
+    ///
+    /// Ordering: emitted under the same broadcast pattern as OnObjectsUpdated /
+    /// OnObjectReplaced, so SignalR per-connection FIFO preserves
+    /// "event-before-next-update" at every receiver. Hazard L2 (bullet-hit
+    /// must arrive before asteroid Replace) is structurally satisfied so long
+    /// as the sender emits the event before the next per-frame flush.
+    /// </summary>
+    /// <param name="clientValidAt">
+    /// Owner's NTP-aligned server-time estimate of the simulation moment that
+    /// produced this event. Forwarded to receivers as the broadcast's
+    /// <c>validAt</c> trailing argument after a ±2s sanity clamp. Null when
+    /// the owner's clock isn't yet initialized; server falls back to its
+    /// hub-entry timestamp.
+    /// </param>
+    public async Task<bool> BroadcastObjectEvent(Guid objectId, byte eventKind, Dictionary<string, object?>? payload, long? clientValidAt = null)
+    {
+        var serverTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        var ctx = GetCallerContext();
+        if (ctx == null) return false;
+        var (member, session) = ctx.Value;
+
+        _metrics.OnHubInvocation(member.Id, EstimatePayloadBytes(objectId, eventKind, payload, clientValidAt));
+
+        // Ownership check — events are owner-attested observations about the
+        // object's state; non-owners cannot fabricate them.
+        var owned = GetOwnedObject(member, objectId);
+        if (owned == null) return false;
+
+        var memberSequence = NextMemberSequence(member);
+
+        // Inline ±2s clamp (events don't go through ObjectService.ValidateValidAt).
+        long validAt = serverTimestamp;
+        if (clientValidAt.HasValue)
+        {
+            var diff = clientValidAt.Value - serverTimestamp;
+            if (diff >= -2000 && diff <= 2000) validAt = clientValidAt.Value;
+        }
+
+        var eventInfo = new ObjectEventInfo(objectId, eventKind, payload);
+        await BroadcastToOthersAsync(session, member.Id, "OnObjectEvent",
+            eventInfo, member.Id, memberSequence, serverTimestamp, validAt);
+
+        return true;
     }
 
     /// <summary>
