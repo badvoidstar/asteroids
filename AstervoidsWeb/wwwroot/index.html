@@ -542,6 +542,16 @@
         .pseudo-fullscreen #btn-fullscreen {
             display: none;
         }
+
+        /* Virtual-stick touch scheme hides the legacy on-screen movement / fire
+           buttons (left/right/thrust/fire). Pause, restart and fullscreen stay
+           reachable. */
+        .touch-scheme-virtual-stick #touch-left,
+        .touch-scheme-virtual-stick #touch-right,
+        .touch-scheme-virtual-stick #touch-thrust,
+        .touch-scheme-virtual-stick #touch-fire {
+            display: none !important;
+        }
     </style>
 </head>
 <body>
@@ -1014,7 +1024,43 @@
         // 0 = instantaneous (legacy behavior).
         SHIP_TURN_ACCEL_TIME: 0.0,  // Seconds for rotation speed: 0 -> ±SHIP_TURN_SPEED
         SHIP_TURN_DECEL_TIME: 0.125,// Seconds for rotation speed: ±SHIP_TURN_SPEED -> 0
-        
+        // Maximum braking deceleration when brakeInput == 1.0, in the same
+        // per-60fps-frame units as SHIP_THRUST. Used by the virtual-stick
+        // touch scheme: braking is pure damping opposing current velocity and
+        // is clamped at full stop, so it can never reverse the ship.
+        SHIP_BRAKE_STRENGTH: 0.018,
+
+        // === Touch control scheme ===
+        // false (default): legacy on-screen ◀ ▶ ▲ FIRE buttons.
+        // true: virtual-stick scheme — left half of the screen is an anchor-based
+        //   analog stick (lateral displacement → rotation velocity, upward → thrust,
+        //   downward → brake-only); right half = fire (anchor tracked for future UI).
+        // Affects touch routing only; keyboard always uses discrete inputs.
+        // Override at runtime with ?cfg.TOUCH_VIRTUAL_STICK_ENABLED=true|false.
+        TOUCH_VIRTUAL_STICK_ENABLED: false,
+        // Drag distance (as a fraction of the smaller viewport edge) that maps a
+        // stick displacement of 1.0 — i.e. how far the finger must move from the
+        // anchor to reach full deflection (before per-axis clamping).
+        TOUCH_STICK_RADIUS_FRAC: 0.10,
+        // Dead-zone (same units). Displacements within this distance are ignored.
+        TOUCH_STICK_DEADZONE_FRAC: 0.01,
+        // Linear gain applied to normalized lateral displacement → turnTarget.
+        // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
+        // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
+        TOUCH_TURN_GAIN: 1.0,
+        TOUCH_TURN_MAX: 1.0,
+        // Forward-thrust mapping from upward displacement (finger above anchor).
+        // thrustInput = clamp(|yNorm| * GAIN, 0, MAX). Peak forward accel is
+        // SHIP_THRUST * TOUCH_THRUST_MAX. Downward displacement does NOT drive
+        // thrust here — it goes to brake below, with independent scaling/clamp.
+        TOUCH_THRUST_GAIN: 1.0,
+        TOUCH_THRUST_MAX: 1.0,
+        // Brake mapping from downward displacement (finger below anchor).
+        // brakeInput = clamp(|yNorm| * GAIN, 0, MAX). Peak braking deceleration
+        // is SHIP_BRAKE_STRENGTH * TOUCH_BRAKE_MAX. Set MAX=0 to disable braking.
+        TOUCH_BRAKE_GAIN: 1.0,
+        TOUCH_BRAKE_MAX: 1.0,
+
         // Bullet settings (normalized)
         BULLET_SPEED: 1.0,          // Bullet speed per second (normalized)
         BULLET_LIFETIME: 60,        // Frames before bullet expires
@@ -1261,6 +1307,13 @@
     // this while in a session; leaving session restores this local baseline.
     applyUrlConfigOverrides(CONFIG);
     const LOCAL_CONFIG_BASELINE = snapshotConfigValues(CONFIG, SESSION_CONFIG_KEYS);
+
+    // Reflect the touch control scheme on the game-container so CSS can hide
+    // legacy on-screen buttons in virtual-stick mode. The class is set once
+    // (the scheme isn't expected to flip after page load).
+    if (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED) {
+        document.getElementById('game-container').classList.add('touch-scheme-virtual-stick');
+    }
 
     function restoreLocalConfigBaseline(config = CONFIG) {
         for (const key of SESSION_CONFIG_KEYS) {
@@ -2936,6 +2989,58 @@
     }
 
     /**
+     * Compute analog ship-control inputs from raw touch displacement against
+     * an anchor (used by the virtual-stick touch scheme).
+     *
+     *   dx, dy : finger position minus anchor position, in CSS pixels.
+     *            Positive dx = right of anchor. Positive dy = below anchor
+     *            (i.e. screen-down; conventional touch coords).
+     *   refPx  : reference dimension in CSS pixels, normally
+     *            min(viewport width, viewport height). Lets the response scale
+     *            with device size and survive rotation / aspect changes.
+     *   params : { radiusFrac, deadzoneFrac,
+     *              turnGain, turnMax,
+     *              thrustGain, thrustMax,
+     *              brakeGain, brakeMax }
+     *            radiusFrac and deadzoneFrac are fractions of refPx (matching
+     *            CONFIG.TOUCH_STICK_RADIUS_FRAC / TOUCH_STICK_DEADZONE_FRAC).
+     *
+     * Returns { turn, thrust, brake }:
+     *   turn   ∈ [-turnMax, +turnMax]   — drives ship.turnTarget
+     *   thrust ∈ [0, thrustMax]         — drives ship.thrustInput  (upward only)
+     *   brake  ∈ [0, brakeMax]          — drives ship.brakeInput   (downward only)
+     *
+     * Pure: no DOM / window access; exercised by touch-stick-input.test.mjs.
+     */
+    function computeStickInput(dx, dy, refPx, params) {
+        const radiusPx = Math.max(1e-6, (params.radiusFrac || 0) * refPx);
+        const deadzonePx = Math.max(0, (params.deadzoneFrac || 0) * refPx);
+        const turnMax = Math.max(0, params.turnMax);
+        const thrustMax = Math.max(0, params.thrustMax);
+        const brakeMax = Math.max(0, params.brakeMax);
+
+        // Lateral → turn (positive dx = right = clockwise screen rotation).
+        const xMag = Math.max(0, Math.abs(dx) - deadzonePx);
+        const xNorm = xMag === 0 ? 0 : Math.sign(dx) * (xMag / radiusPx);
+        const rawTurn = xNorm * (params.turnGain || 0);
+        const turn = Math.max(-turnMax, Math.min(turnMax, rawTurn));
+
+        // Vertical: dy < 0 → upward → forward thrust; dy > 0 → downward → brake.
+        const yMag = Math.max(0, Math.abs(dy) - deadzonePx);
+        const yNorm = yMag === 0 ? 0 : (yMag / radiusPx); // always ≥ 0
+        let thrust = 0;
+        let brake = 0;
+        if (dy < 0) {
+            const raw = yNorm * (params.thrustGain || 0);
+            thrust = Math.max(0, Math.min(thrustMax, raw));
+        } else if (dy > 0) {
+            const raw = yNorm * (params.brakeGain || 0);
+            brake = Math.max(0, Math.min(brakeMax, raw));
+        }
+        return { turn, thrust, brake };
+    }
+
+    /**
      * Ship Class
      * The player-controlled spacecraft
      * All positions and velocities are normalized (0-1 range)
@@ -2948,13 +3053,19 @@
             this.velocityX = 0;            // Normalized horizontal velocity (per second)
             this.velocityY = 0;            // Normalized vertical velocity (per second)
             this.rotationSpeed = 0;        // Current rotation speed (radians per frame at 60fps)
-            this.thrusting = false;        // Is thrust active?
-            // Turn-input ramping: handleInput sets turnTarget ∈ {-1, 0, +1}; Ship.update
-            // ramps turnInput toward it over CONFIG.SHIP_TURN_ACCEL/DECEL_TIME, then sets
-            // rotationSpeed = SHIP_TURN_SPEED * turnInput. Thrust is intentionally NOT ramped:
-            // it remains a binary on/off applying constant linear acceleration when active.
-            this.turnTarget = 0;           // Desired turn input: -1 (left), 0, or +1 (right)
+            this.thrusting = false;        // Is thrust active? (boolean — drives flame visual + sync)
+            // Turn-input ramping: handleInput sets turnTarget (∈ [-1, +1], analog
+            // for virtual-stick / discrete ±1 for keyboard); Ship.update ramps
+            // turnInput toward it over CONFIG.SHIP_TURN_ACCEL/DECEL_TIME, then sets
+            // rotationSpeed = SHIP_TURN_SPEED * turnInput. Thrust is intentionally NOT
+            // ramped: it remains a per-frame acceleration whose magnitude is now scaled
+            // by thrustInput (1.0 for keyboard/buttons; analog for virtual-stick).
+            // brakeInput drives a velocity-only damping that is clamped at full stop —
+            // it can never reverse the ship (see Ship.update below).
+            this.turnTarget = 0;           // Desired turn input (analog in [-1, +1])
             this.turnInput = 0;            // Current ramped turn input in [-1, 1]
+            this.thrustInput = 0;          // Analog forward thrust magnitude (≥ 0)
+            this.brakeInput = 0;           // Analog brake magnitude (≥ 0)
             this.invulnerable = 0;         // Invulnerability frames remaining
             this.shootCooldown = 0;        // Frames until can shoot again
             this.colorIndex = colorIndex;  // Player color index (0-3)
@@ -3050,6 +3161,8 @@
             this.turnInput = 0;
             this.rotationSpeed = 0;
             this.thrusting = false;
+            this.thrustInput = 0;
+            this.brakeInput = 0;
         }
 
         /**
@@ -3076,10 +3189,14 @@
             this.velocityX *= friction;
             this.velocityY *= friction;
 
-            // Apply thrust in facing direction (normalized acceleration) — instantaneous on/off
-            if (this.thrusting) {
-                this.velocityX += Math.cos(this.angle) * CONFIG.SHIP_THRUST * dt;
-                this.velocityY += Math.sin(this.angle) * CONFIG.SHIP_THRUST * dt;
+            // Apply thrust in facing direction (normalized acceleration). thrustInput
+            // is the analog magnitude (1.0 from keyboard/legacy buttons; per-frame analog
+            // from the virtual-stick scheme). The `thrusting` boolean (set by handleInput)
+            // still drives flame rendering and remote sync.
+            if (this.thrustInput > 0) {
+                const a = CONFIG.SHIP_THRUST * this.thrustInput;
+                this.velocityX += Math.cos(this.angle) * a * dt;
+                this.velocityY += Math.sin(this.angle) * a * dt;
             }
             
             // Limit to max speed (in reference-dimension per second).
@@ -3090,6 +3207,23 @@
                 const speed = Math.sqrt(speedSq);
                 this.velocityX = (this.velocityX / speed) * CONFIG.SHIP_MAX_SPEED;
                 this.velocityY = (this.velocityY / speed) * CONFIG.SHIP_MAX_SPEED;
+            }
+
+            // Apply brake (pure damping, clamped at full stop — never adds energy
+            // and never reverses direction). brakeInput is the analog magnitude
+            // produced by downward stick displacement in the virtual-stick scheme;
+            // the legacy schemes leave it at 0.
+            if (this.brakeInput > 0) {
+                const speedNow = Math.sqrt(
+                    this.velocityX * this.velocityX + this.velocityY * this.velocityY
+                );
+                if (speedNow > 0) {
+                    const decel = CONFIG.SHIP_BRAKE_STRENGTH * this.brakeInput * dt;
+                    const newSpeed = Math.max(0, speedNow - decel);
+                    const factor = newSpeed / speedNow;
+                    this.velocityX *= factor;
+                    this.velocityY *= factor;
+                }
             }
             
             // Update position using aspect-ratio-aware conversion
@@ -3792,20 +3926,59 @@
     // Input tracking
     const keys = {};
     
-    // Touch input tracking (mirrors keys for mobile)
+    // Touch input tracking (mirrors keys for mobile — legacy on-screen buttons)
     const touch = {
         left: false,
         right: false,
         thrust: false,
         fire: false
     };
+
+    /**
+     * Virtual-stick touch state (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED).
+     * Multi-touch: at most one movement anchor (left half) and one fire anchor
+     * (right half) at any time. Identifiers come from Touch.identifier so we can
+     * correlate move/end events with the originating touchstart. Anchors are
+     * logical — no UI is rendered today, but coords are kept current so a future
+     * skin can draw a base ring + thumb at (anchorX, anchorY) → (currentX, currentY).
+     *
+     * Coordinates are in CSS pixels relative to the viewport (clientX/clientY).
+     * They survive dynamic device rotation because computeStickInput rescales
+     * against the *current* min(viewport width, height) each frame; on
+     * orientationchange / visibility loss we reset the state outright so a stale
+     * anchor can't drive input across an aspect-ratio change.
+     */
+    const stickInput = {
+        moveTouchId: null,
+        moveAnchorX: 0, moveAnchorY: 0,
+        moveCurrentX: 0, moveCurrentY: 0,
+        fireTouchId: null,
+        fireAnchorX: 0, fireAnchorY: 0,
+        fireCurrentX: 0, fireCurrentY: 0,
+        // Cached per-frame analog values produced from the move anchor.
+        turnTarget: 0,
+        thrustInput: 0,
+        brakeInput: 0,
+    };
+
+    function resetStickInput() {
+        stickInput.moveTouchId = null;
+        stickInput.fireTouchId = null;
+        stickInput.turnTarget = 0;
+        stickInput.thrustInput = 0;
+        stickInput.brakeInput = 0;
+    }
+
+    function isVirtualStickEnabled() {
+        return CONFIG.TOUCH_VIRTUAL_STICK_ENABLED === true;
+    }
     
     // Unified input helpers
     const input = {
         left: () => keys['ArrowLeft'] || keys['KeyA'] || touch.left,
         right: () => keys['ArrowRight'] || keys['KeyD'] || touch.right,
         thrust: () => keys['ArrowUp'] || keys['KeyW'] || touch.thrust,
-        fire: () => keys['Space'] || touch.fire
+        fire: () => keys['Space'] || touch.fire || (isVirtualStickEnabled() && stickInput.fireTouchId !== null)
     };
 
     // ============================================
@@ -5142,19 +5315,39 @@
         
         // Need a ship to control
         if (!game.ship) return;
-        
-        // Rotation: pick a turn target; Ship.update() ramps turnInput and applies rotation.
+
+        // Resolve analog control values for this frame. Keyboard / legacy buttons
+        // give discrete inputs (±1 turn, on/off thrust, no brake). The virtual-stick
+        // touch scheme overrides these with analog values while a move anchor is held.
+        let turnTarget;
         if (input.left()) {
-            game.ship.turnTarget = -1;
+            turnTarget = -1;
         } else if (input.right()) {
-            game.ship.turnTarget = 1;
+            turnTarget = 1;
         } else {
-            game.ship.turnTarget = 0;
+            turnTarget = 0;
+        }
+        let thrustOn = input.thrust();
+        let thrustMag = thrustOn ? 1 : 0;
+        let brakeMag = 0;
+
+        if (isVirtualStickEnabled() && stickInput.moveTouchId !== null) {
+            // Stick overrides keyboard for movement axes while held. Fire stays OR'd
+            // (input.fire() already considers stickInput.fireTouchId), so a player can
+            // hold the move stick on the left and fire from a hardware key.
+            turnTarget = stickInput.turnTarget;
+            thrustMag = stickInput.thrustInput;
+            brakeMag = stickInput.brakeInput;
+            thrustOn = thrustMag > 0;
         }
 
-        // Thrust — instantaneous on/off (unchanged from original behavior)
+        game.ship.turnTarget = turnTarget;
+        game.ship.thrustInput = thrustMag;
+        game.ship.brakeInput = brakeMag;
+
+        // Thrust — boolean `thrusting` still drives the flame visual + multiplayer sync.
         const wasThrusting = game.ship.thrusting;
-        game.ship.thrusting = input.thrust();
+        game.ship.thrusting = thrustOn;
 
         // Handle thrust sound
         if (game.ship.thrusting && !wasThrusting) {
@@ -6006,6 +6199,130 @@
     document.getElementById('game-container').addEventListener('touchmove', (e) => {
         e.preventDefault();
     }, { passive: false });
+
+    // ─── Virtual-stick touch scheme ──────────────────────────────────────────
+    // Anchor-based analog control (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED).
+    // The handlers are always wired; the early-return below makes them no-ops
+    // when the legacy button scheme is active, so the same DOM works for both.
+    {
+        const gameContainer = document.getElementById('game-container');
+
+        // True iff a touch occurred on a legacy on-screen button or the session
+        // picker — those have their own handlers and must not be hijacked.
+        function isStickTouchTarget(target) {
+            if (!target || target.classList && target.classList.contains('touch-btn')) {
+                return false;
+            }
+            if (target.closest && target.closest('#session-picker')) return false;
+            return true;
+        }
+
+        // Side test: anchored against the canvas, not the container, so off-canvas
+        // letterbox bars belong to neither half and are ignored.
+        function classifyTouchSide(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            if (clientX < rect.left || clientX > rect.right
+                || clientY < rect.top || clientY > rect.bottom) {
+                return null; // outside the canvas → ignore
+            }
+            const midX = rect.left + rect.width / 2;
+            return clientX < midX ? 'move' : 'fire';
+        }
+
+        // Frame-time updater: recomputes cached analog values from the current
+        // move anchor each animation frame, so changes in viewport size /
+        // orientation immediately affect mapping without per-event work.
+        function updateStickAnalog() {
+            if (stickInput.moveTouchId !== null) {
+                const rect = canvas.getBoundingClientRect();
+                const refPx = Math.max(1, Math.min(rect.width, rect.height));
+                const dx = stickInput.moveCurrentX - stickInput.moveAnchorX;
+                const dy = stickInput.moveCurrentY - stickInput.moveAnchorY;
+                const out = computeStickInput(dx, dy, refPx, {
+                    radiusFrac: CONFIG.TOUCH_STICK_RADIUS_FRAC,
+                    deadzoneFrac: CONFIG.TOUCH_STICK_DEADZONE_FRAC,
+                    turnGain: CONFIG.TOUCH_TURN_GAIN,
+                    turnMax: CONFIG.TOUCH_TURN_MAX,
+                    thrustGain: CONFIG.TOUCH_THRUST_GAIN,
+                    thrustMax: CONFIG.TOUCH_THRUST_MAX,
+                    brakeGain: CONFIG.TOUCH_BRAKE_GAIN,
+                    brakeMax: CONFIG.TOUCH_BRAKE_MAX,
+                });
+                stickInput.turnTarget = out.turn;
+                stickInput.thrustInput = out.thrust;
+                stickInput.brakeInput = out.brake;
+            } else {
+                stickInput.turnTarget = 0;
+                stickInput.thrustInput = 0;
+                stickInput.brakeInput = 0;
+            }
+            requestAnimationFrame(updateStickAnalog);
+        }
+        requestAnimationFrame(updateStickAnalog);
+
+        gameContainer.addEventListener('touchstart', (e) => {
+            if (!isVirtualStickEnabled()) return;
+            for (const t of e.changedTouches) {
+                if (!isStickTouchTarget(t.target)) continue;
+                const side = classifyTouchSide(t.clientX, t.clientY);
+                if (side === 'move' && stickInput.moveTouchId === null) {
+                    stickInput.moveTouchId = t.identifier;
+                    stickInput.moveAnchorX = t.clientX;
+                    stickInput.moveAnchorY = t.clientY;
+                    stickInput.moveCurrentX = t.clientX;
+                    stickInput.moveCurrentY = t.clientY;
+                    AudioSystem.init();
+                    AudioSystem.resume();
+                } else if (side === 'fire' && stickInput.fireTouchId === null) {
+                    stickInput.fireTouchId = t.identifier;
+                    stickInput.fireAnchorX = t.clientX;
+                    stickInput.fireAnchorY = t.clientY;
+                    stickInput.fireCurrentX = t.clientX;
+                    stickInput.fireCurrentY = t.clientY;
+                    AudioSystem.init();
+                    AudioSystem.resume();
+                }
+            }
+        }, { passive: false });
+
+        gameContainer.addEventListener('touchmove', (e) => {
+            if (!isVirtualStickEnabled()) return;
+            for (const t of e.changedTouches) {
+                if (t.identifier === stickInput.moveTouchId) {
+                    stickInput.moveCurrentX = t.clientX;
+                    stickInput.moveCurrentY = t.clientY;
+                } else if (t.identifier === stickInput.fireTouchId) {
+                    stickInput.fireCurrentX = t.clientX;
+                    stickInput.fireCurrentY = t.clientY;
+                }
+            }
+        }, { passive: false });
+
+        function endTouch(e) {
+            for (const t of e.changedTouches) {
+                if (t.identifier === stickInput.moveTouchId) {
+                    stickInput.moveTouchId = null;
+                    stickInput.turnTarget = 0;
+                    stickInput.thrustInput = 0;
+                    stickInput.brakeInput = 0;
+                } else if (t.identifier === stickInput.fireTouchId) {
+                    stickInput.fireTouchId = null;
+                }
+            }
+        }
+        gameContainer.addEventListener('touchend', endTouch, { passive: true });
+        gameContainer.addEventListener('touchcancel', endTouch, { passive: true });
+
+        // Drop any held anchors on orientation change or when the page is hidden.
+        // The anchor's CSS-px coordinates can become meaningless across a layout
+        // shift; making the player re-touch is safer than guessing where their
+        // finger conceptually is now.
+        window.addEventListener('orientationchange', resetStickInput);
+        window.addEventListener('blur', resetStickInput);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) resetStickInput();
+        });
+    }
 
     // ============================================
     // SECTION 9: WINDOW RESIZE HANDLING
