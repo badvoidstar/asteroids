@@ -16,6 +16,7 @@ public class SessionCleanupService : BackgroundService
 {
     private readonly ISessionService _sessionService;
     private readonly IHubContext<SessionHub> _hubContext;
+    private readonly SyncSchemaRegistry _schemaRegistry;
     private readonly ILogger<SessionCleanupService> _logger;
     private readonly TimeSpan _emptyTimeout;
     private readonly TimeSpan _absoluteTimeout;
@@ -27,11 +28,13 @@ public class SessionCleanupService : BackgroundService
     public SessionCleanupService(
         ISessionService sessionService,
         IHubContext<SessionHub> hubContext,
+        SyncSchemaRegistry schemaRegistry,
         IOptions<SessionSettings> settings,
         ILogger<SessionCleanupService> logger)
     {
         _sessionService = sessionService;
         _hubContext = hubContext;
+        _schemaRegistry = schemaRegistry;
         _logger = logger;
         _emptyTimeout = TimeSpan.FromSeconds(settings.Value.EmptyTimeoutSeconds);
         _absoluteTimeout = TimeSpan.FromMinutes(settings.Value.AbsoluteTimeoutMinutes);
@@ -65,7 +68,7 @@ public class SessionCleanupService : BackgroundService
         }
     }
 
-    private async Task CleanupExpiredSessions()
+    internal async Task CleanupExpiredSessions()
     {
         var now = DateTime.UtcNow;
         var sessions = _sessionService.GetAllSessions().ToList();
@@ -117,6 +120,13 @@ public class SessionCleanupService : BackgroundService
                 if (result != null)
                 {
                     sessionsDestroyed = true;
+
+                    // Sessions are torn down here (not in SessionHub.LeaveSession,
+                    // which only marks LastMemberLeftAt and lets the session sit
+                    // in an empty grace window where a rejoin is still possible).
+                    // Clear positional schemas registered for this session id so
+                    // the registry doesn't accumulate entries forever.
+                    _schemaRegistry.ClearSession(session.Id);
 
                     // Notify any connected members (only relevant for absolute timeout)
                     foreach (var connectionId in result.ConnectionIds)

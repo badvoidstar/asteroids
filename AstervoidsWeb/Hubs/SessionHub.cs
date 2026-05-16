@@ -427,9 +427,16 @@ public class SessionHub : Hub
         }
         else if (result.RemainingMemberIds.Count == 0)
         {
-            // Last member departed → the service tore down the session;
-            // clean up any positional schemas registered for it (Phase 4).
-            _schemaRegistry.ClearSession(result.SessionId);
+            // Last member departed. The session is NOT torn down yet — the
+            // service only marks LastMemberLeftAt and lets the session sit
+            // in an empty grace window so a rejoin can promote the rejoiner
+            // to Server with the existing schemas/state intact.
+            // SyncSchemaRegistry.ClearSession is therefore deferred to
+            // SessionCleanupService, which calls it at the actual destroy
+            // point (ForceDestroySession). Clearing it here would break the
+            // rejoin path: positional payloads from the rejoiner would
+            // throw "Schema not registered for session" until the empty
+            // grace window expired and a brand-new session was created.
             _logger.LogInformation("Session {SessionName} ({SessionId}) is now empty",
                 result.SessionName, result.SessionId);
         }
