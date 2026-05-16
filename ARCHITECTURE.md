@@ -881,6 +881,16 @@ flowchart LR
 * **Local-owner spawn projection.** The shooter who fires `replaceObject` adopts the resulting children ~RTT later. `updateAstervoidsFromSync` forward-projects from `obj.validAt` to `serverNowMs()` so the local sim asteroid's starting position matches the parent's continued motion (interpolation is not active for owned objects).
 * **Migration handoff.** When ownership migrates to the local member (previous owner left), `RemoteObjects.getMigrationSeed(objectId)` returns the latest snapshot dead-reckoned to `serverNowMs()`. The local game-object is seeded with that state, so the first authored snap on the new owner matches what every observer's bracket interpolation was already extrapolating — motion remains continuous through the handoff.
 
+### Per-batch `validAt` collapse on `OnObjectsUpdated`
+
+The hot-path `OnObjectsUpdated` broadcast carries one `validAt` for the whole batch (rather than one per object) — `updatedObjects[0].ValidAt` — saving 8 B per object on every per-frame batch. This is safe in practice because:
+
+* **Owners send monotonically.** Every batch is sampled from a single owner-tick, so the owner's `clientValidAt` is identical for every object in the batch. Per-object divergence cannot arise on the owner side.
+* **Server-side per-object monotonic cap is rarely heterogeneous within a batch.** `ObjectService.ValidateValidAt` clamps `result < previousValidAt → previousValidAt` per object. The cap only fires when the owner sends a `validAt` that's older than the prior accepted one for that object — a clock-skew or replay edge case. When it does fire, the clamp delta is bounded by the gap to the previous accepted `validAt`, typically tens of milliseconds.
+* **Receiver bracket-search tolerates small `validAt` jitter.** `RemoteObjects.updateState` runs the bracket search on the perf.now-converted snapshot times; sub-frame shifts in the snapshot key are absorbed by the existing interpolation hysteresis (no snap, no model switch).
+
+Snapshot/join paths are NOT affected: `JoinSessionResponse` and `SessionStateSnapshot` carry a parallel `validAts: Dictionary<string, long>` so pre-existing objects with unrelated ages keep their per-object timing exactly. The collapse applies only to the per-frame `OnObjectsUpdated` hot path.
+
 ## Ring Buffer Interpolation
 
 ```mermaid
