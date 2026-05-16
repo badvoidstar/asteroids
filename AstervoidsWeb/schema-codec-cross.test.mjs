@@ -144,3 +144,17 @@ test('cross-wire (Phase 5): quantized asteroid update produces canonical hex', (
     //              + angle=π→65536/2=32768→0x8000 (LE 0080)
     assert.equal(hex, '07008000400080');
 });
+
+// PR #96 review fix #4 cross-wire parity.
+// PositionalSchemaCodecTests.Encode_NullValueOnNonNullableSlot_TreatedAsAbsent
+// asserts the C# encoder produces the same bytes for the same dict. This
+// test pins the JS encoder to the same canonical hex so the two codecs
+// stay byte-identical on the `null` boundary.
+test('cross-wire: null on non-nullable f64 slot is absent (matches C# bytes)', () => {
+    freshRegistry();
+    const schema = SchemaCodec.register(11, [['x', 'f64'], ['y', 'f64']]);
+    const bytes = SchemaCodec.encode(schema, { x: 1.0, y: null });
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    // bitmask=0x01 (only x) + x=1.0 (IEEE-754 LE: 0x000000000000F03F)
+    assert.equal(hex, '01' + '000000000000f03f');
+});

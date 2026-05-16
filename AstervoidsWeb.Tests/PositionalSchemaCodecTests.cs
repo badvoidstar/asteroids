@@ -191,6 +191,21 @@ public class PositionalSchemaCodecTests
         bytes[0].Should().Be(0b00000001);
     }
 
+    // PR #96 review fix #4 cross-wire parity. The JS counterpart
+    // (schema-codec-cross.test.mjs: "null on non-nullable f64 slot is
+    // absent (matches C# bytes)") asserts the same input → same hex.
+    // Pinning the byte-for-byte canonical form here keeps the two encoders
+    // from drifting at the `null` boundary.
+    [Fact]
+    public void Encode_NullValueOnNonNullableSlot_ProducesCanonicalBytes()
+    {
+        var schema = Make(11, ("x", "f64"), ("y", "f64"));
+        var bytes = PositionalSchemaCodec.Encode(schema, new Dictionary<string, object?>() { ["x"] = 1.0, ["y"] = null });
+        // bitmask=0x01 (only x) + IEEE-754 LE 1.0 = 00 00 00 00 00 00 F0 3F
+        var hex = Convert.ToHexString(bytes).ToUpperInvariant();
+        hex.Should().Be("01" + "000000000000F03F");
+    }
+
     [Fact]
     public void Encode_BoolField_OneByte()
     {

@@ -172,7 +172,16 @@ const SchemaCodec = (function () {
         for (let i = 0; i < fields.length; i++) {
             const f = fields[i];
             const v = dict ? dict[f.name] : undefined;
-            const present = (dict != null) && (v !== undefined);
+            // `null` is only a valid PRESENT value for explicitly nullable
+            // types (encoded as the in-band null-marker byte). For every
+            // other type tag we treat `null` like `undefined` (bit clear,
+            // no body bytes) — mirroring PositionalSchemaCodec.cs:114-118.
+            // Without this, JS would encode {x: null} on an `f64` slot as
+            // a PRESENT zero, while C# would drop it as ABSENT — silent
+            // wire-format divergence the first time anyone adds an
+            // optional numeric field to a schema.
+            const isNullableType = (f.type === 'nullable-str' || f.type === 'nullable-guid');
+            const present = (dict != null) && (v !== undefined) && (v !== null || isNullableType);
             slotPresent[i] = present;
             if (!present) continue;
 

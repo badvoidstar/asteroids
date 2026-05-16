@@ -88,6 +88,45 @@ test('round-trip: nullable-str and nullable-guid (null and non-null)', () => {
     assert.deepEqual(SchemaCodec.decode(schema, SchemaCodec.encode(schema, dictSet)), dictSet);
 });
 
+// PR #96 review fix #4: `null` on a non-nullable slot must be treated as
+// ABSENT (matches PositionalSchemaCodec.cs:114-118). Without this, JS
+// silently encoded `{x: null}` as a PRESENT zero while C# dropped it as
+// absent — silent wire-format divergence that would bite the first
+// optional numeric field added to any schema.
+test('null on non-nullable f64 slot is treated as absent (matches C#)', () => {
+    fresh();
+    const schema = SchemaCodec.register(1, [['x', 'f64'], ['y', 'f64']]);
+    const bytes = SchemaCodec.encode(schema, { x: 1.0, y: null });
+    // bitmask byte (only x set) + 8 bytes for x; no body bytes for y.
+    assert.equal(bytes.length, 1 + 8);
+    assert.equal(bytes[0], 0b00000001);
+    const decoded = SchemaCodec.decode(schema, bytes);
+    assert.equal(decoded.x, 1.0);
+    assert.equal('y' in decoded, false);
+});
+
+test('all-null on non-nullable slots produces only an empty bitmask', () => {
+    fresh();
+    const schema = SchemaCodec.register(1, [['a', 'f64'], ['b', 'u16'], ['c', 'bool']]);
+    const bytes = SchemaCodec.encode(schema, { a: null, b: null, c: null });
+    assert.equal(bytes.length, 1);
+    assert.equal(bytes[0], 0);
+    const decoded = SchemaCodec.decode(schema, bytes);
+    assert.deepEqual(decoded, {});
+});
+
+test('null on nullable-guid is still PRESENT (in-band null marker preserved)', () => {
+    fresh();
+    const schema = SchemaCodec.register(1, [['hitTargetId', 'nullable-guid']]);
+    const bytes = SchemaCodec.encode(schema, { hitTargetId: null });
+    // bitmask byte + 1 marker byte (the in-band null marker).
+    assert.equal(bytes.length, 1 + 1);
+    assert.equal(bytes[0], 0b00000001);
+    const decoded = SchemaCodec.decode(schema, bytes);
+    assert.equal('hitTargetId' in decoded, true);
+    assert.equal(decoded.hitTargetId, null);
+});
+
 test('round-trip: bytes', () => {
     fresh();
     const schema = SchemaCodec.register(1, [['blob', 'bytes']]);
