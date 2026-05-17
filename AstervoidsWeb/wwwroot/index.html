@@ -1052,12 +1052,12 @@
         // and vertical displacements with |dy| <= THRUST_DEADZONE_PX are
         // ignored for thrust/brake. Independent knobs let turning be more
         // responsive (smaller deadzone) than thrust/brake.
-        TOUCH_STICK_TURN_DEADZONE_PX: 12,
-        TOUCH_STICK_THRUST_DEADZONE_PX: 16,
+        TOUCH_STICK_TURN_DEADZONE_PX: 6,
+        TOUCH_STICK_THRUST_DEADZONE_PX: 24,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
-        TOUCH_TURN_GAIN: 2.0,
+        TOUCH_TURN_GAIN: 0.5,
         TOUCH_TURN_MAX: 1.0,
         // Forward-thrust mapping from upward displacement (finger above anchor).
         // thrustInput = clamp(|yNorm| * GAIN, 0, MAX). Peak forward accel is
@@ -1070,15 +1070,15 @@
         // is SHIP_BRAKE_STRENGTH * TOUCH_BRAKE_MAX. Set MAX=0 to disable braking.
         TOUCH_BRAKE_GAIN: 1.0,
         TOUCH_BRAKE_MAX: 1.0,
-        // When true (default): if the right (fire) anchor is held, it has
+        // When true: if the right (fire) anchor is held, it has
         // exclusive control over thrust/brake — the left-anchor thrust/brake
         // contribution is suppressed for as long as the right touch is active.
         // When the right anchor is released, thrust/brake fall back to the
         // left anchor (existing behaviour).
-        // When false: both anchors contribute, combined via Math.max
+        // When false (default): both anchors contribute, combined via Math.max
         // (winner-takes-all per axis; each side already clamped individually).
         // Turning is always driven by the left anchor regardless of this flag.
-        TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST: true,
+        TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST: false,
         // Anchor overlay: an 8-vertex polygon centered on each active anchor
         // whose basis form is a rectangle matching the dead-zone exactly
         // (2·TOUCH_STICK_TURN_DEADZONE_PX wide × 2·TOUCH_STICK_THRUST_DEADZONE_PX
@@ -3946,6 +3946,7 @@
         'TOUCH_BRAKE_GAIN',
         'TOUCH_STICK_TURN_DEADZONE_PX',
         'TOUCH_STICK_THRUST_DEADZONE_PX',
+        'TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;

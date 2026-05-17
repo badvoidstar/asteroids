@@ -103,6 +103,36 @@
         .config-control input[type=range] {
             width: 100%;
             accent-color: #00ff00;
+            display: block;
+        }
+
+        .config-range-wrap {
+            position: relative;
+            width: 100%;
+            padding-bottom: 11px;
+        }
+
+        .config-default-mark {
+            position: absolute;
+            top: 100%;
+            width: 0;
+            height: 0;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 5px solid #888;
+            transform: translateX(-50%);
+            pointer-events: none;
+        }
+
+        .config-default-mark::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: 5px;
+            transform: translateX(-50%);
+            width: 1px;
+            height: 4px;
+            background: #888;
         }
 
         .config-control .config-help {
@@ -322,13 +352,6 @@
                 help: 'Cap on remote-object simulation projection: applied to (a) bracket-search single-snap velocity extrapolation, (b) local-owner spawn-projection of newly-adopted children, and (c) ownership-migration handoff seed. Higher = smoother through long packet gaps but more overshoot if velocity changes during the gap. 0 = disable all forward projection (objects freeze at the latest snapshot until the next one arrives).',
             },
             {
-                key: 'SPAWN_BRIDGE_ENABLED',
-                label: 'Spawn bridge enabled (0/1)',
-                min: 0, max: 1, step: 1, default: 1,
-                fmt: v => `${Math.round(v)}`,
-                help: 'On OnObjectReplaced (e.g. asteroid split), synthesize an extra snapshot at "local render time" carrying the parent\'s last-interpolated position. Bracket-search interpolates parent_pos → child authority_pos over one display delay, eliminating the spawn hitch on LAN and softening it under high latency. 0 = disable (revert to single-authority install: position discontinuity at every replace, magnitude proportional to (parent_vel − child_vel) × latency).',
-            },
-            {
                 key: 'SHIP_TURN_SPEED',
                 label: 'Ship turn max speed (rad/frame)',
                 min: 0, max: 0.3, step: 0.005, default: 0.12,
@@ -338,9 +361,9 @@
             {
                 key: 'TOUCH_TURN_GAIN',
                 label: 'Touch displacement → turn-speed gain',
-                min: 0, max: 5, step: 0.1, default: 2.0,
+                min: 0, max: 5, step: 0.1, default: 0.5,
                 fmt: v => v.toFixed(2),
-                help: 'Linear slope mapping the left-anchor lateral displacement (as a fraction of TOUCH_STICK_RADIUS_FRAC · refPx) to turnTarget. turnTarget is then clamped to ±TOUCH_TURN_MAX before multiplying by SHIP_TURN_SPEED. Higher = sharper turning per unit finger travel.',
+                help: 'Linear slope mapping the left-anchor lateral displacement (as a fraction of TOUCH_STICK_RADIUS_PX CSS px) to turnTarget. turnTarget is then clamped to ±TOUCH_TURN_MAX before multiplying by SHIP_TURN_SPEED. Higher = sharper turning per unit finger travel.',
             },
             {
                 key: 'SHIP_MAX_SPEED',
@@ -366,16 +389,23 @@
             {
                 key: 'TOUCH_STICK_TURN_DEADZONE_PX',
                 label: 'Touch turn dead-zone (CSS px)',
-                min: 0, max: 60, step: 1, default: 12,
+                min: 0, max: 60, step: 1, default: 6,
                 fmt: v => `${Math.round(v)} px`,
                 help: 'Lateral (X-axis) dead-zone half-extent for turning. Finger displacements with |dx| ≤ this value produce zero turn input. Independent of the thrust/brake dead-zone — turning typically wants a smaller deadzone for crisp response. Sized in absolute CSS pixels so the on-screen physical size stays constant across devices and orientations.',
             },
             {
                 key: 'TOUCH_STICK_THRUST_DEADZONE_PX',
                 label: 'Touch thrust/brake dead-zone (CSS px)',
-                min: 0, max: 60, step: 1, default: 16,
+                min: 0, max: 60, step: 1, default: 24,
                 fmt: v => `${Math.round(v)} px`,
                 help: 'Vertical (Y-axis) dead-zone half-extent for thrust and brake (applies to left and right anchors). Finger displacements with |dy| ≤ this value produce zero thrust/brake input. Larger values reduce accidental boost/brake from small finger drift. Sized in absolute CSS pixels for device-independent feel.',
+            },
+            {
+                key: 'TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST',
+                label: 'Right anchor exclusive thrust/brake (0/1)',
+                min: 0, max: 1, step: 1, default: 0,
+                fmt: v => `${Math.round(v)}`,
+                help: '1 = while the right (fire) anchor is held, it has exclusive control over thrust/brake; left-anchor thrust/brake is suppressed until the right touch is released. 0 (default) = both anchors contribute, combined via Math.max per axis (winner-takes-all; each side already clamped). Turning is always driven by the left anchor regardless.',
             },
         ];
 
@@ -402,13 +432,21 @@
                 const initial = overrides[def.key] ?? def.default;
                 const wrap = document.createElement('div');
                 wrap.className = 'config-control';
+                const defaultPct = (def.max > def.min)
+                    ? ((def.default - def.min) / (def.max - def.min)) * 100
+                    : 0;
+                const defaultPctClamped = Math.max(0, Math.min(100, defaultPct));
                 wrap.innerHTML = `
                     <label for="cfg-${def.key}">
                         <span>${def.label}</span>
                         <span class="config-value" id="cfg-val-${def.key}">${def.fmt(initial)}</span>
                     </label>
-                    <input type="range" id="cfg-${def.key}"
-                           min="${def.min}" max="${def.max}" step="${def.step}" value="${initial}">
+                    <div class="config-range-wrap">
+                        <input type="range" id="cfg-${def.key}"
+                               min="${def.min}" max="${def.max}" step="${def.step}" value="${initial}">
+                        <span class="config-default-mark" style="left: ${defaultPctClamped}%"
+                              title="Default: ${def.fmt(def.default)}"></span>
+                    </div>
                     <div class="config-help">${def.help}</div>
                 `;
                 panel.appendChild(wrap);
