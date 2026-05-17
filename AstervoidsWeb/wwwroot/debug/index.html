@@ -363,6 +363,20 @@
                 fmt: v => v.toFixed(2),
                 help: 'Linear slope mapping downward displacement (left OR right anchor) to brakeInput. brakeInput is clamped to TOUCH_BRAKE_MAX, and peak braking deceleration = SHIP_BRAKE_STRENGTH · TOUCH_BRAKE_MAX. Brake is pure damping (never reverses the ship). Higher = stronger braking per unit finger travel below the anchor.',
             },
+            {
+                key: 'TOUCH_STICK_TURN_DEADZONE_PX',
+                label: 'Touch turn dead-zone (CSS px)',
+                min: 0, max: 60, step: 1, default: 12,
+                fmt: v => `${Math.round(v)} px`,
+                help: 'Lateral (X-axis) dead-zone half-extent for turning. Finger displacements with |dx| ≤ this value produce zero turn input. Independent of the thrust/brake dead-zone — turning typically wants a smaller deadzone for crisp response. Sized in absolute CSS pixels so the on-screen physical size stays constant across devices and orientations.',
+            },
+            {
+                key: 'TOUCH_STICK_THRUST_DEADZONE_PX',
+                label: 'Touch thrust/brake dead-zone (CSS px)',
+                min: 0, max: 60, step: 1, default: 16,
+                fmt: v => `${Math.round(v)} px`,
+                help: 'Vertical (Y-axis) dead-zone half-extent for thrust and brake (applies to left and right anchors). Finger displacements with |dy| ≤ this value produce zero thrust/brake input. Larger values reduce accidental boost/brake from small finger drift. Sized in absolute CSS pixels for device-independent feel.',
+            },
         ];
 
         const STORAGE_KEY = 'astervoids-debug-config';

@@ -1038,12 +1038,22 @@
         // Affects touch routing only; keyboard always uses discrete inputs.
         // Override at runtime with ?cfg.TOUCH_VIRTUAL_STICK_ENABLED=true|false.
         TOUCH_VIRTUAL_STICK_ENABLED: true,
-        // Drag distance (as a fraction of the smaller viewport edge) that maps a
-        // stick displacement of 1.0 — i.e. how far the finger must move from the
-        // anchor to reach full deflection (before per-axis clamping).
-        TOUCH_STICK_RADIUS_FRAC: 0.10,
-        // Dead-zone (same units). Displacements within this distance are ignored.
-        TOUCH_STICK_DEADZONE_FRAC: 0.04,
+        // Touch anchor sizing is expressed in absolute CSS pixels (not viewport
+        // fractions) so the on-screen geometry stays a constant physical size
+        // across device sizes and orientations. CSS px are device-calibrated
+        // (Apple HIG: 44px = recommended min touch target; Material: 48dp), so
+        // PX values give a stable physical feel from phone to tablet.
+        //
+        // RADIUS: drag distance the finger must move from the anchor to reach
+        // a stick deflection of 1.0 (before per-axis clamping).
+        TOUCH_STICK_RADIUS_PX: 48,
+        // Dead-zone half-extents. The dead-zone is a RECTANGLE: lateral
+        // displacements with |dx| <= TURN_DEADZONE_PX are ignored for turning,
+        // and vertical displacements with |dy| <= THRUST_DEADZONE_PX are
+        // ignored for thrust/brake. Independent knobs let turning be more
+        // responsive (smaller deadzone) than thrust/brake.
+        TOUCH_STICK_TURN_DEADZONE_PX: 12,
+        TOUCH_STICK_THRUST_DEADZONE_PX: 16,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
@@ -1069,11 +1079,12 @@
         // (winner-takes-all per axis; each side already clamped individually).
         // Turning is always driven by the left anchor regardless of this flag.
         TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST: true,
-        // Movement-anchor overlay: an 8-vertex polygon centered on the active
-        // movement anchor whose basis form is a square matching the dead-zone
-        // exactly. When the finger is outside the dead-zone, exactly one
-        // vertex tracks the finger position (zone-→-vertex mapping documented
-        // in computeAnchorVertices). Local UI only; never serialized.
+        // Anchor overlay: an 8-vertex polygon centered on each active anchor
+        // whose basis form is a rectangle matching the dead-zone exactly
+        // (2·TOUCH_STICK_TURN_DEADZONE_PX wide × 2·TOUCH_STICK_THRUST_DEADZONE_PX
+        // tall). When the finger is outside the dead-zone, exactly one vertex
+        // tracks the finger position (zone-→-vertex mapping documented in
+        // computeAnchorVertices). Local UI only; never serialized.
         TOUCH_ANCHOR_VISUAL_ENABLED: true,
         TOUCH_ANCHOR_STROKE_COLOR: 'rgba(255,255,255,0.55)',
         TOUCH_ANCHOR_LINE_WIDTH: 2,
@@ -3012,15 +3023,15 @@
      *   dx, dy : finger position minus anchor position, in CSS pixels.
      *            Positive dx = right of anchor. Positive dy = below anchor
      *            (i.e. screen-down; conventional touch coords).
-     *   refPx  : reference dimension in CSS pixels, normally
-     *            min(viewport width, viewport height). Lets the response scale
-     *            with device size and survive rotation / aspect changes.
-     *   params : { radiusFrac, deadzoneFrac,
+     *   params : { radiusPx,
+     *              turnDeadzonePx, thrustDeadzonePx,
      *              turnGain, turnMax,
      *              thrustGain, thrustMax,
      *              brakeGain, brakeMax }
-     *            radiusFrac and deadzoneFrac are fractions of refPx (matching
-     *            CONFIG.TOUCH_STICK_RADIUS_FRAC / TOUCH_STICK_DEADZONE_FRAC).
+     *            All sizes are in CSS pixels (device-calibrated) so the
+     *            response is invariant under viewport rotation / device size.
+     *            turnDeadzonePx and thrustDeadzonePx are independent — turn
+     *            uses the lateral (X) deadzone, thrust/brake the vertical (Y).
      *
      * Returns { turn, thrust, brake }:
      *   turn   ∈ [-turnMax, +turnMax]   — drives ship.turnTarget
@@ -3029,21 +3040,22 @@
      *
      * Pure: no DOM / window access; exercised by touch-stick-input.test.mjs.
      */
-    function computeStickInput(dx, dy, refPx, params) {
-        const radiusPx = Math.max(1e-6, (params.radiusFrac || 0) * refPx);
-        const deadzonePx = Math.max(0, (params.deadzoneFrac || 0) * refPx);
+    function computeStickInput(dx, dy, params) {
+        const radiusPx = Math.max(1e-6, params.radiusPx || 0);
+        const turnDeadzonePx = Math.max(0, params.turnDeadzonePx || 0);
+        const thrustDeadzonePx = Math.max(0, params.thrustDeadzonePx || 0);
         const turnMax = Math.max(0, params.turnMax);
         const thrustMax = Math.max(0, params.thrustMax);
         const brakeMax = Math.max(0, params.brakeMax);
 
         // Lateral → turn (positive dx = right = clockwise screen rotation).
-        const xMag = Math.max(0, Math.abs(dx) - deadzonePx);
+        const xMag = Math.max(0, Math.abs(dx) - turnDeadzonePx);
         const xNorm = xMag === 0 ? 0 : Math.sign(dx) * (xMag / radiusPx);
         const rawTurn = xNorm * (params.turnGain || 0);
         const turn = Math.max(-turnMax, Math.min(turnMax, rawTurn));
 
         // Vertical: dy < 0 → upward → forward thrust; dy > 0 → downward → brake.
-        const yMag = Math.max(0, Math.abs(dy) - deadzonePx);
+        const yMag = Math.max(0, Math.abs(dy) - thrustDeadzonePx);
         const yNorm = yMag === 0 ? 0 : (yMag / radiusPx); // always ≥ 0
         let thrust = 0;
         let brake = 0;
@@ -3058,29 +3070,37 @@
     }
 
     /**
-     * Build the 8-vertex polygon for the movement-anchor overlay
+     * Build the 8-vertex polygon for the anchor overlay
      * (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED). Coordinates are returned relative
      * to the anchor — callers translate the canvas context to the anchor and
      * stroke the polygon as-is.
      *
-     *   dx, dy   : finger displacement from anchor (same units as halfSide;
-     *              positive dy = below anchor, matching screen coords).
-     *   halfSide : half the side length of the dead-zone square (positive).
-     *              Equal to TOUCH_STICK_DEADZONE_FRAC * refPx in callers.
+     *   dx, dy     : finger displacement from anchor (same units as halfWidth /
+     *                halfHeight; positive dy = below anchor, matching screen
+     *                coords).
+     *   halfWidth  : half the lateral side length of the dead-zone rectangle
+     *                (positive). Equal to TOUCH_STICK_TURN_DEADZONE_PX in
+     *                callers — independently controls the X-axis (turn) zone.
+     *   halfHeight : half the vertical side length of the dead-zone rectangle
+     *                (positive). Equal to TOUCH_STICK_THRUST_DEADZONE_PX in
+     *                callers — independently controls the Y-axis (thrust/brake)
+     *                zone. When halfWidth != halfHeight the basis polygon is a
+     *                rectangle, not a square; the 8-vertex layout (4 corners +
+     *                4 edge midpoints) still holds.
      *
      * Returns an 8-element array of {x, y} in clockwise screen order:
-     *     [0] top-left corner    (-halfSide, -halfSide)
-     *     [1] top edge midpoint  ( 0,        -halfSide)
-     *     [2] top-right corner   (+halfSide, -halfSide)
-     *     [3] right edge midpoint(+halfSide,  0)
-     *     [4] bottom-right corner(+halfSide, +halfSide)
-     *     [5] bottom edge mid    ( 0,        +halfSide)
-     *     [6] bottom-left corner (-halfSide, +halfSide)
-     *     [7] left edge midpoint (-halfSide,  0)
+     *     [0] top-left corner    (-halfWidth, -halfHeight)
+     *     [1] top edge midpoint  ( 0,         -halfHeight)
+     *     [2] top-right corner   (+halfWidth, -halfHeight)
+     *     [3] right edge midpoint(+halfWidth,  0)
+     *     [4] bottom-right corner(+halfWidth, +halfHeight)
+     *     [5] bottom edge mid    ( 0,         +halfHeight)
+     *     [6] bottom-left corner (-halfWidth, +halfHeight)
+     *     [7] left edge midpoint (-halfWidth,  0)
      *
      * Behaviour:
-     *   • Inside the dead-zone box (|dx| ≤ halfSide AND |dy| ≤ halfSide):
-     *     the basis polygon is returned unchanged (visually a plain square).
+     *   • Inside the dead-zone rectangle (|dx| ≤ halfWidth AND |dy| ≤ halfHeight):
+     *     the basis polygon is returned unchanged.
      *   • Outside: exactly one vertex is moved to (dx, dy) according to the
      *     3×3 exterior-zone mapping:
      *         left only        → left edge midpoint  (index 7)
@@ -3094,26 +3114,27 @@
      *
      * Pure (no DOM / globals); exercised by anchor-vertices.test.mjs.
      */
-    function computeAnchorVertices(dx, dy, halfSide) {
-        const h = Math.max(0, halfSide);
+    function computeAnchorVertices(dx, dy, halfWidth, halfHeight) {
+        const hx = Math.max(0, halfWidth);
+        const hy = Math.max(0, halfHeight);
         const verts = [
-            { x: -h, y: -h }, // 0 top-left
-            { x:  0, y: -h }, // 1 top-mid
-            { x: +h, y: -h }, // 2 top-right
-            { x: +h, y:  0 }, // 3 right-mid
-            { x: +h, y: +h }, // 4 bottom-right
-            { x:  0, y: +h }, // 5 bottom-mid
-            { x: -h, y: +h }, // 6 bottom-left
-            { x: -h, y:  0 }, // 7 left-mid
+            { x: -hx, y: -hy }, // 0 top-left
+            { x:  0,  y: -hy }, // 1 top-mid
+            { x: +hx, y: -hy }, // 2 top-right
+            { x: +hx, y:  0  }, // 3 right-mid
+            { x: +hx, y: +hy }, // 4 bottom-right
+            { x:  0,  y: +hy }, // 5 bottom-mid
+            { x: -hx, y: +hy }, // 6 bottom-left
+            { x: -hx, y:  0  }, // 7 left-mid
         ];
 
-        // Inside dead-zone box (inclusive of boundary) → basis polygon.
-        if (Math.abs(dx) <= h && Math.abs(dy) <= h) return verts;
+        // Inside dead-zone rectangle (inclusive of boundary) → basis polygon.
+        if (Math.abs(dx) <= hx && Math.abs(dy) <= hy) return verts;
 
-        const left  = dx < -h;
-        const right = dx > +h;
-        const above = dy < -h;
-        const below = dy > +h;
+        const left  = dx < -hx;
+        const right = dx > +hx;
+        const above = dy < -hy;
+        const below = dy > +hy;
 
         // Each exterior zone selects exactly one vertex index. The conditions
         // are mutually exclusive because we already returned for the inside
@@ -3923,6 +3944,8 @@
         'TOUCH_TURN_GAIN',
         'TOUCH_THRUST_GAIN',
         'TOUCH_BRAKE_GAIN',
+        'TOUCH_STICK_TURN_DEADZONE_PX',
+        'TOUCH_STICK_THRUST_DEADZONE_PX',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
@@ -5888,12 +5911,13 @@
         const sx = canvas.width  / rect.width;
         const sy = canvas.height / rect.height;
 
-        const refPxCss = Math.min(rect.width, rect.height);
-        // Convert dead-zone half-side to canvas px. Use sx for both axes since
+        // Dead-zone half-extents in canvas px. Use sx for both axes since
         // resizeCanvas keeps the canvas internal aspect equal to its CSS box
-        // (sx and sy are normally identical); picking one keeps the overlay
-        // an axis-aligned square even on a pixel-stretched canvas.
-        const halfSide = CONFIG.TOUCH_STICK_DEADZONE_FRAC * refPxCss * sx;
+        // (sx and sy are normally identical); using sx alone keeps the overlay
+        // axis-aligned on a pixel-stretched canvas. CSS px → canvas px scaling
+        // preserves on-screen physical size across device sizes / orientations.
+        const halfWidth  = CONFIG.TOUCH_STICK_TURN_DEADZONE_PX   * sx;
+        const halfHeight = CONFIG.TOUCH_STICK_THRUST_DEADZONE_PX * sx;
 
         ctx.save();
         ctx.strokeStyle = CONFIG.TOUCH_ANCHOR_STROKE_COLOR;
@@ -5904,7 +5928,7 @@
             const cy = (anchorY  - rect.top ) * sy;
             const dx = (currentX - anchorX) * sx;
             const dy = (currentY - anchorY) * sy;
-            const verts = computeAnchorVertices(dx, dy, halfSide);
+            const verts = computeAnchorVertices(dx, dy, halfWidth, halfHeight);
             ctx.save();
             ctx.translate(cx, cy);
             ctx.beginPath();
@@ -6439,11 +6463,10 @@
         // The fire anchor reuses computeStickInput but only the thrust/brake
         // fields are consumed downstream — its turn output is discarded.
         function updateStickAnalog() {
-            const rect = canvas.getBoundingClientRect();
-            const refPx = Math.max(1, Math.min(rect.width, rect.height));
             const params = {
-                radiusFrac: CONFIG.TOUCH_STICK_RADIUS_FRAC,
-                deadzoneFrac: CONFIG.TOUCH_STICK_DEADZONE_FRAC,
+                radiusPx: CONFIG.TOUCH_STICK_RADIUS_PX,
+                turnDeadzonePx: CONFIG.TOUCH_STICK_TURN_DEADZONE_PX,
+                thrustDeadzonePx: CONFIG.TOUCH_STICK_THRUST_DEADZONE_PX,
                 turnGain: CONFIG.TOUCH_TURN_GAIN,
                 turnMax: CONFIG.TOUCH_TURN_MAX,
                 thrustGain: CONFIG.TOUCH_THRUST_GAIN,
@@ -6454,7 +6477,7 @@
             if (stickInput.moveTouchId !== null) {
                 const dx = stickInput.moveCurrentX - stickInput.moveAnchorX;
                 const dy = stickInput.moveCurrentY - stickInput.moveAnchorY;
-                const out = computeStickInput(dx, dy, refPx, params);
+                const out = computeStickInput(dx, dy, params);
                 stickInput.turnTarget = out.turn;
                 stickInput.thrustInput = out.thrust;
                 stickInput.brakeInput = out.brake;
@@ -6466,7 +6489,7 @@
             if (stickInput.fireTouchId !== null) {
                 const dx = stickInput.fireCurrentX - stickInput.fireAnchorX;
                 const dy = stickInput.fireCurrentY - stickInput.fireAnchorY;
-                const out = computeStickInput(dx, dy, refPx, params);
+                const out = computeStickInput(dx, dy, params);
                 stickInput.fireThrustInput = out.thrust;
                 stickInput.fireBrakeInput  = out.brake;
             } else {
