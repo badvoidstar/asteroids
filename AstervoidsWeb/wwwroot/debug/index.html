@@ -109,30 +109,17 @@
         .config-range-wrap {
             position: relative;
             width: 100%;
-            padding-bottom: 11px;
         }
 
         .config-default-mark {
             position: absolute;
-            top: 100%;
-            width: 0;
-            height: 0;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-bottom: 5px solid #888;
-            transform: translateX(-50%);
-            pointer-events: none;
-        }
-
-        .config-default-mark::after {
-            content: '';
-            position: absolute;
-            left: 50%;
-            top: 5px;
-            transform: translateX(-50%);
-            width: 1px;
-            height: 4px;
+            top: 50%;
+            width: 2px;
+            height: 12px;
             background: #888;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            border-radius: 1px;
         }
 
         .config-control .config-help {
@@ -436,6 +423,15 @@
                     ? ((def.default - def.min) / (def.max - def.min)) * 100
                     : 0;
                 const defaultPctClamped = Math.max(0, Math.min(100, defaultPct));
+                // Native range thumbs are inset from the input edges by ~half
+                // their width, so the thumb centre at value=min sits at +8px
+                // and at value=max sits at -8px (assuming ~16px thumb). Mix a
+                // percentage with a compensating px offset so the marker lands
+                // on the actual thumb centre at the default value.
+                const THUMB_HALF_PX = 8;
+                const offsetPx = THUMB_HALF_PX - (THUMB_HALF_PX * 2 * defaultPctClamped) / 100;
+                const sign = offsetPx >= 0 ? '+' : '-';
+                const leftCss = `calc(${defaultPctClamped}% ${sign} ${Math.abs(offsetPx).toFixed(3)}px)`;
                 wrap.innerHTML = `
                     <label for="cfg-${def.key}">
                         <span>${def.label}</span>
@@ -444,7 +440,7 @@
                     <div class="config-range-wrap">
                         <input type="range" id="cfg-${def.key}"
                                min="${def.min}" max="${def.max}" step="${def.step}" value="${initial}">
-                        <span class="config-default-mark" style="left: ${defaultPctClamped}%"
+                        <span class="config-default-mark" style="left: ${leftCss}"
                               title="Default: ${def.fmt(def.default)}"></span>
                     </div>
                     <div class="config-help">${def.help}</div>
