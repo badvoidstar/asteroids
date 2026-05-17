@@ -1060,6 +1060,14 @@
         // is SHIP_BRAKE_STRENGTH * TOUCH_BRAKE_MAX. Set MAX=0 to disable braking.
         TOUCH_BRAKE_GAIN: 1.0,
         TOUCH_BRAKE_MAX: 1.0,
+        // Movement-anchor overlay: an 8-vertex polygon centered on the active
+        // movement anchor whose basis form is a square matching the dead-zone
+        // exactly. When the finger is outside the dead-zone, exactly one
+        // vertex tracks the finger position (zone-→-vertex mapping documented
+        // in computeAnchorVertices). Local UI only; never serialized.
+        TOUCH_ANCHOR_VISUAL_ENABLED: true,
+        TOUCH_ANCHOR_STROKE_COLOR: 'rgba(255,255,255,0.55)',
+        TOUCH_ANCHOR_LINE_WIDTH: 2,
 
         // Bullet settings (normalized)
         BULLET_SPEED: 1.0,          // Bullet speed per second (normalized)
@@ -3038,6 +3046,81 @@
             brake = Math.max(0, Math.min(brakeMax, raw));
         }
         return { turn, thrust, brake };
+    }
+
+    /**
+     * Build the 8-vertex polygon for the movement-anchor overlay
+     * (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED). Coordinates are returned relative
+     * to the anchor — callers translate the canvas context to the anchor and
+     * stroke the polygon as-is.
+     *
+     *   dx, dy   : finger displacement from anchor (same units as halfSide;
+     *              positive dy = below anchor, matching screen coords).
+     *   halfSide : half the side length of the dead-zone square (positive).
+     *              Equal to TOUCH_STICK_DEADZONE_FRAC * refPx in callers.
+     *
+     * Returns an 8-element array of {x, y} in clockwise screen order:
+     *     [0] top-left corner    (-halfSide, -halfSide)
+     *     [1] top edge midpoint  ( 0,        -halfSide)
+     *     [2] top-right corner   (+halfSide, -halfSide)
+     *     [3] right edge midpoint(+halfSide,  0)
+     *     [4] bottom-right corner(+halfSide, +halfSide)
+     *     [5] bottom edge mid    ( 0,        +halfSide)
+     *     [6] bottom-left corner (-halfSide, +halfSide)
+     *     [7] left edge midpoint (-halfSide,  0)
+     *
+     * Behaviour:
+     *   • Inside the dead-zone box (|dx| ≤ halfSide AND |dy| ≤ halfSide):
+     *     the basis polygon is returned unchanged (visually a plain square).
+     *   • Outside: exactly one vertex is moved to (dx, dy) according to the
+     *     3×3 exterior-zone mapping:
+     *         left only        → left edge midpoint  (index 7)
+     *         right only       → right edge midpoint (index 3)
+     *         above only       → top edge midpoint   (index 1)
+     *         below only       → bottom edge midpoint(index 5)
+     *         left & above     → top-left corner     (index 0)
+     *         right & above    → top-right corner    (index 2)
+     *         right & below    → bottom-right corner (index 4)
+     *         left & below     → bottom-left corner  (index 6)
+     *
+     * Pure (no DOM / globals); exercised by anchor-vertices.test.mjs.
+     */
+    function computeAnchorVertices(dx, dy, halfSide) {
+        const h = Math.max(0, halfSide);
+        const verts = [
+            { x: -h, y: -h }, // 0 top-left
+            { x:  0, y: -h }, // 1 top-mid
+            { x: +h, y: -h }, // 2 top-right
+            { x: +h, y:  0 }, // 3 right-mid
+            { x: +h, y: +h }, // 4 bottom-right
+            { x:  0, y: +h }, // 5 bottom-mid
+            { x: -h, y: +h }, // 6 bottom-left
+            { x: -h, y:  0 }, // 7 left-mid
+        ];
+
+        // Inside dead-zone box (inclusive of boundary) → basis polygon.
+        if (Math.abs(dx) <= h && Math.abs(dy) <= h) return verts;
+
+        const left  = dx < -h;
+        const right = dx > +h;
+        const above = dy < -h;
+        const below = dy > +h;
+
+        // Each exterior zone selects exactly one vertex index. The conditions
+        // are mutually exclusive because we already returned for the inside
+        // case (so at least one of left/right/above/below is true).
+        let idx;
+        if (left  && above) idx = 0; // top-left corner
+        else if (right && above) idx = 2; // top-right corner
+        else if (right && below) idx = 4; // bottom-right corner
+        else if (left  && below) idx = 6; // bottom-left corner
+        else if (above) idx = 1;          // above only → top-mid
+        else if (right) idx = 3;          // right only → right-mid
+        else if (below) idx = 5;          // below only → bottom-mid
+        else /* left */ idx = 7;          // left  only → left-mid
+
+        verts[idx] = { x: dx, y: dy };
+        return verts;
     }
 
     /**
@@ -5731,6 +5814,58 @@
     }
 
     /**
+     * Movement-anchor overlay (virtual-stick touch scheme).
+     * Renders the 8-vertex polygon produced by computeAnchorVertices, centered
+     * on the live movement anchor. Coordinate conversion: anchor/finger are in
+     * CSS px (Touch.clientX/Y); we map them to canvas internal coords via
+     * canvas.getBoundingClientRect().
+     *
+     * Drawn after the viewport restore so it lives in full-canvas coords and
+     * is never clipped by the aspect-locked gameplay viewport. Hidden on
+     * desktop, when no anchor is held, during pause / game-over, when the
+     * scheme is off, or when TOUCH_ANCHOR_VISUAL_ENABLED is false.
+     */
+    function drawMovementAnchor(ctx) {
+        if (!CONFIG.TOUCH_VIRTUAL_STICK_ENABLED) return;
+        if (!CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED) return;
+        if (!touchControlsEnabled) return;
+        if (stickInput.moveTouchId === null) return;
+        if (game.state !== 'playing' && game.state !== 'waveDelay') return;
+
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const sx = canvas.width  / rect.width;
+        const sy = canvas.height / rect.height;
+
+        const cx = (stickInput.moveAnchorX  - rect.left) * sx;
+        const cy = (stickInput.moveAnchorY  - rect.top ) * sy;
+        const dx = (stickInput.moveCurrentX - stickInput.moveAnchorX) * sx;
+        const dy = (stickInput.moveCurrentY - stickInput.moveAnchorY) * sy;
+
+        const refPxCss = Math.min(rect.width, rect.height);
+        // Convert dead-zone half-side to canvas px. Use sx for both axes since
+        // resizeCanvas keeps the canvas internal aspect equal to its CSS box
+        // (sx and sy are normally identical); picking one keeps the overlay
+        // an axis-aligned square even on a pixel-stretched canvas.
+        const halfSide = CONFIG.TOUCH_STICK_DEADZONE_FRAC * refPxCss * sx;
+
+        const verts = computeAnchorVertices(dx, dy, halfSide);
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.strokeStyle = CONFIG.TOUCH_ANCHOR_STROKE_COLOR;
+        ctx.lineWidth   = CONFIG.TOUCH_ANCHOR_LINE_WIDTH;
+        ctx.beginPath();
+        ctx.moveTo(verts[0].x, verts[0].y);
+        for (let i = 1; i < verts.length; i++) {
+            ctx.lineTo(verts[i].x, verts[i].y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    /**
      * Main game loop - called every frame
      * @param {number} timestamp - Current time from requestAnimationFrame
      */
@@ -5975,6 +6110,11 @@
             ctx.lineWidth = 2;
             ctx.strokeRect(game.viewport.x, game.viewport.y, game.viewport.width, game.viewport.height);
         }
+
+        // Touch overlay (virtual-stick anchor). Drawn last and in full-canvas
+        // coords so it sits on top of gameplay and isn't clipped by the
+        // aspect-locked viewport. No-op on desktop / when no anchor is held.
+        drawMovementAnchor(ctx);
         
         // Request next frame
         requestAnimationFrame(gameLoop);
