@@ -328,6 +328,41 @@
                 fmt: v => `${Math.round(v)}`,
                 help: 'On OnObjectReplaced (e.g. asteroid split), synthesize an extra snapshot at "local render time" carrying the parent\'s last-interpolated position. Bracket-search interpolates parent_pos → child authority_pos over one display delay, eliminating the spawn hitch on LAN and softening it under high latency. 0 = disable (revert to single-authority install: position discontinuity at every replace, magnitude proportional to (parent_vel − child_vel) × latency).',
             },
+            {
+                key: 'SHIP_TURN_SPEED',
+                label: 'Ship turn max speed (rad/frame)',
+                min: 0, max: 0.3, step: 0.005, default: 0.12,
+                fmt: v => `${v.toFixed(3)} (${(v * 60 * 180 / Math.PI).toFixed(0)} °/s)`,
+                help: 'Per-frame cap on ship angular speed (also the keyboard turn rate). Peak touch turn rate is SHIP_TURN_SPEED · TOUCH_TURN_MAX. Default 0.12 rad/frame ≈ 412°/s at 60fps.',
+            },
+            {
+                key: 'TOUCH_TURN_GAIN',
+                label: 'Touch displacement → turn-speed gain',
+                min: 0, max: 5, step: 0.1, default: 2.0,
+                fmt: v => v.toFixed(2),
+                help: 'Linear slope mapping the left-anchor lateral displacement (as a fraction of TOUCH_STICK_RADIUS_FRAC · refPx) to turnTarget. turnTarget is then clamped to ±TOUCH_TURN_MAX before multiplying by SHIP_TURN_SPEED. Higher = sharper turning per unit finger travel.',
+            },
+            {
+                key: 'SHIP_MAX_SPEED',
+                label: 'Ship max linear velocity',
+                min: 0, max: 3, step: 0.025, default: 0.8,
+                fmt: v => v.toFixed(3),
+                help: 'Per-frame cap on |velocity| of the ship (normalized refdim/s — same units as ASTEROID_MAX_SPEED). 0 = no cap (ship can keep accelerating indefinitely up to numeric limits).',
+            },
+            {
+                key: 'TOUCH_THRUST_GAIN',
+                label: 'Touch displacement → thrust gain',
+                min: 0, max: 5, step: 0.1, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: 'Linear slope mapping upward displacement (left OR right anchor) to thrustInput. thrustInput is clamped to TOUCH_THRUST_MAX, and peak forward accel = SHIP_THRUST · TOUCH_THRUST_MAX. Higher = stronger thrust per unit finger travel above the anchor.',
+            },
+            {
+                key: 'TOUCH_BRAKE_GAIN',
+                label: 'Touch displacement → brake gain',
+                min: 0, max: 5, step: 0.1, default: 1.0,
+                fmt: v => v.toFixed(2),
+                help: 'Linear slope mapping downward displacement (left OR right anchor) to brakeInput. brakeInput is clamped to TOUCH_BRAKE_MAX, and peak braking deceleration = SHIP_BRAKE_STRENGTH · TOUCH_BRAKE_MAX. Brake is pure damping (never reverses the ship). Higher = stronger braking per unit finger travel below the anchor.',
+            },
         ];
 
         const STORAGE_KEY = 'astervoids-debug-config';

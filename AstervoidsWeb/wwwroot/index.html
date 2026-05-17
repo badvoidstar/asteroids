@@ -1017,7 +1017,7 @@
         SHIP_SIZE: 0.025,           // Ship triangle size (normalized)
         SHIP_THRUST: 0.009,         // Acceleration per frame (normalized, ~0.15/600*60)
         SHIP_FRICTION: 0.99,        // Velocity decay (1 = no friction)
-        SHIP_TURN_SPEED: 0.08,      // Rotation speed in radians per frame
+        SHIP_TURN_SPEED: 0.12,      // Rotation speed in radians per frame
         SHIP_MAX_SPEED: 0.8,        // Maximum velocity per second (normalized)
         // Turning input ramping: time in seconds for the ship's angular speed to
         // ramp up from 0 to ±SHIP_TURN_SPEED (accel) or back down to 0 (decel).
@@ -1047,7 +1047,7 @@
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
-        TOUCH_TURN_GAIN: 1.0,
+        TOUCH_TURN_GAIN: 2.0,
         TOUCH_TURN_MAX: 1.0,
         // Forward-thrust mapping from upward displacement (finger above anchor).
         // thrustInput = clamp(|yNorm| * GAIN, 0, MAX). Peak forward accel is
@@ -3909,6 +3909,11 @@
         'DEFLECTION_SCALE',
         'MAX_EXTRAPOLATION',
         'SPAWN_BRIDGE_ENABLED',
+        'SHIP_TURN_SPEED',
+        'SHIP_MAX_SPEED',
+        'TOUCH_TURN_GAIN',
+        'TOUCH_THRUST_GAIN',
+        'TOUCH_BRAKE_GAIN',
     ]);
     debugChannel.onmessage = (event) => {
         const data = event.data;
