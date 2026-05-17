@@ -1057,7 +1057,7 @@
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
-        TOUCH_TURN_GAIN: 0.5,
+        TOUCH_TURN_GAIN: 1.0,
         TOUCH_TURN_MAX: 1.0,
         // Forward-thrust mapping from upward displacement (finger above anchor).
         // thrustInput = clamp(|yNorm| * GAIN, 0, MAX). Peak forward accel is
