@@ -1060,6 +1060,15 @@
         // is SHIP_BRAKE_STRENGTH * TOUCH_BRAKE_MAX. Set MAX=0 to disable braking.
         TOUCH_BRAKE_GAIN: 1.0,
         TOUCH_BRAKE_MAX: 1.0,
+        // When true (default): if the right (fire) anchor is held, it has
+        // exclusive control over thrust/brake — the left-anchor thrust/brake
+        // contribution is suppressed for as long as the right touch is active.
+        // When the right anchor is released, thrust/brake fall back to the
+        // left anchor (existing behaviour).
+        // When false: both anchors contribute, combined via Math.max
+        // (winner-takes-all per axis; each side already clamped individually).
+        // Turning is always driven by the left anchor regardless of this flag.
+        TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST: true,
         // Movement-anchor overlay: an 8-vertex polygon centered on the active
         // movement anchor whose basis form is a square matching the dead-zone
         // exactly. When the finger is outside the dead-zone, exactly one
@@ -5435,12 +5444,28 @@
                 brakeMag = stickInput.brakeInput;
             }
             // Right (fire) anchor also drives thrust/brake (vertical only);
-            // lateral motion is ignored. Combine via max() so either anchor
-            // can drive forward thrust or braking; values are already
-            // per-anchor clamped by computeStickInput, so max() stays clamped.
+            // lateral motion is ignored. Turning is always left-only and is
+            // unaffected by this branch.
+            //
+            // CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST (default true): while
+            // the right anchor is held, it takes exclusive control of
+            // thrust/brake — left-anchor contributions are dropped, even if
+            // the right finger sits in its dead-zone (yielding zero). When
+            // the right anchor is released, thrust/brake fall back to the
+            // left anchor automatically.
+            //
+            // When the flag is false, both anchors are combined via Math.max
+            // so either can drive forward thrust or braking; values are
+            // already per-anchor clamped by computeStickInput, so max() stays
+            // within the configured limits.
             if (stickInput.fireTouchId !== null) {
-                thrustMag = Math.max(thrustMag, stickInput.fireThrustInput);
-                brakeMag  = Math.max(brakeMag,  stickInput.fireBrakeInput);
+                if (CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST) {
+                    thrustMag = stickInput.fireThrustInput;
+                    brakeMag  = stickInput.fireBrakeInput;
+                } else {
+                    thrustMag = Math.max(thrustMag, stickInput.fireThrustInput);
+                    brakeMag  = Math.max(brakeMag,  stickInput.fireBrakeInput);
+                }
             }
             thrustOn = thrustMag > 0;
         }
