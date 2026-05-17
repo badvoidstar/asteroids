@@ -4042,6 +4042,12 @@
         turnTarget: 0,
         thrustInput: 0,
         brakeInput: 0,
+        // Cached per-frame analog values produced from the fire anchor.
+        // The right (fire) anchor drives thrust/brake too — lateral motion is
+        // ignored. handleInput combines these with the move-anchor outputs via
+        // max() so either anchor can drive forward thrust or braking.
+        fireThrustInput: 0,
+        fireBrakeInput: 0,
     };
 
     function resetStickInput() {
@@ -4050,6 +4056,8 @@
         stickInput.turnTarget = 0;
         stickInput.thrustInput = 0;
         stickInput.brakeInput = 0;
+        stickInput.fireThrustInput = 0;
+        stickInput.fireBrakeInput = 0;
     }
 
     function isVirtualStickEnabled() {
@@ -5414,13 +5422,21 @@
         let thrustMag = thrustOn ? 1 : 0;
         let brakeMag = 0;
 
-        if (isVirtualStickEnabled() && stickInput.moveTouchId !== null) {
-            // Stick overrides keyboard for movement axes while held. Fire stays OR'd
-            // (input.fire() already considers stickInput.fireTouchId), so a player can
-            // hold the move stick on the left and fire from a hardware key.
-            turnTarget = stickInput.turnTarget;
-            thrustMag = stickInput.thrustInput;
-            brakeMag = stickInput.brakeInput;
+        if (isVirtualStickEnabled()) {
+            // Left (move) anchor drives turn + thrust + brake when held.
+            if (stickInput.moveTouchId !== null) {
+                turnTarget = stickInput.turnTarget;
+                thrustMag = stickInput.thrustInput;
+                brakeMag = stickInput.brakeInput;
+            }
+            // Right (fire) anchor also drives thrust/brake (vertical only);
+            // lateral motion is ignored. Combine via max() so either anchor
+            // can drive forward thrust or braking; values are already
+            // per-anchor clamped by computeStickInput, so max() stays clamped.
+            if (stickInput.fireTouchId !== null) {
+                thrustMag = Math.max(thrustMag, stickInput.fireThrustInput);
+                brakeMag  = Math.max(brakeMag,  stickInput.fireBrakeInput);
+            }
             thrustOn = thrustMag > 0;
         }
 
@@ -5814,33 +5830,33 @@
     }
 
     /**
-     * Movement-anchor overlay (virtual-stick touch scheme).
+     * Virtual-stick anchor overlays (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED).
      * Renders the 8-vertex polygon produced by computeAnchorVertices, centered
-     * on the live movement anchor. Coordinate conversion: anchor/finger are in
-     * CSS px (Touch.clientX/Y); we map them to canvas internal coords via
-     * canvas.getBoundingClientRect().
+     * on each live anchor (left = move, right = fire). Coordinate conversion:
+     * anchor/finger are in CSS px (Touch.clientX/Y); we map them to canvas
+     * internal coords via canvas.getBoundingClientRect().
      *
      * Drawn after the viewport restore so it lives in full-canvas coords and
      * is never clipped by the aspect-locked gameplay viewport. Hidden on
      * desktop, when no anchor is held, during pause / game-over, when the
      * scheme is off, or when TOUCH_ANCHOR_VISUAL_ENABLED is false.
+     *
+     * The fire anchor uses the same overlay even though its lateral motion
+     * doesn't drive turning — keeping the visualization symmetric makes the
+     * dead-zone size legible on both halves and gives the player a consistent
+     * mental model of their finger position.
      */
-    function drawMovementAnchor(ctx) {
+    function drawStickAnchors(ctx) {
         if (!CONFIG.TOUCH_VIRTUAL_STICK_ENABLED) return;
         if (!CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED) return;
         if (!touchControlsEnabled) return;
-        if (stickInput.moveTouchId === null) return;
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
+        if (stickInput.moveTouchId === null && stickInput.fireTouchId === null) return;
 
         const rect = canvas.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) return;
         const sx = canvas.width  / rect.width;
         const sy = canvas.height / rect.height;
-
-        const cx = (stickInput.moveAnchorX  - rect.left) * sx;
-        const cy = (stickInput.moveAnchorY  - rect.top ) * sy;
-        const dx = (stickInput.moveCurrentX - stickInput.moveAnchorX) * sx;
-        const dy = (stickInput.moveCurrentY - stickInput.moveAnchorY) * sy;
 
         const refPxCss = Math.min(rect.width, rect.height);
         // Convert dead-zone half-side to canvas px. Use sx for both axes since
@@ -5849,19 +5865,37 @@
         // an axis-aligned square even on a pixel-stretched canvas.
         const halfSide = CONFIG.TOUCH_STICK_DEADZONE_FRAC * refPxCss * sx;
 
-        const verts = computeAnchorVertices(dx, dy, halfSide);
-
         ctx.save();
-        ctx.translate(cx, cy);
         ctx.strokeStyle = CONFIG.TOUCH_ANCHOR_STROKE_COLOR;
         ctx.lineWidth   = CONFIG.TOUCH_ANCHOR_LINE_WIDTH;
-        ctx.beginPath();
-        ctx.moveTo(verts[0].x, verts[0].y);
-        for (let i = 1; i < verts.length; i++) {
-            ctx.lineTo(verts[i].x, verts[i].y);
+
+        function strokeAnchor(anchorX, anchorY, currentX, currentY) {
+            const cx = (anchorX  - rect.left) * sx;
+            const cy = (anchorY  - rect.top ) * sy;
+            const dx = (currentX - anchorX) * sx;
+            const dy = (currentY - anchorY) * sy;
+            const verts = computeAnchorVertices(dx, dy, halfSide);
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.beginPath();
+            ctx.moveTo(verts[0].x, verts[0].y);
+            for (let i = 1; i < verts.length; i++) {
+                ctx.lineTo(verts[i].x, verts[i].y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            ctx.restore();
         }
-        ctx.closePath();
-        ctx.stroke();
+
+        if (stickInput.moveTouchId !== null) {
+            strokeAnchor(stickInput.moveAnchorX, stickInput.moveAnchorY,
+                         stickInput.moveCurrentX, stickInput.moveCurrentY);
+        }
+        if (stickInput.fireTouchId !== null) {
+            strokeAnchor(stickInput.fireAnchorX, stickInput.fireAnchorY,
+                         stickInput.fireCurrentX, stickInput.fireCurrentY);
+        }
+
         ctx.restore();
     }
 
@@ -6114,7 +6148,7 @@
         // Touch overlay (virtual-stick anchor). Drawn last and in full-canvas
         // coords so it sits on top of gameplay and isn't clipped by the
         // aspect-locked viewport. No-op on desktop / when no anchor is held.
-        drawMovementAnchor(ctx);
+        drawStickAnchors(ctx);
         
         // Request next frame
         requestAnimationFrame(gameLoop);
@@ -6370,24 +6404,27 @@
         }
 
         // Frame-time updater: recomputes cached analog values from the current
-        // move anchor each animation frame, so changes in viewport size /
-        // orientation immediately affect mapping without per-event work.
+        // move and fire anchors each animation frame, so changes in viewport
+        // size / orientation immediately affect mapping without per-event work.
+        // The fire anchor reuses computeStickInput but only the thrust/brake
+        // fields are consumed downstream — its turn output is discarded.
         function updateStickAnalog() {
+            const rect = canvas.getBoundingClientRect();
+            const refPx = Math.max(1, Math.min(rect.width, rect.height));
+            const params = {
+                radiusFrac: CONFIG.TOUCH_STICK_RADIUS_FRAC,
+                deadzoneFrac: CONFIG.TOUCH_STICK_DEADZONE_FRAC,
+                turnGain: CONFIG.TOUCH_TURN_GAIN,
+                turnMax: CONFIG.TOUCH_TURN_MAX,
+                thrustGain: CONFIG.TOUCH_THRUST_GAIN,
+                thrustMax: CONFIG.TOUCH_THRUST_MAX,
+                brakeGain: CONFIG.TOUCH_BRAKE_GAIN,
+                brakeMax: CONFIG.TOUCH_BRAKE_MAX,
+            };
             if (stickInput.moveTouchId !== null) {
-                const rect = canvas.getBoundingClientRect();
-                const refPx = Math.max(1, Math.min(rect.width, rect.height));
                 const dx = stickInput.moveCurrentX - stickInput.moveAnchorX;
                 const dy = stickInput.moveCurrentY - stickInput.moveAnchorY;
-                const out = computeStickInput(dx, dy, refPx, {
-                    radiusFrac: CONFIG.TOUCH_STICK_RADIUS_FRAC,
-                    deadzoneFrac: CONFIG.TOUCH_STICK_DEADZONE_FRAC,
-                    turnGain: CONFIG.TOUCH_TURN_GAIN,
-                    turnMax: CONFIG.TOUCH_TURN_MAX,
-                    thrustGain: CONFIG.TOUCH_THRUST_GAIN,
-                    thrustMax: CONFIG.TOUCH_THRUST_MAX,
-                    brakeGain: CONFIG.TOUCH_BRAKE_GAIN,
-                    brakeMax: CONFIG.TOUCH_BRAKE_MAX,
-                });
+                const out = computeStickInput(dx, dy, refPx, params);
                 stickInput.turnTarget = out.turn;
                 stickInput.thrustInput = out.thrust;
                 stickInput.brakeInput = out.brake;
@@ -6395,6 +6432,16 @@
                 stickInput.turnTarget = 0;
                 stickInput.thrustInput = 0;
                 stickInput.brakeInput = 0;
+            }
+            if (stickInput.fireTouchId !== null) {
+                const dx = stickInput.fireCurrentX - stickInput.fireAnchorX;
+                const dy = stickInput.fireCurrentY - stickInput.fireAnchorY;
+                const out = computeStickInput(dx, dy, refPx, params);
+                stickInput.fireThrustInput = out.thrust;
+                stickInput.fireBrakeInput  = out.brake;
+            } else {
+                stickInput.fireThrustInput = 0;
+                stickInput.fireBrakeInput  = 0;
             }
             requestAnimationFrame(updateStickAnalog);
         }
@@ -6447,6 +6494,8 @@
                     stickInput.brakeInput = 0;
                 } else if (t.identifier === stickInput.fireTouchId) {
                     stickInput.fireTouchId = null;
+                    stickInput.fireThrustInput = 0;
+                    stickInput.fireBrakeInput  = 0;
                 }
             }
         }
