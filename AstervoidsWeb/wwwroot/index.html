@@ -3304,6 +3304,25 @@
     }
 
     /**
+     * Combine two signed turn-input commands into a single command in
+     * [−1, +1]. Used by the polar touch scheme to merge the left-anchor's
+     * heading-tracking turn with the right-anchor's rectilinear turn so
+     * both fingers can contribute simultaneously (and oppose each other
+     * symmetrically when needed). Each per-anchor input is already clamped
+     * to ≤ TOUCH_TURN_MAX (≤ 1), so the clamp here only kicks in when both
+     * fingers are pushing past 0.5 in the same direction; in normal play
+     * the sum stays in-range and the clamp is a no-op.
+     *
+     * Pure: no DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function mergeTurnInputs(a, b) {
+        const sum = (a || 0) + (b || 0);
+        if (sum >  1) return  1;
+        if (sum < -1) return -1;
+        return sum;
+    }
+
+    /**
      * Tangent-line geometry for the polar anchor's "two-sided triangle"
      * overlay. The triangle's apex sits at the perturbed touch point P (at
      * distance `r` from the anchor, angle `theta`); the two visible edges
@@ -4375,9 +4394,12 @@
         thrustInput: 0,
         brakeInput: 0,
         // Cached per-frame analog values produced from the fire anchor.
-        // The right (fire) anchor drives thrust/brake too — lateral motion is
-        // ignored. handleInput combines these with the move-anchor outputs via
-        // max() so either anchor can drive forward thrust or braking.
+        // The right (fire) anchor drives thrust/brake too — lateral motion
+        // produces a rectilinear turn input (used by handleInput's POLAR
+        // branch, ignored by the rectilinear branch). handleInput combines
+        // these with the move-anchor outputs (thrust/brake via max();
+        // turn via signed sum + clamp — see mergeTurnInputs).
+        fireTurnTarget: 0,
         fireThrustInput: 0,
         fireBrakeInput: 0,
         // Polar-scheme left-anchor cache (see computePolarStickInput).
@@ -4395,6 +4417,7 @@
         stickInput.turnTarget = 0;
         stickInput.thrustInput = 0;
         stickInput.brakeInput = 0;
+        stickInput.fireTurnTarget = 0;
         stickInput.fireThrustInput = 0;
         stickInput.fireBrakeInput = 0;
         stickInput.polarActive = false;
@@ -5802,23 +5825,28 @@
                     brakeMag = stickInput.brakeInput;
                 }
             }
-            // Right (fire) anchor also drives thrust/brake (vertical only);
-            // lateral motion is ignored. Turning is always left-only and is
-            // unaffected by this branch. The right anchor uses the rectilinear
-            // mapping in BOTH the rectilinear and polar schemes — the polar
-            // scheme only changes the left-anchor semantics.
+            // Right (fire) anchor also drives thrust/brake — and, in the
+            // POLAR scheme only, turn as well (rectilinear-style lateral
+            // mapping; lets the right thumb steer + fire while the left
+            // thumb handles polar heading/thrust). In the rectilinear
+            // scheme the right-anchor turn is ignored and turning remains
+            // exclusively a left-anchor function.
             //
-            // CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST (default true): while
-            // the right anchor is held, it takes exclusive control of
-            // thrust/brake — left-anchor contributions are dropped, even if
-            // the right finger sits in its dead-zone (yielding zero). When
-            // the right anchor is released, thrust/brake fall back to the
-            // left anchor automatically.
+            // CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST (default false):
+            // when true, while the right anchor is held it takes exclusive
+            // control of thrust/brake — left-anchor contributions are
+            // dropped, even if the right finger sits in its dead-zone
+            // (yielding zero). When the right anchor is released,
+            // thrust/brake fall back to the left anchor automatically.
             //
-            // When the flag is false, both anchors are combined via Math.max
-            // so either can drive forward thrust or braking; values are
-            // already per-anchor clamped by computeStickInput, so max() stays
-            // within the configured limits.
+            // When the flag is false (default), both anchors are combined
+            // via Math.max so either can drive forward thrust or braking;
+            // values are already per-anchor clamped by computeStickInput,
+            // so max() stays within the configured limits.
+            //
+            // Turn merging in POLAR (always-combine; no exclusive flag):
+            // signed-sum-and-clamp via mergeTurnInputs — opposing fingers
+            // cancel, cooperating fingers reinforce up to ±1.
             if (stickInput.fireTouchId !== null) {
                 if (CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST) {
                     thrustMag = stickInput.fireThrustInput;
@@ -5826,6 +5854,9 @@
                 } else {
                     thrustMag = Math.max(thrustMag, stickInput.fireThrustInput);
                     brakeMag  = Math.max(brakeMag,  stickInput.fireBrakeInput);
+                }
+                if (scheme === TOUCH_SCHEMES.POLAR) {
+                    turnTarget = mergeTurnInputs(turnTarget, stickInput.fireTurnTarget);
                 }
             }
             thrustOn = thrustMag > 0;
@@ -6951,9 +6982,14 @@
                 const dx = stickInput.fireCurrentX - stickInput.fireAnchorX;
                 const dy = stickInput.fireCurrentY - stickInput.fireAnchorY;
                 const out = computeStickInput(dx, dy, rectParams);
+                // Lateral motion → turn (consumed by handleInput only when
+                // scheme=polar; the rectilinear scheme ignores fireTurnTarget
+                // and keeps turning exclusively on the left anchor).
+                stickInput.fireTurnTarget  = out.turn;
                 stickInput.fireThrustInput = out.thrust;
                 stickInput.fireBrakeInput  = out.brake;
             } else {
+                stickInput.fireTurnTarget  = 0;
                 stickInput.fireThrustInput = 0;
                 stickInput.fireBrakeInput  = 0;
             }
@@ -7013,6 +7049,7 @@
                     stickInput.polarBrake = 0;
                 } else if (t.identifier === stickInput.fireTouchId) {
                     stickInput.fireTouchId = null;
+                    stickInput.fireTurnTarget  = 0;
                     stickInput.fireThrustInput = 0;
                     stickInput.fireBrakeInput  = 0;
                 }

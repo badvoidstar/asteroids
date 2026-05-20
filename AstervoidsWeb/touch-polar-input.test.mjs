@@ -30,6 +30,7 @@ const shortestAngleDelta = extractFn('shortestAngleDelta');
 const computePolarStickInput = extractFn('computePolarStickInput');
 const attainableTurnTarget = extractFn('attainableTurnTarget');
 const polarAnchorTangentGeometry = extractFn('polarAnchorTangentGeometry');
+const mergeTurnInputs = extractFn('mergeTurnInputs');
 
 // Reference parameter set: 100 px stick radius (drives p2 / thrust scale),
 // 10 px dead-zone, 50 px threshold, unit gains and unit clamps. Choices keep
@@ -481,5 +482,49 @@ test('polarAnchorTangentGeometry: triangle apex equals P regardless of orientati
         const g = polarAnchorTangentGeometry(r, d, theta);
         assert.ok(Math.abs(g.apexX - r * Math.cos(theta)) < 1e-12);
         assert.ok(Math.abs(g.apexY - r * Math.sin(theta)) < 1e-12);
+    }
+});
+
+// ─── mergeTurnInputs ───────────────────────────────────────────────────────
+//
+// Combines the polar scheme's left-anchor turn (heading-tracking, signed,
+// already clamped to ±turnMax ≤ ±1) with the right-anchor's rectilinear
+// turn (signed, also already clamped) into a single command in [−1, +1].
+// Pure: no DOM / globals.
+
+test('mergeTurnInputs: sum within range passes through unchanged', () => {
+    assert.equal(mergeTurnInputs(0.3, 0.4), 0.7);
+    assert.equal(mergeTurnInputs(-0.3, 0.4), 0.10000000000000003); // FP exact
+    assert.equal(mergeTurnInputs(0, 0), 0);
+    assert.equal(mergeTurnInputs(0.5, 0), 0.5);
+    assert.equal(mergeTurnInputs(0, -0.5), -0.5);
+});
+
+test('mergeTurnInputs: opposing equal-magnitude inputs cancel to zero', () => {
+    assert.equal(mergeTurnInputs(0.7, -0.7), 0);
+    assert.equal(mergeTurnInputs(-1, 1), 0);
+});
+
+test('mergeTurnInputs: cooperating inputs that sum past +1 clamp to +1', () => {
+    assert.equal(mergeTurnInputs(0.8, 0.6), 1);
+    assert.equal(mergeTurnInputs(1, 1), 1);
+    assert.equal(mergeTurnInputs(0.9, 0.9), 1);
+});
+
+test('mergeTurnInputs: cooperating negatives that sum past −1 clamp to −1', () => {
+    assert.equal(mergeTurnInputs(-0.8, -0.6), -1);
+    assert.equal(mergeTurnInputs(-1, -1), -1);
+});
+
+test('mergeTurnInputs: null / undefined inputs treated as 0 (defensive)', () => {
+    assert.equal(mergeTurnInputs(undefined, 0.4), 0.4);
+    assert.equal(mergeTurnInputs(null, -0.3), -0.3);
+    assert.equal(mergeTurnInputs(0.5, undefined), 0.5);
+    assert.equal(mergeTurnInputs(null, null), 0);
+});
+
+test('mergeTurnInputs: commutative', () => {
+    for (const [a, b] of [[0.3, 0.4], [-0.5, 0.2], [0.8, 0.7], [-0.9, -0.4]]) {
+        assert.equal(mergeTurnInputs(a, b), mergeTurnInputs(b, a));
     }
 });
