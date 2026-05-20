@@ -1086,7 +1086,7 @@
         // brake and r=THRESHOLD is no brake. This lets the dead-zone double
         // as the "high brake" region of the control.
         TOUCH_POLAR_DEADZONE_PX: 16,
-        TOUCH_POLAR_THRESHOLD_PX: 80,
+        TOUCH_POLAR_THRESHOLD_PX: 64,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
@@ -1119,7 +1119,14 @@
         // tracks the finger position (zone-→-vertex mapping documented in
         // computeAnchorVertices). Local UI only; never serialized.
         TOUCH_ANCHOR_VISUAL_ENABLED: true,
-        TOUCH_ANCHOR_STROKE_COLOR: 'rgba(255,255,255,0.55)',
+        // Basis stroke color used by every anchor overlay (rectilinear
+        // 8-vertex polygon AND polar circles). The polar anchor overrides
+        // this on the threshold circle when r > threshold (it switches to
+        // CONFIG.THRUST_COLOR to signal that p2 is now driving thrust). Any
+        // CSS color string works (named, hex, rgb(), rgba(), hsl(), …).
+        // Default is 50% grey at the historical 0.55 alpha for parity with
+        // the previous white default's visibility.
+        TOUCH_ANCHOR_STROKE_COLOR: 'rgba(128,128,128,0.55)',
         TOUCH_ANCHOR_LINE_WIDTH: 2,
 
         // Bullet settings (normalized)
@@ -6238,22 +6245,31 @@
             const r = Math.hypot(dx, dy);
             const deadZone  = CONFIG.TOUCH_POLAR_DEADZONE_PX  * sx;
             const threshold = CONFIG.TOUCH_POLAR_THRESHOLD_PX * sx;
+            const pastThreshold = r > threshold;
             ctx.save();
             ctx.translate(cx, cy);
             // Dead-zone circle: always shown while the anchor is active.
             ctx.beginPath();
             ctx.arc(0, 0, deadZone, 0, Math.PI * 2);
             ctx.stroke();
-            // Threshold circle: always shown while the anchor is active so the
-            // player has a constant visual reference for the turn-vs-thrust
-            // transition radius — regardless of how far the finger has moved.
+            // Threshold circle: always shown while the anchor is active so
+            // the player has a constant visual reference for the
+            // turn-vs-thrust transition radius. Once the finger crosses the
+            // threshold the dynamic circle is no longer drawn (it would just
+            // expand outside the threshold ring), so we recolor the threshold
+            // ring to THRUST_COLOR to give a clear "thrust engaged" signal —
+            // matches the ship's exhaust flame color.
+            ctx.save();
+            if (pastThreshold) ctx.strokeStyle = CONFIG.THRUST_COLOR;
             ctx.beginPath();
             ctx.arc(0, 0, threshold, 0, Math.PI * 2);
             ctx.stroke();
-            // Dynamic circle: only when the finger reaches the dead-zone, so
-            // it visualizes the live perturbation length the moment p1
-            // starts ramping.
-            if (r >= deadZone) {
+            ctx.restore();
+            // Dynamic circle: only when the finger reaches the dead-zone AND
+            // has not yet crossed the threshold. Past the threshold the
+            // recolored threshold ring takes over the "thrust active"
+            // signaling and the dynamic circle would only clutter the view.
+            if (r >= deadZone && !pastThreshold) {
                 ctx.beginPath();
                 ctx.arc(0, 0, r, 0, Math.PI * 2);
                 ctx.stroke();

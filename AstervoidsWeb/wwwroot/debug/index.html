@@ -397,7 +397,7 @@
             {
                 key: 'TOUCH_POLAR_THRESHOLD_PX',
                 label: 'Polar left anchor threshold radius (CSS px)',
-                min: 4, max: 200, step: 1, default: 80,
+                min: 4, max: 200, step: 1, default: 64,
                 fmt: v => `${Math.round(v)} px`,
                 help: 'Polar scheme only (left anchor). Radius at which the 1st parameter (p1, drives turn-speed) reaches 1.0 and at which brake reaches 0. Between the dead-zone and the threshold, p1 ramps 0→1 driving turn. Brake = clamp01(1 − r/THRESHOLD) across the WHOLE 0..threshold range (independent of the dead-zone), so r=0 = full brake. Past the threshold p1 stays at 1 (full turn, no brake) and the 2nd parameter (p2, drives thrust) ramps 0→1 over an additional TOUCH_STICK_RADIUS_PX of finger travel.',
             },
