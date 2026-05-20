@@ -28,6 +28,7 @@ function extractFn(signaturePrefix) {
 
 const shortestAngleDelta = extractFn('shortestAngleDelta');
 const computePolarStickInput = extractFn('computePolarStickInput');
+const attainableTurnTarget = extractFn('attainableTurnTarget');
 
 // Reference parameter set: 100 px stick radius (drives p2 / thrust scale),
 // 10 px dead-zone, 50 px threshold, unit gains and unit clamps. Choices keep
@@ -244,4 +245,110 @@ test('graceful with zero radiusPx (no NaN / no infinity)', () => {
     // p1 saturates → turnMagnitude = turnMax; p2 is huge → thrust clamps to thrustMax.
     assert.equal(out.turnMagnitude, params.turnMax);
     assert.equal(out.thrust, params.thrustMax);
+});
+
+// ─── attainableTurnTarget ──────────────────────────────────────────────────
+//
+// Reference physics for these tests:
+//   rate (SHIP_TURN_SPEED default) = 0.12 rad/frame
+//   dt = 1 (one 60fps frame)
+//   At maxMagnitude = 1.0 the ship sweeps 0.12 rad in one frame.
+//   At maxMagnitude = 0.5 the ship sweeps 0.06 rad in one frame.
+const TURN_RATE = 0.12;
+
+test('attainableTurnTarget: delta=0 → returns 0 (idle)', () => {
+    assert.equal(attainableTurnTarget(0, 1.0, TURN_RATE, 1), 0);
+});
+
+test('attainableTurnTarget: maxMagnitude=0 → returns 0 regardless of delta', () => {
+    assert.equal(attainableTurnTarget(0.5, 0, TURN_RATE, 1), 0);
+    assert.equal(attainableTurnTarget(-0.5, 0, TURN_RATE, 1), 0);
+});
+
+test('attainableTurnTarget: large delta → returns ±maxMagnitude (full magnitude)', () => {
+    // |delta|=0.5 ≫ 0.12 → command full 1.0.
+    assert.equal(attainableTurnTarget(0.5, 1.0, TURN_RATE, 1), 1.0);
+    assert.equal(attainableTurnTarget(-0.5, 1.0, TURN_RATE, 1), -1.0);
+});
+
+test('attainableTurnTarget: delta exactly at attainable-step → returns ±maxMagnitude', () => {
+    // |delta| = rate · mag · dt → exactly attainable at full mag.
+    const delta = TURN_RATE * 1.0 * 1; // 0.12
+    assert.equal(attainableTurnTarget(delta, 1.0, TURN_RATE, 1), 1.0);
+    assert.equal(attainableTurnTarget(-delta, 1.0, TURN_RATE, 1), -1.0);
+});
+
+test('attainableTurnTarget: small delta → returns delta/(rate·dt), lands exactly on target', () => {
+    // |delta|=0.06 with rate 0.12, dt 1 → command 0.5 (half magnitude).
+    // Verify by simulating one Ship.update step: angle += rate · turnInput · dt.
+    const delta = 0.06;
+    const cmd = attainableTurnTarget(delta, 1.0, TURN_RATE, 1);
+    assert.ok(Math.abs(cmd - 0.5) < 1e-12, `cmd=${cmd}`);
+    const stepped = TURN_RATE * cmd * 1; // angle advanced by this much
+    assert.ok(Math.abs(stepped - delta) < 1e-12,
+        `stepped=${stepped} should land exactly on delta=${delta}`);
+});
+
+test('attainableTurnTarget: negative small delta lands exactly (preserves sign)', () => {
+    const delta = -0.06;
+    const cmd = attainableTurnTarget(delta, 1.0, TURN_RATE, 1);
+    assert.ok(Math.abs(cmd + 0.5) < 1e-12, `cmd=${cmd}`);
+    const stepped = TURN_RATE * cmd * 1;
+    assert.ok(Math.abs(stepped - delta) < 1e-12);
+});
+
+test('attainableTurnTarget: respects maxMagnitude cap even when |delta| would justify more', () => {
+    // p1=0.5 cap. Even with a large delta we never command more than 0.5.
+    assert.equal(attainableTurnTarget(0.5, 0.5, TURN_RATE, 1), 0.5);
+    assert.equal(attainableTurnTarget(-0.5, 0.5, TURN_RATE, 1), -0.5);
+});
+
+test('attainableTurnTarget: cap scales with maxMagnitude (the saturation knee moves)', () => {
+    // With maxMagnitude=0.5 the per-frame reach is 0.06 rad. A delta of 0.03
+    // is below that, so command = 0.03 / (0.12 · 1) = 0.25.
+    const cmd = attainableTurnTarget(0.03, 0.5, TURN_RATE, 1);
+    assert.ok(Math.abs(cmd - 0.25) < 1e-12, `cmd=${cmd}`);
+    // Verify exact landing.
+    assert.ok(Math.abs(TURN_RATE * cmd * 1 - 0.03) < 1e-12);
+});
+
+test('attainableTurnTarget: dt scaling — half-step frame allows half the angular reach', () => {
+    // dt=0.5 → per-frame reach at full mag = 0.06. delta=0.06 attains full mag.
+    assert.equal(attainableTurnTarget(0.06, 1.0, TURN_RATE, 0.5), 1.0);
+    // delta=0.03 → command 0.5 (because 0.03 / (0.12 · 0.5) = 0.5).
+    const cmd = attainableTurnTarget(0.03, 1.0, TURN_RATE, 0.5);
+    assert.ok(Math.abs(cmd - 0.5) < 1e-12, `cmd=${cmd}`);
+    assert.ok(Math.abs(TURN_RATE * cmd * 0.5 - 0.03) < 1e-12);
+});
+
+test('attainableTurnTarget: zero or negative dt/rate → 0 (no physical step prescribable)', () => {
+    assert.equal(attainableTurnTarget(0.5, 1.0, TURN_RATE, 0), 0);
+    assert.equal(attainableTurnTarget(0.5, 1.0, 0, 1), 0);
+    assert.equal(attainableTurnTarget(0.5, 1.0, -1, 1), 0);
+    assert.equal(attainableTurnTarget(0.5, 1.0, TURN_RATE, -1), 0);
+});
+
+test('attainableTurnTarget: simulated overshoot scenario settles in one step (no oscillation)', () => {
+    // Setup: ship at angle 0, target angle = 0.05 rad. Full-magnitude bang-
+    // bang would command 1.0 → step 0.12, overshoot to 0.12 - 0.05 = 0.07
+    // past the target. Next frame |delta|=0.07, sign flips, repeat → wobble.
+    // With the attainable clamp the controller commands |cmd| = 0.05/0.12 =
+    // 0.4166…, the ship advances by exactly 0.05 rad, and |delta| → 0.
+    let shipAngle = 0;
+    const target = 0.05;
+    const delta = shortestAngleDelta(target, shipAngle);
+    const cmd = attainableTurnTarget(delta, 1.0, TURN_RATE, 1);
+    shipAngle += TURN_RATE * cmd * 1;
+    assert.ok(Math.abs(shipAngle - target) < 1e-12,
+        `ship landed at ${shipAngle}, expected ${target}`);
+    const nextDelta = shortestAngleDelta(target, shipAngle);
+    assert.ok(Math.abs(nextDelta) < 1e-12, `residual delta ${nextDelta}`);
+});
+
+test('attainableTurnTarget: works across the ±π wrap boundary', () => {
+    // Ship at +3π/4, target at -3π/4: shortest delta = +π/2 (turn +).
+    // π/2 ≫ 0.12 → full magnitude.
+    const delta = shortestAngleDelta(-3 * Math.PI / 4, 3 * Math.PI / 4);
+    const cmd = attainableTurnTarget(delta, 1.0, TURN_RATE, 1);
+    assert.equal(cmd, 1.0);
 });

@@ -1082,7 +1082,7 @@
         //                                     THRESHOLD + RADIUS, before
         //                                     gain/clamp), driving thrust.
         TOUCH_POLAR_DEADZONE_PX: 16,
-        TOUCH_POLAR_THRESHOLD_PX: 64,
+        TOUCH_POLAR_THRESHOLD_PX: 96,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
@@ -3161,6 +3161,43 @@
         const diff = targetAngle - currentAngle;
         // atan2(sin, cos) collapses arbitrary multiples of 2π into (−π, +π].
         return Math.atan2(Math.sin(diff), Math.cos(diff));
+    }
+
+    /**
+     * Clamp a signed turn-input command so the ship can never overshoot the
+     * target angle in a single simulation frame. Without this, the polar
+     * scheme bangs ±polarTurnMagnitude every frame and the ship oscillates
+     * around the target whenever |delta| is smaller than the per-frame
+     * angular sweep at full magnitude.
+     *
+     *   delta         : signed shortest angular delta (radians) the ship
+     *                   needs to rotate by, e.g. shortestAngleDelta(target, ship).
+     *   maxMagnitude  : configured cap on |turnInput| (= p1 · turnGain
+     *                   already clamped to turnMax). Treated as the upper
+     *                   limit of the returned magnitude.
+     *   ratePerFrame  : rotation rate at |turnInput|=1, in radians per 60fps
+     *                   frame (= CONFIG.SHIP_TURN_SPEED). Ship.update applies
+     *                   angle += ratePerFrame · turnInput · dt, so the
+     *                   attainable angular sweep this frame is
+     *                   ratePerFrame · |turnInput| · dt.
+     *   dt            : frame delta multiplier (1.0 = one 60fps frame).
+     *
+     * Returns the signed turn-input command:
+     *   |delta| ≥ ratePerFrame · maxMagnitude · dt → ±maxMagnitude (full)
+     *   |delta| <  ratePerFrame · maxMagnitude · dt → ±(|delta|/(rate·dt))
+     *                                                 (lands exactly on target)
+     *
+     * Pure: no DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function attainableTurnTarget(delta, maxMagnitude, ratePerFrame, dt) {
+        if (maxMagnitude <= 0) return 0;
+        if (delta === 0) return 0;
+        const denom = ratePerFrame * dt;
+        // Pathological inputs (zero/negative rate or dt) collapse to no
+        // command — there's no physical step we can prescribe.
+        if (denom <= 0) return 0;
+        const cappedMag = Math.min(maxMagnitude, Math.abs(delta) / denom);
+        return Math.sign(delta) * cappedMag;
     }
 
     /**
@@ -5674,7 +5711,15 @@
                 if (scheme === TOUCH_SCHEMES.POLAR && stickInput.polarActive) {
                     const delta = shortestAngleDelta(
                         stickInput.polarTargetAngle, game.ship.angle);
-                    turnTarget = Math.sign(delta) * stickInput.polarTurnMagnitude;
+                    // Cap the commanded turn so the ship can't sweep past the
+                    // target angle in one frame — eliminates the bang-bang
+                    // oscillation when |delta| is smaller than the per-frame
+                    // angular reach at full polarTurnMagnitude.
+                    turnTarget = attainableTurnTarget(
+                        delta,
+                        stickInput.polarTurnMagnitude,
+                        CONFIG.SHIP_TURN_SPEED,
+                        dt);
                     thrustMag = stickInput.polarThrust;
                     brakeMag  = stickInput.polarBrake;
                 } else if (scheme === TOUCH_SCHEMES.POLAR) {
@@ -6186,16 +6231,18 @@
             ctx.beginPath();
             ctx.arc(0, 0, deadZone, 0, Math.PI * 2);
             ctx.stroke();
-            // Dynamic circle: only when the finger reaches the dead-zone.
+            // Threshold circle: always shown while the anchor is active so the
+            // player has a constant visual reference for the turn-vs-thrust
+            // transition radius — regardless of how far the finger has moved.
+            ctx.beginPath();
+            ctx.arc(0, 0, threshold, 0, Math.PI * 2);
+            ctx.stroke();
+            // Dynamic circle: only when the finger reaches the dead-zone, so
+            // it visualizes the live perturbation length the moment p1
+            // starts ramping.
             if (r >= deadZone) {
                 ctx.beginPath();
                 ctx.arc(0, 0, r, 0, Math.PI * 2);
-                ctx.stroke();
-            }
-            // Threshold circle: only when the finger reaches the threshold.
-            if (r >= threshold) {
-                ctx.beginPath();
-                ctx.arc(0, 0, threshold, 0, Math.PI * 2);
                 ctx.stroke();
             }
             ctx.restore();
