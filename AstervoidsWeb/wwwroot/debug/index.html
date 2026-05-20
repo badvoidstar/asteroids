@@ -388,6 +388,20 @@
                 help: 'Vertical (Y-axis) dead-zone half-extent for thrust and brake (applies to left and right anchors). Finger displacements with |dy| ≤ this value produce zero thrust/brake input. Larger values reduce accidental boost/brake from small finger drift. Sized in absolute CSS pixels for device-independent feel.',
             },
             {
+                key: 'TOUCH_POLAR_DEADZONE_PX',
+                label: 'Polar left anchor dead-zone radius (CSS px)',
+                min: 0, max: 80, step: 1, default: 16,
+                fmt: v => `${Math.round(v)} px`,
+                help: 'Polar scheme only (left anchor). Minimum finger-from-anchor radius before any input is produced. Within this circle the control is fully inert (no turn / thrust / brake). Larger values reduce accidental drift; smaller values give a hair-trigger response.',
+            },
+            {
+                key: 'TOUCH_POLAR_THRESHOLD_PX',
+                label: 'Polar left anchor threshold radius (CSS px)',
+                min: 4, max: 200, step: 1, default: 64,
+                fmt: v => `${Math.round(v)} px`,
+                help: 'Polar scheme only (left anchor). Radius at which the 1st parameter (p1, drives turn-speed) reaches 1.0. Between the dead-zone and the threshold, p1 ramps 0→1 and brake = (1 − p1). Past the threshold p1 stays at 1 (full turn, no brake) and the 2nd parameter (p2, drives thrust) ramps 0→1 over an additional TOUCH_STICK_RADIUS_PX of finger travel.',
+            },
+            {
                 key: 'TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST',
                 label: 'Right anchor exclusive thrust/brake (0/1)',
                 min: 0, max: 1, step: 1, default: 0,

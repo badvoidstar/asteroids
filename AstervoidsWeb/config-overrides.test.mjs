@@ -23,6 +23,18 @@ function coerceConfigOverrideValue(rawValue, currentValue) {
         const numeric = typeof rawValue === 'number' ? rawValue : Number(rawValue);
         return Number.isFinite(numeric) ? numeric : undefined;
     }
+    if (typeof currentValue === 'string') {
+        if (typeof rawValue === 'string') {
+            return rawValue.length > 0 ? rawValue : undefined;
+        }
+        if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+            return String(rawValue);
+        }
+        if (typeof rawValue === 'boolean') {
+            return rawValue ? 'true' : 'false';
+        }
+        return undefined;
+    }
     const booleanLike = parseBooleanLike(rawValue);
     if (booleanLike !== undefined) return booleanLike;
     if (typeof rawValue === 'number' && Number.isFinite(rawValue)) return rawValue;
@@ -108,4 +120,39 @@ test('session metadata precedence: session config wins over local URL-derived va
     assert.equal(cfg.FRACTURE_ENABLED, true);
     applySessionConfigMetadata({ config: { FRACTURE_ENABLED: false } }, cfg, keys);
     assert.equal(cfg.FRACTURE_ENABLED, false);
+});
+
+test('URL overrides: string-typed config accepts arbitrary string values', () => {
+    const cfg = { TOUCH_CONTROL_SCHEME: 'polar' };
+    applyUrlConfigOverrides(cfg, '?cfg.TOUCH_CONTROL_SCHEME=rectilinear');
+    assert.equal(cfg.TOUCH_CONTROL_SCHEME, 'rectilinear');
+    applyUrlConfigOverrides(cfg, '?cfg.TOUCH_CONTROL_SCHEME=classic');
+    assert.equal(cfg.TOUCH_CONTROL_SCHEME, 'classic');
+});
+
+test('URL overrides: empty string-typed value is rejected (keeps current value)', () => {
+    const cfg = { TOUCH_CONTROL_SCHEME: 'polar' };
+    applyUrlConfigOverrides(cfg, '?cfg.TOUCH_CONTROL_SCHEME=');
+    assert.equal(cfg.TOUCH_CONTROL_SCHEME, 'polar');
+});
+
+test('string-typed config: numeric / boolean raw values are stringified', () => {
+    // The debug BroadcastChannel may send a Number for sliders; the
+    // session metadata path may carry a Boolean from an older client. Both
+    // are coerced into the string-typed slot rather than silently dropped.
+    const cfg = { TOUCH_CONTROL_SCHEME: 'polar' };
+    assert.equal(coerceConfigOverrideValue(42, cfg.TOUCH_CONTROL_SCHEME), '42');
+    assert.equal(coerceConfigOverrideValue(true, cfg.TOUCH_CONTROL_SCHEME), 'true');
+    assert.equal(coerceConfigOverrideValue(false, cfg.TOUCH_CONTROL_SCHEME), 'false');
+    assert.equal(coerceConfigOverrideValue(NaN, cfg.TOUCH_CONTROL_SCHEME), undefined);
+    assert.equal(coerceConfigOverrideValue(null, cfg.TOUCH_CONTROL_SCHEME), undefined);
+});
+
+test('session metadata: string-typed config round-trips creator → joiner', () => {
+    const keys = ['TOUCH_CONTROL_SCHEME'];
+    const creatorCfg = { TOUCH_CONTROL_SCHEME: 'rectilinear' };
+    const sessionMetadata = { config: buildSessionConfigMetadata(creatorCfg, keys) };
+    const joinerCfg = { TOUCH_CONTROL_SCHEME: 'polar' };
+    applySessionConfigMetadata(sessionMetadata, joinerCfg, keys);
+    assert.equal(joinerCfg.TOUCH_CONTROL_SCHEME, 'rectilinear');
 });
