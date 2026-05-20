@@ -3304,6 +3304,55 @@
     }
 
     /**
+     * Tangent-line geometry for the polar anchor's "two-sided triangle"
+     * overlay. The triangle's apex sits at the perturbed touch point P (at
+     * distance `r` from the anchor, angle `theta`); the two visible edges
+     * are line segments from P tangent to the dead-zone circle (radius
+     * `d`), touching at T1 and T2; the third (missing / invisible) edge is
+     * the chord T1→T2.
+     *
+     * Geometry: in right-triangle O-T-P with O at the anchor, T a tangent
+     * point on the dead-zone circle, and the right angle at T (tangent
+     * perpendicular to radius), angle at O is φ = arccos(d/r). By
+     * symmetry across OP the two tangent points sit at angles θ±φ on the
+     * dead-zone circle.
+     *
+     * The companion arc (drawn in place of the full dead-zone circle while
+     * the triangle is active) connects T1 and T2 along the far side of the
+     * circle — passing through angle θ+π so its apex faces away from P.
+     * In canvas-2D `arc(cx, cy, d, start, end)` (default direction =
+     * +angle), starting at θ+φ and ending at θ−φ does exactly that: the
+     * canvas wraps end by +2π and sweeps the long way through θ+π.
+     *
+     *   r     : finger radius from anchor (px in target context).
+     *   d     : dead-zone radius (same units as r).
+     *   theta : direction from anchor to P, radians (atan2(dy, dx)).
+     *
+     * Returns null if r ≤ d (no triangle when finger is inside dead-zone)
+     * or d ≤ 0 (degenerate dead-zone — tangent points collapse to origin,
+     * triangle has no enclosed area). Otherwise returns the apex (px, py)
+     * = P, the two tangent points t1/t2 in anchor-relative coords, the
+     * half-angle phi, and the canvas-ready arcStartAngle / arcEndAngle.
+     */
+    function polarAnchorTangentGeometry(r, d, theta) {
+        if (!(r > d) || !(d > 0)) return null;
+        const phi = Math.acos(d / r);
+        const a1 = theta + phi;
+        const a2 = theta - phi;
+        return {
+            apexX: r * Math.cos(theta),
+            apexY: r * Math.sin(theta),
+            t1x: d * Math.cos(a1),
+            t1y: d * Math.sin(a1),
+            t2x: d * Math.cos(a2),
+            t2y: d * Math.sin(a2),
+            phi,
+            arcStartAngle: a1,
+            arcEndAngle: a2,
+        };
+    }
+
+    /**
      * Build the 8-vertex polygon for the anchor overlay
      * (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED). Coordinates are returned relative
      * to the anchor — callers translate the canvas context to the anchor and
@@ -6245,13 +6294,36 @@
             const r = Math.hypot(dx, dy);
             const deadZone  = CONFIG.TOUCH_POLAR_DEADZONE_PX  * sx;
             const threshold = CONFIG.TOUCH_POLAR_THRESHOLD_PX * sx;
+            const theta = Math.atan2(dy, dx);
+            // Triangle geometry exists only when the finger has cleared the
+            // dead-zone (and the dead-zone has non-zero radius). When it
+            // exists, the dead-zone circle is replaced by an arc on the far
+            // side of the circle from P, ending at the tangent points T1/T2
+            // so the missing chord T1→T2 stays "behind" the triangle's
+            // (invisible) base.
+            const tri = polarAnchorTangentGeometry(r, deadZone, theta);
             const pastThreshold = r > threshold;
             ctx.save();
             ctx.translate(cx, cy);
-            // Dead-zone circle: always shown while the anchor is active.
+            // Dead-zone: full circle when no triangle; far-side arc when the
+            // triangle is being drawn.
             ctx.beginPath();
-            ctx.arc(0, 0, deadZone, 0, Math.PI * 2);
+            if (tri) {
+                ctx.arc(0, 0, deadZone, tri.arcStartAngle, tri.arcEndAngle);
+            } else {
+                ctx.arc(0, 0, deadZone, 0, Math.PI * 2);
+            }
             ctx.stroke();
+            // Two-sided triangle: T1 → P (apex) → T2. The third edge (chord
+            // T1→T2) is intentionally not stroked; the arc above visually
+            // closes the figure on the far side.
+            if (tri) {
+                ctx.beginPath();
+                ctx.moveTo(tri.t1x, tri.t1y);
+                ctx.lineTo(tri.apexX, tri.apexY);
+                ctx.lineTo(tri.t2x, tri.t2y);
+                ctx.stroke();
+            }
             // Threshold circle: always shown while the anchor is active so
             // the player has a constant visual reference for the
             // turn-vs-thrust transition radius. Once the finger crosses the

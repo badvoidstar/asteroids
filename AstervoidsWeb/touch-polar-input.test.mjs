@@ -29,6 +29,7 @@ function extractFn(signaturePrefix) {
 const shortestAngleDelta = extractFn('shortestAngleDelta');
 const computePolarStickInput = extractFn('computePolarStickInput');
 const attainableTurnTarget = extractFn('attainableTurnTarget');
+const polarAnchorTangentGeometry = extractFn('polarAnchorTangentGeometry');
 
 // Reference parameter set: 100 px stick radius (drives p2 / thrust scale),
 // 10 px dead-zone, 50 px threshold, unit gains and unit clamps. Choices keep
@@ -376,4 +377,109 @@ test('attainableTurnTarget: works across the ±π wrap boundary', () => {
     const delta = shortestAngleDelta(-3 * Math.PI / 4, 3 * Math.PI / 4);
     const cmd = attainableTurnTarget(delta, 1.0, TURN_RATE, 1);
     assert.equal(cmd, 1.0);
+});
+
+// ─── polarAnchorTangentGeometry ────────────────────────────────────────────
+//
+// Geometry of the two-sided triangle drawn for the polar anchor overlay
+// when r > d. Apex at P = (r·cosθ, r·sinθ); two visible edges from P
+// tangent to the dead-zone circle (radius d) at T1, T2. Companion arc
+// connects T1 → T2 along the far side from P.
+//
+// All checks rely on the tangent-from-external-point invariants:
+//   |OT| = d                     (T on the dead-zone circle)
+//   OT · (P - T) = 0             (radius ⟂ tangent at T)
+//   |PT| = √(r² - d²)            (tangent-length theorem)
+
+test('polarAnchorTangentGeometry: r ≤ d returns null (no triangle in dead-zone)', () => {
+    assert.equal(polarAnchorTangentGeometry(3, 5, 0), null);
+    assert.equal(polarAnchorTangentGeometry(5, 5, 0), null);   // boundary r=d also null
+    assert.equal(polarAnchorTangentGeometry(0, 5, 1.0), null);
+});
+
+test('polarAnchorTangentGeometry: d ≤ 0 returns null (degenerate dead-zone)', () => {
+    assert.equal(polarAnchorTangentGeometry(10, 0, 0), null);
+    assert.equal(polarAnchorTangentGeometry(10, -1, 0), null);
+});
+
+test('polarAnchorTangentGeometry: 3-4-5 reference triangle (θ=0, d=3, r=5)', () => {
+    // φ = acos(3/5) = 0.927… → cos φ = 0.6, sin φ = 0.8.
+    // T1 = (3·0.6, 3·0.8) = (1.8, 2.4); T2 = (1.8, -2.4); apex = (5, 0).
+    const g = polarAnchorTangentGeometry(5, 3, 0);
+    assert.ok(Math.abs(g.t1x - 1.8) < 1e-12);
+    assert.ok(Math.abs(g.t1y - 2.4) < 1e-12);
+    assert.ok(Math.abs(g.t2x - 1.8) < 1e-12);
+    assert.ok(Math.abs(g.t2y + 2.4) < 1e-12);
+    assert.ok(Math.abs(g.apexX - 5) < 1e-12);
+    assert.ok(Math.abs(g.apexY - 0) < 1e-12);
+    // |PT1| = √((5-1.8)² + (0-2.4)²) = √(10.24 + 5.76) = √16 = 4 = √(r²-d²).
+    const pt1 = Math.hypot(5 - g.t1x, 0 - g.t1y);
+    assert.ok(Math.abs(pt1 - Math.sqrt(25 - 9)) < 1e-12);
+});
+
+test('polarAnchorTangentGeometry: tangent invariants for many (r, d, θ) samples', () => {
+    for (const theta of [0, 0.3, Math.PI / 2, Math.PI, -Math.PI / 4, 2.7]) {
+        for (const [r, d] of [[5, 3], [100, 10], [50.001, 50], [1e4, 1]]) {
+            const g = polarAnchorTangentGeometry(r, d, theta);
+            assert.ok(g, `r=${r} d=${d} θ=${theta} unexpectedly null`);
+            // |OT_i| = d.
+            assert.ok(Math.abs(Math.hypot(g.t1x, g.t1y) - d) < 1e-7);
+            assert.ok(Math.abs(Math.hypot(g.t2x, g.t2y) - d) < 1e-7);
+            // OT_i · (P - T_i) = 0  (tangent perpendicular to radius).
+            const dot1 = g.t1x * (g.apexX - g.t1x) + g.t1y * (g.apexY - g.t1y);
+            const dot2 = g.t2x * (g.apexX - g.t2x) + g.t2y * (g.apexY - g.t2y);
+            assert.ok(Math.abs(dot1) < 1e-6, `dot1=${dot1} θ=${theta} r=${r} d=${d}`);
+            assert.ok(Math.abs(dot2) < 1e-6, `dot2=${dot2} θ=${theta} r=${r} d=${d}`);
+            // |PT_i| = √(r² - d²).
+            const expectedLen = Math.sqrt(r * r - d * d);
+            assert.ok(Math.abs(Math.hypot(g.apexX - g.t1x, g.apexY - g.t1y) - expectedLen) < 1e-6);
+            assert.ok(Math.abs(Math.hypot(g.apexX - g.t2x, g.apexY - g.t2y) - expectedLen) < 1e-6);
+        }
+    }
+});
+
+test('polarAnchorTangentGeometry: T1 and T2 are reflections across the OP axis', () => {
+    // Mirror T2 across the line at angle θ; should land on T1.
+    const theta = 1.1;
+    const g = polarAnchorTangentGeometry(8, 3, theta);
+    // Reflection of (x, y) across line through origin at angle θ:
+    //   x' = x·cos(2θ) + y·sin(2θ); y' = x·sin(2θ) − y·cos(2θ).
+    const c2 = Math.cos(2 * theta), s2 = Math.sin(2 * theta);
+    const mirroredX = g.t2x * c2 + g.t2y * s2;
+    const mirroredY = g.t2x * s2 - g.t2y * c2;
+    assert.ok(Math.abs(mirroredX - g.t1x) < 1e-12, `mx=${mirroredX} vs ${g.t1x}`);
+    assert.ok(Math.abs(mirroredY - g.t1y) < 1e-12, `my=${mirroredY} vs ${g.t1y}`);
+});
+
+test('polarAnchorTangentGeometry: φ → 0 as r → d (narrow triangle), φ → π/2 as r → ∞ (wide)', () => {
+    // r barely greater than d → tangent points nearly coincident at +OP.
+    const narrow = polarAnchorTangentGeometry(5.0001, 5, 0);
+    assert.ok(narrow.phi < 0.01, `phi=${narrow.phi}`);
+    // r far beyond d → φ → π/2 → tangent points nearly perpendicular to OP.
+    const wide = polarAnchorTangentGeometry(1e6, 5, 0);
+    assert.ok(Math.PI / 2 - wide.phi < 1e-4, `phi=${wide.phi}`);
+});
+
+test('polarAnchorTangentGeometry: arc endpoints equal θ±φ; arc midpoint is θ+π (far side)', () => {
+    // The companion arc starts at θ+φ and ends at θ−φ. Drawn with the canvas
+    // default direction it sweeps through θ+π — the far side from P, so the
+    // arc's apex (midpoint) sits diametrically opposite the triangle's apex.
+    const theta = 0.7;
+    const g = polarAnchorTangentGeometry(10, 4, theta);
+    assert.equal(g.arcStartAngle, theta + g.phi);
+    assert.equal(g.arcEndAngle,   theta - g.phi);
+    // Sampled midpoint along the +angle wrap from start to (end + 2π).
+    const wrappedEnd = g.arcEndAngle + 2 * Math.PI;
+    const midAngle = (g.arcStartAngle + wrappedEnd) / 2;
+    const delta = shortestAngleDelta(midAngle, theta + Math.PI);
+    assert.ok(Math.abs(delta) < 1e-12, `midAngle ${midAngle} vs θ+π=${theta + Math.PI}`);
+});
+
+test('polarAnchorTangentGeometry: triangle apex equals P regardless of orientation', () => {
+    for (const theta of [-Math.PI, -1, 0, 1, Math.PI]) {
+        const r = 7, d = 2;
+        const g = polarAnchorTangentGeometry(r, d, theta);
+        assert.ok(Math.abs(g.apexX - r * Math.cos(theta)) < 1e-12);
+        assert.ok(Math.abs(g.apexY - r * Math.sin(theta)) < 1e-12);
+    }
 });
