@@ -95,32 +95,34 @@ test('shortestAngleDelta: opposite headings → +π (signed convention)', () => 
 
 // ─── computePolarStickInput ────────────────────────────────────────────────
 
-test('zero displacement → inactive, all zero', () => {
+test('zero displacement → inactive turn/thrust, but brake is FULL (radius 0 = full brake)', () => {
     const out = computePolarStickInput(0, 0, BASE_PARAMS);
     assert.equal(out.active, false);
     assert.equal(out.radius, 0);
     assert.equal(out.turnMagnitude, 0);
     assert.equal(out.thrust, 0);
-    assert.equal(out.brake, 0);
+    // Brake = clamp01(1 − 0/50) * brakeGain = 1.0 * 1.0 = 1.0.
+    assert.ok(Math.abs(out.brake - 1.0) < 1e-12, `brake ${out.brake}`);
 });
 
-test('within dead-zone (r ≤ DEADZONE) → inactive, no input', () => {
+test('within dead-zone (r ≤ DEADZONE) → inactive for turn/thrust, but brake still flows', () => {
     // dz=10 → (6, -8) gives r=10 exactly → still inactive (boundary inclusive).
+    // Brake = 1 − 10/50 = 0.8 (dead-zone is the "high brake" region now).
     const out = computePolarStickInput(6, -8, BASE_PARAMS);
     assert.equal(out.active, false);
     assert.equal(out.turnMagnitude, 0);
     assert.equal(out.thrust, 0);
-    assert.equal(out.brake, 0);
+    assert.ok(Math.abs(out.brake - 0.8) < 1e-12, `brake ${out.brake}`);
 });
 
-test('mid-band (deadzone < r ≤ threshold): p1 ramps, brake = 1 − p1, no thrust', () => {
-    // r=30 → p1=(30-10)/(50-10) = 0.5.
-    // turnMagnitude = 0.5, brake = 0.5, thrust = 0.
+test('mid-band (deadzone < r ≤ threshold): p1 ramps, brake = 1 − r/threshold, no thrust', () => {
+    // r=30 → p1=(30-10)/(50-10) = 0.5; turnMagnitude = 0.5.
+    // Brake decouples from p1: brake = 1 − 30/50 = 0.4.
     const out = computePolarStickInput(30, 0, BASE_PARAMS);
     assert.equal(out.active, true);
     assert.ok(Math.abs(out.radius - 30) < 1e-12);
     assert.ok(Math.abs(out.turnMagnitude - 0.5) < 1e-12, `turn ${out.turnMagnitude}`);
-    assert.ok(Math.abs(out.brake - 0.5) < 1e-12, `brake ${out.brake}`);
+    assert.ok(Math.abs(out.brake - 0.4) < 1e-12, `brake ${out.brake}`);
     assert.equal(out.thrust, 0);
 });
 
@@ -181,30 +183,53 @@ test('thrustGain / thrustMax follow the same clamp pattern as the rectilinear he
     assert.equal(out.thrust, 0.25);
 });
 
-test('brake uses (1 − p1) scaled by brakeGain then clamped to brakeMax', () => {
-    // r=20 → p1=0.25, 1−p1 = 0.75; gain 1 → 0.75.
+test('brake uses (1 − r/threshold) scaled by brakeGain then clamped to brakeMax', () => {
+    // r=20, threshold=50 → 1 − 20/50 = 0.6; brakeGain=1 → 0.6.
     const out = computePolarStickInput(20, 0, BASE_PARAMS);
-    assert.ok(Math.abs(out.brake - 0.75) < 1e-12, `got ${out.brake}`);
+    assert.ok(Math.abs(out.brake - 0.6) < 1e-12, `got ${out.brake}`);
 
-    // Same r, gain 2 → 1.5, clamped to brakeMax 0.5.
+    // Same r, gain 2 → 1.2, clamped to brakeMax 0.5.
     const out2 = computePolarStickInput(20, 0,
         { ...BASE_PARAMS, brakeGain: 2.0, brakeMax: 0.5 });
     assert.equal(out2.brake, 0.5);
 });
 
-test('disabling brake via brakeMax=0 zeroes brake at any radius', () => {
+test('disabling brake via brakeMax=0 zeroes brake at any radius (including dead-zone)', () => {
     const params = { ...BASE_PARAMS, brakeMax: 0 };
-    for (const r of [12, 30, 49.999, 50, 80]) {
+    for (const r of [0, 1, 8, 10, 12, 30, 49.999, 50, 80]) {
         const out = computePolarStickInput(r, 0, params);
         assert.equal(out.brake, 0, `r=${r} brake=${out.brake}`);
     }
 });
 
-test('brake is exactly zero at and beyond the threshold (by construction of 1 − p1)', () => {
+test('brake is exactly zero at and beyond the threshold (by clamp on (1 − r/threshold))', () => {
     for (const r of [50, 60, 100, 1e6]) {
         const out = computePolarStickInput(r, 0, BASE_PARAMS);
         assert.equal(out.brake, 0, `r=${r} brake=${out.brake}`);
     }
+});
+
+test('brake is linear in radius across 0..threshold (dead-zone INCLUSIVE)', () => {
+    // Verify the spec: r=0 → 1, r=threshold → 0, linear between, including
+    // through the dead-zone (no discontinuity at r=deadZonePx).
+    const threshold = BASE_PARAMS.thresholdPx;
+    for (const r of [0, 1, 5, 9.999, 10, 10.001, 20, 30, 40, 49.999, 50]) {
+        const out = computePolarStickInput(r, 0, BASE_PARAMS);
+        const expected = Math.max(0, 1 - r / threshold);
+        assert.ok(Math.abs(out.brake - expected) < 1e-9,
+            `r=${r} brake=${out.brake} expected=${expected}`);
+    }
+});
+
+test('brake is continuous across the dead-zone / mid-band boundary', () => {
+    // The old (1 − p1) formula made brake jump from 0 (at r=deadZonePx,
+    // since active was false) to 1.0 just past it. The new formulation
+    // must be smooth: a tiny step in r produces a tiny step in brake.
+    const r1 = BASE_PARAMS.deadZonePx;          // 10
+    const r2 = BASE_PARAMS.deadZonePx + 1e-6;   // 10 + epsilon
+    const b1 = computePolarStickInput(r1, 0, BASE_PARAMS).brake;
+    const b2 = computePolarStickInput(r2, 0, BASE_PARAMS).brake;
+    assert.ok(Math.abs(b1 - b2) < 1e-6, `b1=${b1} b2=${b2}`);
 });
 
 test('isotropy: same radius at different angles produces same magnitudes', () => {

@@ -1072,17 +1072,21 @@
         TOUCH_STICK_THRUST_DEADZONE_PX: 24,
         // Polar scheme radii (left anchor only). The polar control's response
         // is determined by the length of the finger displacement vector:
-        //   • r ≤ TOUCH_POLAR_DEADZONE_PX   → no input.
-        //   • DEADZONE < r ≤ THRESHOLD      → p1 ramps 0→1 (turn-speed);
-        //                                     brake = (1 − p1) at full scale.
-        //   • r > THRESHOLD                 → p1 clamped at 1 (max turn,
-        //                                     no brake); p2 ramps 0→… with
-        //                                     length past threshold, scaled by
-        //                                     TOUCH_STICK_RADIUS_PX (so 1.0 at
-        //                                     THRESHOLD + RADIUS, before
+        //   • r ≤ TOUCH_POLAR_DEADZONE_PX   → no turn / thrust, but BRAKE
+        //                                     still flows (see below).
+        //   • DEADZONE < r ≤ THRESHOLD      → p1 ramps 0→1 (turn-speed).
+        //   • r > THRESHOLD                 → p1 clamped at 1 (max turn);
+        //                                     p2 ramps 0→… with length past
+        //                                     threshold, scaled by
+        //                                     TOUCH_STICK_RADIUS_PX (so 1.0
+        //                                     at THRESHOLD + RADIUS, before
         //                                     gain/clamp), driving thrust.
+        // Brake is independent of the dead-zone and scales linearly with the
+        // raw radius: brake = clamp01(1 − r / THRESHOLD), so r=0 is full
+        // brake and r=THRESHOLD is no brake. This lets the dead-zone double
+        // as the "high brake" region of the control.
         TOUCH_POLAR_DEADZONE_PX: 16,
-        TOUCH_POLAR_THRESHOLD_PX: 96,
+        TOUCH_POLAR_THRESHOLD_PX: 80,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
@@ -3252,6 +3256,14 @@
         const brakeMax = Math.max(0, params.brakeMax || 0);
 
         const r = Math.hypot(dx, dy);
+        // Brake is decoupled from the dead-zone: scales linearly from full
+        // at r=0 to zero at r=thresholdPx, then stays clamped at zero past
+        // threshold. Computed up front so the inactive (in-dead-zone)
+        // return path still surfaces the brake — the dead-zone is the
+        // "high brake" region of the polar control, not an idle region.
+        const brake = Math.max(0, Math.min(brakeMax,
+            Math.max(0, 1 - r / thresholdPx) * brakeGain));
+
         if (r <= deadZonePx) {
             return {
                 active: false,
@@ -3259,7 +3271,7 @@
                 targetAngle: 0,
                 turnMagnitude: 0,
                 thrust: 0,
-                brake: 0,
+                brake,
             };
         }
 
@@ -3273,9 +3285,6 @@
 
         const turnMagnitude = Math.max(0, Math.min(turnMax, p1 * turnGain));
         const thrust = Math.max(0, Math.min(thrustMax, p2 * thrustGain));
-        // Brake uses the "inverse" of p1: maximal at the dead-zone edge,
-        // decaying to zero by the threshold and disabled beyond it.
-        const brake = Math.max(0, Math.min(brakeMax, (1 - p1) * brakeGain));
 
         return {
             active: true,
@@ -5723,10 +5732,14 @@
                     thrustMag = stickInput.polarThrust;
                     brakeMag  = stickInput.polarBrake;
                 } else if (scheme === TOUCH_SCHEMES.POLAR) {
-                    // Touch held but inside dead-zone → keep the ship idle.
+                    // Touch held but inside the polar dead-zone → no turn /
+                    // thrust, but brake STILL flows. computePolarStickInput
+                    // populated polarBrake from (1 − r/threshold), which is
+                    // at its strongest near r=0, so the dead-zone is the
+                    // "high brake" region of the control.
                     turnTarget = 0;
                     thrustMag = 0;
-                    brakeMag = 0;
+                    brakeMag = stickInput.polarBrake;
                 } else {
                     turnTarget = stickInput.turnTarget;
                     thrustMag = stickInput.thrustInput;
