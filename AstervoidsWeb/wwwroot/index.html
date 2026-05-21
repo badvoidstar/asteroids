@@ -543,13 +543,18 @@
             display: none;
         }
 
-        /* Virtual-stick touch scheme hides the legacy on-screen movement / fire
-           buttons (left/right/thrust/fire). Pause, restart and fullscreen stay
-           reachable. */
-        .touch-scheme-virtual-stick #touch-left,
-        .touch-scheme-virtual-stick #touch-right,
-        .touch-scheme-virtual-stick #touch-thrust,
-        .touch-scheme-virtual-stick #touch-fire {
+        /* Anchor-based touch schemes (rectilinear, polar) hide the legacy
+           on-screen movement / fire buttons (left/right/thrust/fire). Only the
+           "classic" scheme keeps those buttons visible. Pause, restart and
+           fullscreen stay reachable in every scheme. */
+        .touch-scheme-rectilinear #touch-left,
+        .touch-scheme-rectilinear #touch-right,
+        .touch-scheme-rectilinear #touch-thrust,
+        .touch-scheme-rectilinear #touch-fire,
+        .touch-scheme-polar #touch-left,
+        .touch-scheme-polar #touch-right,
+        .touch-scheme-polar #touch-thrust,
+        .touch-scheme-polar #touch-fire {
             display: none !important;
         }
     </style>
@@ -1031,13 +1036,21 @@
         SHIP_BRAKE_STRENGTH: 0.018,
 
         // === Touch control scheme ===
-        // false (default): legacy on-screen ◀ ▶ ▲ FIRE buttons.
-        // true: virtual-stick scheme — left half of the screen is an anchor-based
-        //   analog stick (lateral displacement → rotation velocity, upward → thrust,
-        //   downward → brake-only); right half = fire (anchor tracked for future UI).
+        // Selects the touch input scheme by name. Three values are recognized:
+        //   'classic'     — legacy on-screen ◀ ▶ ▲ FIRE buttons (boolean inputs).
+        //   'rectilinear' — anchor scheme with rectangular dead-zone on BOTH
+        //                   halves: lateral displacement → rotation velocity,
+        //                   upward → thrust, downward → brake. (Was the
+        //                   `TOUCH_VIRTUAL_STICK_ENABLED = true` scheme.)
+        //   'polar'       — NEW left-side polar anchor (vector magnitude/length
+        //                   → turn speed, length past threshold → thrust,
+        //                   inverse-of-turn → brake; turn direction = shortest
+        //                   rotation toward the vector); right side keeps the
+        //                   existing rectilinear anchor for thrust/brake + fire.
         // Affects touch routing only; keyboard always uses discrete inputs.
-        // Override at runtime with ?cfg.TOUCH_VIRTUAL_STICK_ENABLED=true|false.
-        TOUCH_VIRTUAL_STICK_ENABLED: true,
+        // Unknown values fall back to 'polar'. Override at runtime with
+        // ?cfg.TOUCH_CONTROL_SCHEME=classic|rectilinear|polar.
+        TOUCH_CONTROL_SCHEME: 'polar',
         // Touch anchor sizing is expressed in absolute CSS pixels (not viewport
         // fractions) so the on-screen geometry stays a constant physical size
         // across device sizes and orientations. CSS px are device-calibrated
@@ -1045,15 +1058,35 @@
         // PX values give a stable physical feel from phone to tablet.
         //
         // RADIUS: drag distance the finger must move from the anchor to reach
-        // a stick deflection of 1.0 (before per-axis clamping).
+        // a stick deflection of 1.0 (before per-axis clamping). In the polar
+        // scheme this also sets the scale of the 2nd parameter (thrust): a
+        // length of RADIUS past TOUCH_POLAR_THRESHOLD_PX maps to thrust=1.0
+        // before gain/clamp.
         TOUCH_STICK_RADIUS_PX: 48,
-        // Dead-zone half-extents. The dead-zone is a RECTANGLE: lateral
-        // displacements with |dx| <= TURN_DEADZONE_PX are ignored for turning,
-        // and vertical displacements with |dy| <= THRUST_DEADZONE_PX are
-        // ignored for thrust/brake. Independent knobs let turning be more
-        // responsive (smaller deadzone) than thrust/brake.
+        // Dead-zone half-extents (rectilinear scheme). The dead-zone is a
+        // RECTANGLE: lateral displacements with |dx| <= TURN_DEADZONE_PX are
+        // ignored for turning, and vertical displacements with |dy| <=
+        // THRUST_DEADZONE_PX are ignored for thrust/brake. Independent knobs
+        // let turning be more responsive (smaller deadzone) than thrust/brake.
         TOUCH_STICK_TURN_DEADZONE_PX: 6,
         TOUCH_STICK_THRUST_DEADZONE_PX: 24,
+        // Polar scheme radii (left anchor only). The polar control's response
+        // is determined by the length of the finger displacement vector:
+        //   • r ≤ TOUCH_POLAR_DEADZONE_PX   → no turn / thrust, but BRAKE
+        //                                     still flows (see below).
+        //   • DEADZONE < r ≤ THRESHOLD      → p1 ramps 0→1 (turn-speed).
+        //   • r > THRESHOLD                 → p1 clamped at 1 (max turn);
+        //                                     p2 ramps 0→… with length past
+        //                                     threshold, scaled by
+        //                                     TOUCH_STICK_RADIUS_PX (so 1.0
+        //                                     at THRESHOLD + RADIUS, before
+        //                                     gain/clamp), driving thrust.
+        // Brake is independent of the dead-zone and scales linearly with the
+        // raw radius: brake = clamp01(1 − r / THRESHOLD), so r=0 is full
+        // brake and r=THRESHOLD is no brake. This lets the dead-zone double
+        // as the "high brake" region of the control.
+        TOUCH_POLAR_DEADZONE_PX: 16,
+        TOUCH_POLAR_THRESHOLD_PX: 64,
         // Linear gain applied to normalized lateral displacement → turnTarget.
         // turnTarget = clamp(xNorm * GAIN, -MAX, +MAX). Peak rotation rate is
         // SHIP_TURN_SPEED * TOUCH_TURN_MAX (so MAX=1 reuses the existing cap).
@@ -1086,7 +1119,14 @@
         // tracks the finger position (zone-→-vertex mapping documented in
         // computeAnchorVertices). Local UI only; never serialized.
         TOUCH_ANCHOR_VISUAL_ENABLED: true,
-        TOUCH_ANCHOR_STROKE_COLOR: 'rgba(255,255,255,0.55)',
+        // Basis stroke color used by every anchor overlay (rectilinear
+        // 8-vertex polygon AND polar circles). The polar anchor overrides
+        // this on the threshold circle when r > threshold (it switches to
+        // CONFIG.THRUST_COLOR to signal that p2 is now driving thrust). Any
+        // CSS color string works (named, hex, rgb(), rgba(), hsl(), …).
+        // Default is 50% grey at the historical 0.55 alpha for parity with
+        // the previous white default's visibility.
+        TOUCH_ANCHOR_STROKE_COLOR: 'rgba(128,128,128,0.55)',
         TOUCH_ANCHOR_LINE_WIDTH: 2,
 
         // Bullet settings (normalized)
@@ -1281,6 +1321,23 @@
             const numeric = typeof rawValue === 'number' ? rawValue : Number(rawValue);
             return Number.isFinite(numeric) ? numeric : undefined;
         }
+        if (typeof currentValue === 'string') {
+            // String-typed CONFIG values (e.g. TOUCH_CONTROL_SCHEME) accept
+            // strings directly; numbers and booleans are stringified so the
+            // same wire path (URL params, debug BroadcastChannel) Just Works.
+            // Empty strings are rejected so an accidental ?cfg.KEY= clears
+            // nothing; the override is simply ignored.
+            if (typeof rawValue === 'string') {
+                return rawValue.length > 0 ? rawValue : undefined;
+            }
+            if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+                return String(rawValue);
+            }
+            if (typeof rawValue === 'boolean') {
+                return rawValue ? 'true' : 'false';
+            }
+            return undefined;
+        }
         const booleanLike = parseBooleanLike(rawValue);
         if (booleanLike !== undefined) return booleanLike;
         if (typeof rawValue === 'number' && Number.isFinite(rawValue)) return rawValue;
@@ -1336,11 +1393,43 @@
     applyUrlConfigOverrides(CONFIG);
     const LOCAL_CONFIG_BASELINE = snapshotConfigValues(CONFIG, SESSION_CONFIG_KEYS);
 
+    // Touch control scheme registry. Keep the constants in lock-step with the
+    // CSS class names (`touch-scheme-<value>`) and the CONFIG knob doc string.
+    const TOUCH_SCHEMES = Object.freeze({
+        CLASSIC: 'classic',
+        RECTILINEAR: 'rectilinear',
+        POLAR: 'polar',
+    });
+    const VALID_TOUCH_SCHEMES = new Set(Object.values(TOUCH_SCHEMES));
+
+    // Resolve CONFIG.TOUCH_CONTROL_SCHEME with a fallback to the default
+    // ('polar'). Tolerates unknown / mistyped values so a stray URL override
+    // can't brick input on a live device.
+    function getTouchScheme() {
+        const raw = CONFIG.TOUCH_CONTROL_SCHEME;
+        if (typeof raw === 'string') {
+            const normalized = raw.toLowerCase();
+            if (VALID_TOUCH_SCHEMES.has(normalized)) return normalized;
+        }
+        return TOUCH_SCHEMES.POLAR;
+    }
+
+    // True iff the chosen scheme uses screen-half anchors (rectilinear / polar)
+    // instead of the legacy on-screen buttons (classic). Touch handlers are
+    // wired in either case; this just gates whether they actually consume
+    // touches.
+    function isAnchorSchemeEnabled() {
+        const s = getTouchScheme();
+        return s === TOUCH_SCHEMES.RECTILINEAR || s === TOUCH_SCHEMES.POLAR;
+    }
+
     // Reflect the touch control scheme on the game-container so CSS can hide
-    // legacy on-screen buttons in virtual-stick mode. The class is set once
+    // legacy on-screen buttons in anchor-based schemes. The class is set once
     // (the scheme isn't expected to flip after page load).
-    if (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED) {
-        document.getElementById('game-container').classList.add('touch-scheme-virtual-stick');
+    {
+        const containerEl = document.getElementById('game-container');
+        const scheme = getTouchScheme();
+        containerEl.classList.add(`touch-scheme-${scheme}`);
     }
 
     function restoreLocalConfigBaseline(config = CONFIG) {
@@ -3070,6 +3159,219 @@
     }
 
     /**
+     * Signed shortest angular delta from `currentAngle` to `targetAngle`,
+     * wrapped into (−π, +π]. Positive = need to rotate currentAngle in the
+     * +angle direction (which in screen coords is clockwise) to reach the
+     * target; negative = counter-clockwise.
+     *
+     * Used by the polar touch scheme to pick the rotation direction that
+     * aligns the ship's heading to the finger-vs-anchor vector. Pure; no
+     * DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function shortestAngleDelta(targetAngle, currentAngle) {
+        const diff = targetAngle - currentAngle;
+        // atan2(sin, cos) collapses arbitrary multiples of 2π into (−π, +π].
+        return Math.atan2(Math.sin(diff), Math.cos(diff));
+    }
+
+    /**
+     * Clamp a signed turn-input command so the ship can never overshoot the
+     * target angle in a single simulation frame. Without this, the polar
+     * scheme bangs ±polarTurnMagnitude every frame and the ship oscillates
+     * around the target whenever |delta| is smaller than the per-frame
+     * angular sweep at full magnitude.
+     *
+     *   delta         : signed shortest angular delta (radians) the ship
+     *                   needs to rotate by, e.g. shortestAngleDelta(target, ship).
+     *   maxMagnitude  : configured cap on |turnInput| (= p1 · turnGain
+     *                   already clamped to turnMax). Treated as the upper
+     *                   limit of the returned magnitude.
+     *   ratePerFrame  : rotation rate at |turnInput|=1, in radians per 60fps
+     *                   frame (= CONFIG.SHIP_TURN_SPEED). Ship.update applies
+     *                   angle += ratePerFrame · turnInput · dt, so the
+     *                   attainable angular sweep this frame is
+     *                   ratePerFrame · |turnInput| · dt.
+     *   dt            : frame delta multiplier (1.0 = one 60fps frame).
+     *
+     * Returns the signed turn-input command:
+     *   |delta| ≥ ratePerFrame · maxMagnitude · dt → ±maxMagnitude (full)
+     *   |delta| <  ratePerFrame · maxMagnitude · dt → ±(|delta|/(rate·dt))
+     *                                                 (lands exactly on target)
+     *
+     * Pure: no DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function attainableTurnTarget(delta, maxMagnitude, ratePerFrame, dt) {
+        if (maxMagnitude <= 0) return 0;
+        if (delta === 0) return 0;
+        const denom = ratePerFrame * dt;
+        // Pathological inputs (zero/negative rate or dt) collapse to no
+        // command — there's no physical step we can prescribe.
+        if (denom <= 0) return 0;
+        const cappedMag = Math.min(maxMagnitude, Math.abs(delta) / denom);
+        return Math.sign(delta) * cappedMag;
+    }
+
+    /**
+     * Compute analog control inputs from the polar-scheme left anchor.
+     * The polar control parameterizes its response by the *length* of the
+     * finger-from-anchor vector (r = hypot(dx, dy)) rather than its
+     * cartesian components:
+     *
+     *   r ≤ deadZonePx               → no input (all zeros, active=false).
+     *   deadZonePx < r ≤ thresholdPx → p1 = (r − deadZonePx) / (threshold − dead)
+     *                                  ramps 0→1 (drives turn-speed);
+     *                                  brake = (1 − p1) at full scale.
+     *   r > thresholdPx              → p1 clamped at 1 (max turn);
+     *                                  p2 = (r − thresholdPx) / radiusPx
+     *                                  ramps 0→… (drives thrust); brake = 0.
+     *
+     * Returned `targetAngle` is atan2(dy, dx), which matches the in-game
+     * ship.angle convention (0 = +x = right, +π/2 = +y = down, −π/2 = up
+     * because canvas Y is screen-down). The caller picks the turn direction
+     * by combining this with the ship's current heading via
+     * `shortestAngleDelta` — that's why we don't return a signed turn here.
+     *
+     *   dx, dy : finger position minus anchor position, in CSS pixels.
+     *            Positive dx = right of anchor. Positive dy = below anchor
+     *            (matches screen / Touch coords).
+     *   params : { radiusPx,
+     *              deadZonePx, thresholdPx,
+     *              turnGain, turnMax,
+     *              thrustGain, thrustMax,
+     *              brakeGain, brakeMax }
+     *
+     * Returns:
+     *   { active, radius, targetAngle, turnMagnitude, thrust, brake }
+     *   turnMagnitude ∈ [0, turnMax]   — unsigned p1 · turnGain, clamped.
+     *   thrust        ∈ [0, thrustMax] — p2 · thrustGain, clamped.
+     *   brake         ∈ [0, brakeMax]  — (1 − p1) · brakeGain, clamped.
+     *
+     * Pure: no DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function computePolarStickInput(dx, dy, params) {
+        const deadZonePx = Math.max(0, params.deadZonePx || 0);
+        // thresholdPx must strictly exceed deadZonePx so the p1 ramp has a
+        // non-zero span; otherwise p1 jumps from 0 to 1 the instant the
+        // finger leaves the dead-zone.
+        const thresholdPx = Math.max(deadZonePx + 1e-6, params.thresholdPx || 0);
+        const radiusPx = Math.max(1e-6, params.radiusPx || 0);
+        const turnGain = params.turnGain || 0;
+        const turnMax = Math.max(0, params.turnMax || 0);
+        const thrustGain = params.thrustGain || 0;
+        const thrustMax = Math.max(0, params.thrustMax || 0);
+        const brakeGain = params.brakeGain || 0;
+        const brakeMax = Math.max(0, params.brakeMax || 0);
+
+        const r = Math.hypot(dx, dy);
+        // Brake is decoupled from the dead-zone: scales linearly from full
+        // at r=0 to zero at r=thresholdPx, then stays clamped at zero past
+        // threshold. Computed up front so the inactive (in-dead-zone)
+        // return path still surfaces the brake — the dead-zone is the
+        // "high brake" region of the polar control, not an idle region.
+        const brake = Math.max(0, Math.min(brakeMax,
+            Math.max(0, 1 - r / thresholdPx) * brakeGain));
+
+        if (r <= deadZonePx) {
+            return {
+                active: false,
+                radius: r,
+                targetAngle: 0,
+                turnMagnitude: 0,
+                thrust: 0,
+                brake,
+            };
+        }
+
+        const targetAngle = Math.atan2(dy, dx);
+        const span = thresholdPx - deadZonePx;
+        const p1 = Math.min(1, (r - deadZonePx) / span);
+        // Mirrors computeStickInput's "1.0 of input per radiusPx past the
+        // dead zone" — here the dead-zone for the 2nd parameter is the
+        // threshold radius.
+        const p2 = Math.max(0, (r - thresholdPx) / radiusPx);
+
+        const turnMagnitude = Math.max(0, Math.min(turnMax, p1 * turnGain));
+        const thrust = Math.max(0, Math.min(thrustMax, p2 * thrustGain));
+
+        return {
+            active: true,
+            radius: r,
+            targetAngle,
+            turnMagnitude,
+            thrust,
+            brake,
+        };
+    }
+
+    /**
+     * Combine two signed turn-input commands into a single command in
+     * [−1, +1]. Used by the polar touch scheme to merge the left-anchor's
+     * heading-tracking turn with the right-anchor's rectilinear turn so
+     * both fingers can contribute simultaneously (and oppose each other
+     * symmetrically when needed). Each per-anchor input is already clamped
+     * to ≤ TOUCH_TURN_MAX (≤ 1), so the clamp here only kicks in when both
+     * fingers are pushing past 0.5 in the same direction; in normal play
+     * the sum stays in-range and the clamp is a no-op.
+     *
+     * Pure: no DOM / globals — exercised by touch-polar-input.test.mjs.
+     */
+    function mergeTurnInputs(a, b) {
+        const sum = (a || 0) + (b || 0);
+        if (sum >  1) return  1;
+        if (sum < -1) return -1;
+        return sum;
+    }
+
+    /**
+     * Tangent-line geometry for the polar anchor's "two-sided triangle"
+     * overlay. The triangle's apex sits at the perturbed touch point P (at
+     * distance `r` from the anchor, angle `theta`); the two visible edges
+     * are line segments from P tangent to the dead-zone circle (radius
+     * `d`), touching at T1 and T2; the third (missing / invisible) edge is
+     * the chord T1→T2.
+     *
+     * Geometry: in right-triangle O-T-P with O at the anchor, T a tangent
+     * point on the dead-zone circle, and the right angle at T (tangent
+     * perpendicular to radius), angle at O is φ = arccos(d/r). By
+     * symmetry across OP the two tangent points sit at angles θ±φ on the
+     * dead-zone circle.
+     *
+     * The companion arc (drawn in place of the full dead-zone circle while
+     * the triangle is active) connects T1 and T2 along the far side of the
+     * circle — passing through angle θ+π so its apex faces away from P.
+     * In canvas-2D `arc(cx, cy, d, start, end)` (default direction =
+     * +angle), starting at θ+φ and ending at θ−φ does exactly that: the
+     * canvas wraps end by +2π and sweeps the long way through θ+π.
+     *
+     *   r     : finger radius from anchor (px in target context).
+     *   d     : dead-zone radius (same units as r).
+     *   theta : direction from anchor to P, radians (atan2(dy, dx)).
+     *
+     * Returns null if r ≤ d (no triangle when finger is inside dead-zone)
+     * or d ≤ 0 (degenerate dead-zone — tangent points collapse to origin,
+     * triangle has no enclosed area). Otherwise returns the apex (px, py)
+     * = P, the two tangent points t1/t2 in anchor-relative coords, the
+     * half-angle phi, and the canvas-ready arcStartAngle / arcEndAngle.
+     */
+    function polarAnchorTangentGeometry(r, d, theta) {
+        if (!(r > d) || !(d > 0)) return null;
+        const phi = Math.acos(d / r);
+        const a1 = theta + phi;
+        const a2 = theta - phi;
+        return {
+            apexX: r * Math.cos(theta),
+            apexY: r * Math.sin(theta),
+            t1x: d * Math.cos(a1),
+            t1y: d * Math.sin(a1),
+            t2x: d * Math.cos(a2),
+            t2y: d * Math.sin(a2),
+            phi,
+            arcStartAngle: a1,
+            arcEndAngle: a2,
+        };
+    }
+
+    /**
      * Build the 8-vertex polygon for the anchor overlay
      * (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED). Coordinates are returned relative
      * to the anchor — callers translate the canvas context to the anchor and
@@ -3946,6 +4248,8 @@
         'TOUCH_BRAKE_GAIN',
         'TOUCH_STICK_TURN_DEADZONE_PX',
         'TOUCH_STICK_THRUST_DEADZONE_PX',
+        'TOUCH_POLAR_DEADZONE_PX',
+        'TOUCH_POLAR_THRESHOLD_PX',
         'TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST',
     ]);
     debugChannel.onmessage = (event) => {
@@ -4056,18 +4360,26 @@
     };
 
     /**
-     * Virtual-stick touch state (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED).
-     * Multi-touch: at most one movement anchor (left half) and one fire anchor
-     * (right half) at any time. Identifiers come from Touch.identifier so we can
-     * correlate move/end events with the originating touchstart. Anchors are
-     * logical — no UI is rendered today, but coords are kept current so a future
-     * skin can draw a base ring + thumb at (anchorX, anchorY) → (currentX, currentY).
+     * Anchor-based touch state (used by the `rectilinear` and `polar` schemes;
+     * unused in `classic`). Multi-touch: at most one movement anchor (left
+     * half) and one fire anchor (right half) at any time. Identifiers come
+     * from Touch.identifier so we can correlate move/end events with the
+     * originating touchstart. Anchors are logical — no UI is rendered today,
+     * but coords are kept current so the visualization layer can draw a base
+     * ring + thumb at (anchorX, anchorY) → (currentX, currentY).
      *
      * Coordinates are in CSS pixels relative to the viewport (clientX/clientY).
-     * They survive dynamic device rotation because computeStickInput rescales
+     * They survive dynamic device rotation because the compute helpers rescale
      * against the *current* min(viewport width, height) each frame; on
-     * orientationchange / visibility loss we reset the state outright so a stale
-     * anchor can't drive input across an aspect-ratio change.
+     * orientationchange / visibility loss we reset the state outright so a
+     * stale anchor can't drive input across an aspect-ratio change.
+     *
+     * Polar-scheme cache: when scheme === 'polar', the left anchor produces
+     * (targetAngle, turnMagnitude, thrust, brake) instead of a signed turn —
+     * the signed turn target is computed each frame in handleInput once the
+     * ship's current heading is known. Fields prefixed `polar*` are populated
+     * only by the polar scheme; the rectilinear scheme keeps using the
+     * legacy turn/thrust/brake fields above.
      */
     const stickInput = {
         moveTouchId: null,
@@ -4076,16 +4388,27 @@
         fireTouchId: null,
         fireAnchorX: 0, fireAnchorY: 0,
         fireCurrentX: 0, fireCurrentY: 0,
-        // Cached per-frame analog values produced from the move anchor.
+        // Cached per-frame analog values produced from the move anchor under
+        // the rectilinear scheme.
         turnTarget: 0,
         thrustInput: 0,
         brakeInput: 0,
         // Cached per-frame analog values produced from the fire anchor.
-        // The right (fire) anchor drives thrust/brake too — lateral motion is
-        // ignored. handleInput combines these with the move-anchor outputs via
-        // max() so either anchor can drive forward thrust or braking.
+        // The right (fire) anchor drives thrust/brake too — lateral motion
+        // produces a rectilinear turn input (used by handleInput's POLAR
+        // branch, ignored by the rectilinear branch). handleInput combines
+        // these with the move-anchor outputs (thrust/brake via max();
+        // turn via signed sum + clamp — see mergeTurnInputs).
+        fireTurnTarget: 0,
         fireThrustInput: 0,
         fireBrakeInput: 0,
+        // Polar-scheme left-anchor cache (see computePolarStickInput).
+        polarActive: false,
+        polarRadius: 0,
+        polarTargetAngle: 0,
+        polarTurnMagnitude: 0,
+        polarThrust: 0,
+        polarBrake: 0,
     };
 
     function resetStickInput() {
@@ -4094,20 +4417,23 @@
         stickInput.turnTarget = 0;
         stickInput.thrustInput = 0;
         stickInput.brakeInput = 0;
+        stickInput.fireTurnTarget = 0;
         stickInput.fireThrustInput = 0;
         stickInput.fireBrakeInput = 0;
+        stickInput.polarActive = false;
+        stickInput.polarRadius = 0;
+        stickInput.polarTargetAngle = 0;
+        stickInput.polarTurnMagnitude = 0;
+        stickInput.polarThrust = 0;
+        stickInput.polarBrake = 0;
     }
 
-    function isVirtualStickEnabled() {
-        return CONFIG.TOUCH_VIRTUAL_STICK_ENABLED === true;
-    }
-    
     // Unified input helpers
     const input = {
         left: () => keys['ArrowLeft'] || keys['KeyA'] || touch.left,
         right: () => keys['ArrowRight'] || keys['KeyD'] || touch.right,
         thrust: () => keys['ArrowUp'] || keys['KeyW'] || touch.thrust,
-        fire: () => keys['Space'] || touch.fire || (isVirtualStickEnabled() && stickInput.fireTouchId !== null)
+        fire: () => keys['Space'] || touch.fire || (isAnchorSchemeEnabled() && stickInput.fireTouchId !== null)
     };
 
     // ============================================
@@ -5460,28 +5786,67 @@
         let thrustMag = thrustOn ? 1 : 0;
         let brakeMag = 0;
 
-        if (isVirtualStickEnabled()) {
-            // Left (move) anchor drives turn + thrust + brake when held.
+        if (isAnchorSchemeEnabled()) {
+            const scheme = getTouchScheme();
+            // Left (move) anchor drives turn + thrust + brake when held. The
+            // rectilinear scheme caches signed turn/thrust/brake directly; the
+            // polar scheme caches (targetAngle, turnMagnitude, thrust, brake)
+            // and the signed turn target is resolved here using the ship's
+            // current heading. shortestAngleDelta picks the rotation direction
+            // that aligns ship.angle to the finger-vs-anchor vector with the
+            // minimum sweep.
             if (stickInput.moveTouchId !== null) {
-                turnTarget = stickInput.turnTarget;
-                thrustMag = stickInput.thrustInput;
-                brakeMag = stickInput.brakeInput;
+                if (scheme === TOUCH_SCHEMES.POLAR && stickInput.polarActive) {
+                    const delta = shortestAngleDelta(
+                        stickInput.polarTargetAngle, game.ship.angle);
+                    // Cap the commanded turn so the ship can't sweep past the
+                    // target angle in one frame — eliminates the bang-bang
+                    // oscillation when |delta| is smaller than the per-frame
+                    // angular reach at full polarTurnMagnitude.
+                    turnTarget = attainableTurnTarget(
+                        delta,
+                        stickInput.polarTurnMagnitude,
+                        CONFIG.SHIP_TURN_SPEED,
+                        dt);
+                    thrustMag = stickInput.polarThrust;
+                    brakeMag  = stickInput.polarBrake;
+                } else if (scheme === TOUCH_SCHEMES.POLAR) {
+                    // Touch held but inside the polar dead-zone → no turn /
+                    // thrust, but brake STILL flows. computePolarStickInput
+                    // populated polarBrake from (1 − r/threshold), which is
+                    // at its strongest near r=0, so the dead-zone is the
+                    // "high brake" region of the control.
+                    turnTarget = 0;
+                    thrustMag = 0;
+                    brakeMag = stickInput.polarBrake;
+                } else {
+                    turnTarget = stickInput.turnTarget;
+                    thrustMag = stickInput.thrustInput;
+                    brakeMag = stickInput.brakeInput;
+                }
             }
-            // Right (fire) anchor also drives thrust/brake (vertical only);
-            // lateral motion is ignored. Turning is always left-only and is
-            // unaffected by this branch.
+            // Right (fire) anchor also drives thrust/brake — and, in the
+            // POLAR scheme only, turn as well (rectilinear-style lateral
+            // mapping; lets the right thumb steer + fire while the left
+            // thumb handles polar heading/thrust). In the rectilinear
+            // scheme the right-anchor turn is ignored and turning remains
+            // exclusively a left-anchor function.
             //
-            // CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST (default true): while
-            // the right anchor is held, it takes exclusive control of
-            // thrust/brake — left-anchor contributions are dropped, even if
-            // the right finger sits in its dead-zone (yielding zero). When
-            // the right anchor is released, thrust/brake fall back to the
-            // left anchor automatically.
+            // CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST (default false):
+            // when true, while the right anchor is held it takes exclusive
+            // control of thrust/brake — left-anchor contributions are
+            // dropped, even if the right finger sits in its dead-zone
+            // (yielding zero). When the right anchor is released,
+            // thrust/brake fall back to the left anchor automatically.
             //
-            // When the flag is false, both anchors are combined via Math.max
-            // so either can drive forward thrust or braking; values are
-            // already per-anchor clamped by computeStickInput, so max() stays
-            // within the configured limits.
+            // When the flag is false (default), both anchors are combined
+            // via Math.max so either can drive forward thrust or braking;
+            // values are already per-anchor clamped by computeStickInput,
+            // so max() stays within the configured limits.
+            //
+            // Turn merging in POLAR (always-combine; no exclusive flag):
+            // signed-sum-and-clamp via mergeTurnInputs — opposing fingers
+            // cancel, cooperating fingers reinforce up to ±1.
             if (stickInput.fireTouchId !== null) {
                 if (CONFIG.TOUCH_RIGHT_ANCHOR_EXCLUSIVE_THRUST) {
                     thrustMag = stickInput.fireThrustInput;
@@ -5489,6 +5854,9 @@
                 } else {
                     thrustMag = Math.max(thrustMag, stickInput.fireThrustInput);
                     brakeMag  = Math.max(brakeMag,  stickInput.fireBrakeInput);
+                }
+                if (scheme === TOUCH_SCHEMES.POLAR) {
+                    turnTarget = mergeTurnInputs(turnTarget, stickInput.fireTurnTarget);
                 }
             }
             thrustOn = thrustMag > 0;
@@ -5884,24 +6252,31 @@
     }
 
     /**
-     * Virtual-stick anchor overlays (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED).
-     * Renders the 8-vertex polygon produced by computeAnchorVertices, centered
-     * on each live anchor (left = move, right = fire). Coordinate conversion:
-     * anchor/finger are in CSS px (Touch.clientX/Y); we map them to canvas
-     * internal coords via canvas.getBoundingClientRect().
+     * Anchor overlays for the rectilinear and polar touch schemes
+     * (CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED). For each live anchor:
      *
+     *   rectilinear (both anchors): the 8-vertex polygon produced by
+     *     computeAnchorVertices, centered on the anchor.
+     *
+     *   polar (left anchor only; right keeps the rectilinear polygon since
+     *     its semantics are unchanged): up to three concentric circles
+     *     centered on the anchor —
+     *       • dead-zone circle (always while held), radius = DEADZONE_PX;
+     *       • dynamic circle (when r ≥ DEADZONE_PX), radius = finger r;
+     *       • threshold circle (when r ≥ THRESHOLD_PX), radius = THRESHOLD_PX.
+     *     The dynamic and threshold circles only appear once the finger
+     *     actually reaches their radius, so the overlay narrates exactly
+     *     which control band the player is in (turn / thrust transition).
+     *
+     * Coordinate conversion: anchor/finger are in CSS px (Touch.clientX/Y);
+     * we map them to canvas internal coords via canvas.getBoundingClientRect().
      * Drawn after the viewport restore so it lives in full-canvas coords and
      * is never clipped by the aspect-locked gameplay viewport. Hidden on
      * desktop, when no anchor is held, during pause / game-over, when the
-     * scheme is off, or when TOUCH_ANCHOR_VISUAL_ENABLED is false.
-     *
-     * The fire anchor uses the same overlay even though its lateral motion
-     * doesn't drive turning — keeping the visualization symmetric makes the
-     * dead-zone size legible on both halves and gives the player a consistent
-     * mental model of their finger position.
+     * scheme is classic, or when TOUCH_ANCHOR_VISUAL_ENABLED is false.
      */
     function drawStickAnchors(ctx) {
-        if (!CONFIG.TOUCH_VIRTUAL_STICK_ENABLED) return;
+        if (!isAnchorSchemeEnabled()) return;
         if (!CONFIG.TOUCH_ANCHOR_VISUAL_ENABLED) return;
         if (!touchControlsEnabled) return;
         if (game.state !== 'playing' && game.state !== 'waveDelay') return;
@@ -5924,7 +6299,7 @@
         ctx.strokeStyle = CONFIG.TOUCH_ANCHOR_STROKE_COLOR;
         ctx.lineWidth   = CONFIG.TOUCH_ANCHOR_LINE_WIDTH;
 
-        function strokeAnchor(anchorX, anchorY, currentX, currentY) {
+        function strokeRectAnchor(anchorX, anchorY, currentX, currentY) {
             const cx = (anchorX  - rect.left) * sx;
             const cy = (anchorY  - rect.top ) * sy;
             const dx = (currentX - anchorX) * sx;
@@ -5942,13 +6317,87 @@
             ctx.restore();
         }
 
-        if (stickInput.moveTouchId !== null) {
-            strokeAnchor(stickInput.moveAnchorX, stickInput.moveAnchorY,
-                         stickInput.moveCurrentX, stickInput.moveCurrentY);
+        function strokePolarAnchor(anchorX, anchorY, currentX, currentY) {
+            const cx = (anchorX  - rect.left) * sx;
+            const cy = (anchorY  - rect.top ) * sy;
+            const dx = (currentX - anchorX) * sx;
+            const dy = (currentY - anchorY) * sy;
+            const r = Math.hypot(dx, dy);
+            const deadZone  = CONFIG.TOUCH_POLAR_DEADZONE_PX  * sx;
+            const threshold = CONFIG.TOUCH_POLAR_THRESHOLD_PX * sx;
+            const theta = Math.atan2(dy, dx);
+            // Triangle geometry exists only when the finger has cleared the
+            // dead-zone (and the dead-zone has non-zero radius). When it
+            // exists, the dead-zone circle is replaced by an arc on the far
+            // side of the circle from P, ending at the tangent points T1/T2
+            // so the missing chord T1→T2 stays "behind" the triangle's
+            // (invisible) base.
+            const tri = polarAnchorTangentGeometry(r, deadZone, theta);
+            const pastThreshold = r > threshold;
+            ctx.save();
+            ctx.translate(cx, cy);
+            // Dead-zone: full circle when no triangle; far-side arc when the
+            // triangle is being drawn.
+            ctx.beginPath();
+            if (tri) {
+                ctx.arc(0, 0, deadZone, tri.arcStartAngle, tri.arcEndAngle);
+            } else {
+                ctx.arc(0, 0, deadZone, 0, Math.PI * 2);
+            }
+            ctx.stroke();
+            // Two-sided triangle: T1 → P (apex) → T2. The third edge (chord
+            // T1→T2) is intentionally not stroked; the arc above visually
+            // closes the figure on the far side.
+            if (tri) {
+                ctx.beginPath();
+                ctx.moveTo(tri.t1x, tri.t1y);
+                ctx.lineTo(tri.apexX, tri.apexY);
+                ctx.lineTo(tri.t2x, tri.t2y);
+                ctx.stroke();
+            }
+            // Threshold circle: always shown while the anchor is active so
+            // the player has a constant visual reference for the
+            // turn-vs-thrust transition radius. Once the finger crosses the
+            // threshold the dynamic circle is no longer drawn (it would just
+            // expand outside the threshold ring), so we recolor the threshold
+            // ring to THRUST_COLOR to give a clear "thrust engaged" signal —
+            // matches the ship's exhaust flame color.
+            ctx.save();
+            if (pastThreshold) ctx.strokeStyle = CONFIG.THRUST_COLOR;
+            ctx.beginPath();
+            ctx.arc(0, 0, threshold, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+            // Dynamic circle: only when the finger reaches the dead-zone AND
+            // has not yet crossed the threshold. Past the threshold the
+            // recolored threshold ring takes over the "thrust active"
+            // signaling and the dynamic circle would only clutter the view.
+            if (r >= deadZone && !pastThreshold) {
+                ctx.beginPath();
+                ctx.arc(0, 0, r, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            ctx.restore();
         }
+
+        const scheme = getTouchScheme();
+        if (stickInput.moveTouchId !== null) {
+            if (scheme === TOUCH_SCHEMES.POLAR) {
+                strokePolarAnchor(
+                    stickInput.moveAnchorX, stickInput.moveAnchorY,
+                    stickInput.moveCurrentX, stickInput.moveCurrentY);
+            } else {
+                strokeRectAnchor(
+                    stickInput.moveAnchorX, stickInput.moveAnchorY,
+                    stickInput.moveCurrentX, stickInput.moveCurrentY);
+            }
+        }
+        // The right (fire) anchor always uses the rectilinear overlay because
+        // its semantics are identical in both anchor-based schemes.
         if (stickInput.fireTouchId !== null) {
-            strokeAnchor(stickInput.fireAnchorX, stickInput.fireAnchorY,
-                         stickInput.fireCurrentX, stickInput.fireCurrentY);
+            strokeRectAnchor(
+                stickInput.fireAnchorX, stickInput.fireAnchorY,
+                stickInput.fireCurrentX, stickInput.fireCurrentY);
         }
 
         ctx.restore();
@@ -6429,8 +6878,8 @@
         e.preventDefault();
     }, { passive: false });
 
-    // ─── Virtual-stick touch scheme ──────────────────────────────────────────
-    // Anchor-based analog control (CONFIG.TOUCH_VIRTUAL_STICK_ENABLED).
+    // ─── Anchor-based touch schemes ──────────────────────────────────────────
+    // Active when CONFIG.TOUCH_CONTROL_SCHEME is 'rectilinear' or 'polar'.
     // The handlers are always wired; the early-return below makes them no-ops
     // when the legacy button scheme is active, so the same DOM works for both.
     {
@@ -6461,10 +6910,15 @@
         // Frame-time updater: recomputes cached analog values from the current
         // move and fire anchors each animation frame, so changes in viewport
         // size / orientation immediately affect mapping without per-event work.
-        // The fire anchor reuses computeStickInput but only the thrust/brake
-        // fields are consumed downstream — its turn output is discarded.
+        // The fire anchor reuses computeStickInput in every anchor-based
+        // scheme — only the thrust/brake fields are consumed downstream and
+        // its turn output is discarded. The MOVE anchor branches on scheme:
+        // rectilinear uses computeStickInput, polar uses computePolarStickInput
+        // (and caches a targetAngle that handleInput converts into a signed
+        // turn target once the ship's heading is known).
         function updateStickAnalog() {
-            const params = {
+            const scheme = getTouchScheme();
+            const rectParams = {
                 radiusPx: CONFIG.TOUCH_STICK_RADIUS_PX,
                 turnDeadzonePx: CONFIG.TOUCH_STICK_TURN_DEADZONE_PX,
                 thrustDeadzonePx: CONFIG.TOUCH_STICK_THRUST_DEADZONE_PX,
@@ -6478,22 +6932,64 @@
             if (stickInput.moveTouchId !== null) {
                 const dx = stickInput.moveCurrentX - stickInput.moveAnchorX;
                 const dy = stickInput.moveCurrentY - stickInput.moveAnchorY;
-                const out = computeStickInput(dx, dy, params);
-                stickInput.turnTarget = out.turn;
-                stickInput.thrustInput = out.thrust;
-                stickInput.brakeInput = out.brake;
+                if (scheme === TOUCH_SCHEMES.POLAR) {
+                    const polarParams = {
+                        radiusPx: CONFIG.TOUCH_STICK_RADIUS_PX,
+                        deadZonePx: CONFIG.TOUCH_POLAR_DEADZONE_PX,
+                        thresholdPx: CONFIG.TOUCH_POLAR_THRESHOLD_PX,
+                        turnGain: CONFIG.TOUCH_TURN_GAIN,
+                        turnMax: CONFIG.TOUCH_TURN_MAX,
+                        thrustGain: CONFIG.TOUCH_THRUST_GAIN,
+                        thrustMax: CONFIG.TOUCH_THRUST_MAX,
+                        brakeGain: CONFIG.TOUCH_BRAKE_GAIN,
+                        brakeMax: CONFIG.TOUCH_BRAKE_MAX,
+                    };
+                    const out = computePolarStickInput(dx, dy, polarParams);
+                    stickInput.polarActive = out.active;
+                    stickInput.polarRadius = out.radius;
+                    stickInput.polarTargetAngle = out.targetAngle;
+                    stickInput.polarTurnMagnitude = out.turnMagnitude;
+                    stickInput.polarThrust = out.thrust;
+                    stickInput.polarBrake = out.brake;
+                    // Clear the rectilinear cache so a mid-session scheme
+                    // change (e.g. via debug override) doesn't leak stale
+                    // values into handleInput's rectilinear branch.
+                    stickInput.turnTarget = 0;
+                    stickInput.thrustInput = 0;
+                    stickInput.brakeInput = 0;
+                } else {
+                    const out = computeStickInput(dx, dy, rectParams);
+                    stickInput.turnTarget = out.turn;
+                    stickInput.thrustInput = out.thrust;
+                    stickInput.brakeInput = out.brake;
+                    stickInput.polarActive = false;
+                    stickInput.polarRadius = 0;
+                    stickInput.polarTurnMagnitude = 0;
+                    stickInput.polarThrust = 0;
+                    stickInput.polarBrake = 0;
+                }
             } else {
                 stickInput.turnTarget = 0;
                 stickInput.thrustInput = 0;
                 stickInput.brakeInput = 0;
+                stickInput.polarActive = false;
+                stickInput.polarRadius = 0;
+                stickInput.polarTurnMagnitude = 0;
+                stickInput.polarThrust = 0;
+                stickInput.polarBrake = 0;
             }
             if (stickInput.fireTouchId !== null) {
                 const dx = stickInput.fireCurrentX - stickInput.fireAnchorX;
                 const dy = stickInput.fireCurrentY - stickInput.fireAnchorY;
-                const out = computeStickInput(dx, dy, params);
+                const out = computeStickInput(dx, dy, rectParams);
+                // Lateral motion → turn (consumed by handleInput only when
+                // scheme=polar; the rectilinear scheme ignores fireTurnTarget
+                // and keeps turning exclusively on the left anchor).
+                stickInput.fireTurnTarget  = out.turn;
                 stickInput.fireThrustInput = out.thrust;
                 stickInput.fireBrakeInput  = out.brake;
             } else {
+                stickInput.fireTurnTarget  = 0;
                 stickInput.fireThrustInput = 0;
                 stickInput.fireBrakeInput  = 0;
             }
@@ -6502,7 +6998,7 @@
         requestAnimationFrame(updateStickAnalog);
 
         gameContainer.addEventListener('touchstart', (e) => {
-            if (!isVirtualStickEnabled()) return;
+            if (!isAnchorSchemeEnabled()) return;
             for (const t of e.changedTouches) {
                 if (!isStickTouchTarget(t.target)) continue;
                 const side = classifyTouchSide(t.clientX, t.clientY);
@@ -6527,7 +7023,7 @@
         }, { passive: false });
 
         gameContainer.addEventListener('touchmove', (e) => {
-            if (!isVirtualStickEnabled()) return;
+            if (!isAnchorSchemeEnabled()) return;
             for (const t of e.changedTouches) {
                 if (t.identifier === stickInput.moveTouchId) {
                     stickInput.moveCurrentX = t.clientX;
@@ -6546,8 +7042,14 @@
                     stickInput.turnTarget = 0;
                     stickInput.thrustInput = 0;
                     stickInput.brakeInput = 0;
+                    stickInput.polarActive = false;
+                    stickInput.polarRadius = 0;
+                    stickInput.polarTurnMagnitude = 0;
+                    stickInput.polarThrust = 0;
+                    stickInput.polarBrake = 0;
                 } else if (t.identifier === stickInput.fireTouchId) {
                     stickInput.fireTouchId = null;
+                    stickInput.fireTurnTarget  = 0;
                     stickInput.fireThrustInput = 0;
                     stickInput.fireBrakeInput  = 0;
                 }
